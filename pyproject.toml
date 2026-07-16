@@ -33,6 +33,34 @@ test = [
 [project.scripts]
 course-select = "main:main"
 
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["security", "services", "static_dist"]
+py-modules = [
+    "app",
+    "card_key",
+    "choose_course",
+    "config",
+    "course_list",
+    "course_models",
+    "cus_base64",
+    "database",
+    "desencode",
+    "generate_card_key",
+    "logging_config",
+    "logic",
+    "main",
+    "project_paths",
+    "school_password",
+    "school_session",
+]
+
+[tool.setuptools.package-data]
+static_dist = ["*.avif", "*.css", "*.html", "*.ico", "*.js"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 
