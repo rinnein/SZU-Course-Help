@@ -9,7 +9,7 @@
 ![Python](https://img.shields.io/badge/Python-3.13-3776AB?logo=python&logoColor=white)
 ![FastAPI](https://img.shields.io/badge/FastAPI-local%20WebUI-009688?logo=fastapi&logoColor=white)
 ![Platform](https://img.shields.io/badge/platform-Windows-0078D4?logo=windows&logoColor=white)
-![License](https://img.shields.io/badge/license-not%20specified-lightgrey)
+[![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
 面向深圳大学本科选课系统的本地辅助工具，用于登录、浏览课程、维护待处理清单、查看已选课程，并在学校允许的复选、正选或补选阶段执行受保护的自动选课任务。
 
@@ -322,4 +322,4 @@ V3 已弃用旧版固定主密钥方案。Card Key 还与当前安装的 Ed25519
 
 本项目是非官方工具，与深圳大学及其选课系统运营方无隶属或授权关系。学校接口、规则和页面可能随时变化。使用者应遵守学校规章、适用法律和上游系统限制，并自行承担账号、选课结果与系统风控风险。
 
-**当前仓库未附带开源许可证。公开可读不代表获得复制、修改、分发或商业使用授权。** 后续如需开放协作，请由仓库所有者明确选择并添加许可证。
+项目采用 [MIT License](LICENSE) 发布。许可证允许使用、复制、修改、合并、发布和分发，但软件按“原样”提供，不附带任何明示或默示担保。学校系统使用规则与适用法律仍独立约束每位使用者。
