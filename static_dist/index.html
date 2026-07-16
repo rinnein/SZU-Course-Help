@@ -1,0 +1,168 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>抢课工作台 | 深大抢课助手</title>
+  <link rel="icon" href="/favicon.ico">
+  <link rel="stylesheet" href="/styles.css?build=20260716.1">
+</head>
+<body class="app-page">
+  <header class="topbar">
+    <a class="brand-lockup" href="/" aria-label="深大抢课助手首页">
+      <span class="brand-mark" aria-hidden="true">SZU</span>
+      <span>
+        <strong>深大抢课助手</strong>
+        <small>Course Rush Console</small>
+      </span>
+    </a>
+    <div class="topbar-actions">
+      <span id="taskIndicator" class="task-indicator" hidden>抢课中</span>
+      <span id="studentLabel" class="student-label">未登录</span>
+      <button id="openMyCourses" class="button button-quiet" type="button">我的课程</button>
+      <button id="openCart" class="button button-secondary cart-button" type="button">
+        选课清单 <span id="cartCount" class="count-badge">0</span>
+      </button>
+      <button id="logoutButton" class="button button-quiet" type="button">退出登录</button>
+    </div>
+  </header>
+
+  <div class="workspace">
+    <nav class="course-nav" aria-label="课程目录">
+      <p class="nav-label">课程目录</p>
+      <div id="categoryList" class="category-list">
+        <button class="category-button is-active" data-type="TJKC" type="button"><span>本班推荐</span><small>TJKC</small></button>
+        <button class="category-button" data-type="FANKC" type="button"><span>方案内课程</span><small>FANKC</small></button>
+        <button class="category-button" data-type="FAWKC" type="button"><span>方案外课程</span><small>FAWKC</small></button>
+        <button class="category-button" data-type="XGXK" type="button"><span>校公选课</span><small>XGXK</small></button>
+        <button class="category-button" data-type="TYKC" type="button"><span>体育课程</span><small>TYKC</small></button>
+        <button class="category-button" data-type="MOOC" type="button"><span>慕课</span><small>MOOC</small></button>
+        <button class="category-button" data-type="FXKC" type="button"><span>辅修课程</span><small>暂不支持</small></button>
+      </div>
+      <div class="legend">
+        <p class="nav-label">状态说明</p>
+        <span><i class="legend-dot legend-ok"></i>可加入</span>
+        <span><i class="legend-dot legend-full"></i>已满，可候补</span>
+        <span><i class="legend-dot legend-blocked"></i>冲突或已选</span>
+      </div>
+    </nav>
+
+    <main class="course-main">
+      <section id="phaseBanner" class="phase-banner" aria-live="polite">
+        <div>
+          <strong id="phaseTitle">正在读取选课批次</strong>
+          <p id="phaseDescription">请稍候。</p>
+        </div>
+        <div class="phase-actions">
+          <span id="phaseBadge" class="status-pill status-neutral">未知批次</span>
+          <button id="refreshPhase" class="button button-quiet phase-refresh" type="button">重新检查状态</button>
+        </div>
+      </section>
+
+      <header class="course-toolbar">
+        <div>
+          <p id="courseTypeCode" class="eyebrow">TJKC</p>
+          <h1 id="courseTitle">本班推荐</h1>
+          <p id="courseSummary" class="toolbar-summary">正在读取课程</p>
+        </div>
+        <div class="toolbar-controls">
+          <label class="search-field">
+            <span class="sr-only">筛选本页课程</span>
+            <input id="courseSearch" type="search" placeholder="筛选本页课程" autocomplete="off">
+          </label>
+          <button id="refreshCourses" class="button button-secondary" type="button">刷新课程</button>
+        </div>
+      </header>
+
+      <section id="courseList" class="course-list" aria-live="polite"></section>
+
+      <nav class="pagination" aria-label="课程分页">
+        <button id="previousPage" class="button button-secondary" type="button">上一页</button>
+        <span id="pageLabel">第 1 页</span>
+        <button id="nextPage" class="button button-secondary" type="button">下一页</button>
+      </nav>
+    </main>
+  </div>
+
+  <dialog id="cartDialog" class="drawer-dialog">
+    <div class="dialog-header">
+      <div>
+        <p class="eyebrow">本地清单</p>
+        <h2>待处理课程</h2>
+      </div>
+      <button class="dialog-close" type="button" data-close-dialog="cartDialog" aria-label="关闭">×</button>
+    </div>
+    <div id="cartList" class="cart-list"></div>
+    <section id="enrollProgress" class="enroll-progress" hidden>
+      <div class="progress-head">
+        <strong>实时抢课进度</strong>
+        <span id="progressCounts" class="progress-counts">0 / 0</span>
+      </div>
+      <div class="progress-bar"><i id="progressBarFill"></i></div>
+      <div id="progressRows" class="progress-rows"></div>
+    </section>
+    <div class="dialog-footer">
+      <p id="cartHint">满员课程可以加入清单；冲突课程不能加入。</p>
+      <button id="openEnrollConfirm" class="button button-danger button-block" type="button">启动抢课</button>
+    </div>
+  </dialog>
+
+  <dialog id="myCoursesDialog" class="drawer-dialog">
+    <div class="dialog-header">
+      <div>
+        <p class="eyebrow">学校数据</p>
+        <h2>我的课程</h2>
+      </div>
+      <button class="dialog-close" type="button" data-close-dialog="myCoursesDialog" aria-label="关闭">×</button>
+    </div>
+    <div id="myCoursesList" class="my-courses-list"></div>
+    <div class="dialog-footer">
+      <p id="myCoursesHint">这里显示学校系统中当前学号已选中的课程。</p>
+      <button id="refreshMyCourses" class="button button-secondary button-block" type="button">刷新已选课程</button>
+    </div>
+  </dialog>
+
+  <dialog id="enrollDialog" class="confirm-dialog">
+    <form method="dialog">
+      <div class="dialog-header">
+        <div>
+          <p class="eyebrow">阶段确认</p>
+          <h2>确认启动抢课</h2>
+        </div>
+        <button class="dialog-close" value="cancel" aria-label="关闭">×</button>
+      </div>
+      <div class="confirm-content">
+        <p>仅在复选、正选或补选阶段启动。预选阶段由系统抽签，不应使用自动抢课。</p>
+        <label class="check-row">
+          <input id="phaseConfirmation" type="checkbox">
+          <span>我已确认当前不是预选阶段</span>
+        </label>
+        <div id="enrollMessage" class="form-message" role="status" aria-live="polite"></div>
+      </div>
+      <div class="confirm-actions">
+        <button class="button button-secondary" value="cancel">取消</button>
+        <button id="startEnroll" class="button button-danger" type="button" disabled>确认启动</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="sessionDialog" class="confirm-dialog">
+    <div class="dialog-header">
+      <div>
+        <p class="eyebrow">会话已结束</p>
+        <h2>需要重新登录</h2>
+      </div>
+    </div>
+    <div class="confirm-content">
+      <p id="sessionMessage">当前没有有效登录状态，请返回登录页重新点击验证码。</p>
+    </div>
+    <div class="confirm-actions">
+      <a class="button button-primary" href="/login">返回登录页</a>
+    </div>
+  </dialog>
+
+  <div id="toastRegion" class="toast-region" aria-live="polite" aria-atomic="true"></div>
+  <script src="/course-app.js?build=20260716.1" defer></script>
+</body>
+</html>

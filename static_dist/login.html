@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>登录 | 深大抢课助手</title>
+  <link rel="icon" href="/favicon.ico">
+  <link rel="stylesheet" href="/styles.css?build=20260716.1">
+</head>
+<body class="login-page">
+  <section class="login-visual" aria-label="深大抢课助手">
+    <div class="login-visual-copy">
+      <div class="brand-lockup brand-lockup-light">
+        <span class="brand-mark" aria-hidden="true">SZU</span>
+        <span>
+          <strong>深大抢课助手</strong>
+          <small>Course Rush Console</small>
+        </span>
+      </div>
+      <p class="headline">选课季，<em>稳、准、快</em><br>一步到位</p>
+      <p id="phaseNotice">预选阶段只浏览和整理课程，自动抢课仅用于复选、正选或补选。</p>
+      <span class="login-authors">作者 · <b>Weeye</b> · <b>Misakait</b></span>
+    </div>
+  </section>
+
+  <main class="login-main">
+    <div class="login-shell">
+      <header class="login-header">
+        <p class="eyebrow">本地安全登录</p>
+        <h1>进入抢课工作台</h1>
+        <p>首次登录请按图中提示，依次点击四个汉字。</p>
+      </header>
+
+      <form id="loginForm" class="login-form" novalidate>
+        <label class="field">
+          <span>学号</span>
+          <input id="studentId" name="student_id" inputmode="numeric" autocomplete="username" maxlength="12" placeholder="请输入学号" required>
+        </label>
+
+        <label class="field">
+          <span>密码</span>
+          <span class="input-with-action">
+            <input id="password" name="password" type="password" autocomplete="current-password" placeholder="请输入选课系统密码" required>
+            <button id="passwordToggle" class="field-action" type="button" aria-label="显示密码">显示</button>
+          </span>
+        </label>
+
+        <label class="field">
+          <span>Card Key V3</span>
+          <textarea id="cardKey" name="card_key" rows="3" spellcheck="false" autocomplete="off" placeholder="启动终端后生成的学号专属卡密" required></textarea>
+        </label>
+
+        <fieldset class="captcha-fieldset">
+          <legend>
+            <span>点击验证码</span>
+            <span id="captchaProgress" class="captcha-progress">0 / 4</span>
+          </legend>
+          <div id="captchaStage" class="captcha-stage" aria-busy="true">
+            <img id="captchaImage" alt="点击验证码" draggable="false">
+            <div id="captchaMarkers" class="captcha-markers" aria-hidden="true"></div>
+            <div id="captchaLoading" class="captcha-loading">正在获取验证码</div>
+          </div>
+          <div class="captcha-actions">
+            <button id="undoPoint" class="button button-quiet" type="button" disabled>撤销一点</button>
+            <button id="refreshCaptcha" class="button button-quiet" type="button">刷新验证码</button>
+          </div>
+        </fieldset>
+
+        <div id="loginMessage" class="form-message" role="status" aria-live="polite"></div>
+        <button id="loginButton" class="button button-primary button-block" type="submit">
+          登录并进入工作台
+        </button>
+      </form>
+
+      <p class="privacy-note">密码仅保存在本次进程内存中，用于会话过期后的 OCR 自动重登录。</p>
+    </div>
+  </main>
+
+  <noscript>此页面需要启用 JavaScript。</noscript>
+  <script src="/login.js?build=20260716.1" defer></script>
+</body>
+</html>
