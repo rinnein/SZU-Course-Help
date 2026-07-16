@@ -8,7 +8,7 @@
 [![CI](https://github.com/Weeye-hua/SZU-Course-Help/actions/workflows/ci.yml/badge.svg)](https://github.com/Weeye-hua/SZU-Course-Help/actions/workflows/ci.yml)
 ![Python](https://img.shields.io/badge/Python-3.13-3776AB?logo=python&logoColor=white)
 ![FastAPI](https://img.shields.io/badge/FastAPI-local%20WebUI-009688?logo=fastapi&logoColor=white)
-![Platform](https://img.shields.io/badge/platform-Windows-0078D4?logo=windows&logoColor=white)
+![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-44546A)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
 面向深圳大学本科选课系统的本地辅助工具，用于登录、浏览课程、维护待处理清单、查看已选课程，并在学校允许的复选、正选或补选阶段执行受保护的自动选课任务。
@@ -20,6 +20,22 @@
 > 预选阶段由学校抽签，本项目会禁止启动自动抢课。批次未知、未开放、已结束或无法向学校确认时同样禁止启动。请遵守学校规定并自行承担使用责任。
 
 ![课程工作台](docs/images/workbench.png)
+
+## 无需 Python：直接下载 Release
+
+不熟悉 Python、Conda 或命令行的用户，请直接前往 **[Releases 下载页面](https://github.com/Weeye-hua/SZU-Course-Help/releases/latest)**，下载与系统匹配的压缩包。发布包已经包含程序、OCR 依赖、Markdown/PDF 使用手册和平台启动脚本，完整解压后即可运行。
+
+- Windows 10/11 x64：双击 `启动抢课助手.bat` 或 `SZU-Course-Help.exe`。
+- macOS Apple 芯片：下载 `macos-arm64`，双击 `启动抢课助手.command`。
+- macOS Intel：下载 `macos-x64`，双击 `启动抢课助手.command`。
+- Linux x64：运行 `启动抢课助手.sh`。
+
+首次运行时，终端会要求输入学号、生成本机 Card Key，并询问是否进入系统。输入 `Y` 后会自动启动本地服务并打开浏览器登录页。详细步骤见 [Markdown 使用手册](docs/USER_GUIDE.md) 和 [PDF 使用手册](output/pdf/SZU-Course-Help-User-Guide.pdf)。
+
+Release 页面同时提供每个压缩包的 `.sha256` 文件和总表 `SHA256SUMS.txt`，可用于核对下载文件是否完整、是否被替换。
+
+> [!NOTE]
+> 发布程序目前未购买 Windows 或 Apple 商业代码签名证书，系统可能显示未知开发者提示。请只从本仓库 Release 下载并核对 SHA256，不要运行群文件或网盘中的未知副本。
 
 ## 功能概览
 
@@ -36,7 +52,7 @@
 | Card Key V3 | 使用本机 Ed25519 身份签发学号绑定卡密，不再使用源码内置通用主密钥 |
 | 离线安全测试 | Pytest 会拦截所有未模拟的外部 `requests` 请求，不会误触真实选课接口 |
 
-## 快速开始
+## 源码运行
 
 ### 1. 获取源码
 

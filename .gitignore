@@ -15,6 +15,8 @@ Thumbs.db
 
 build/
 dist/
+release/
+tmp/
 CourseEnroll/
 *.build/
 *.dist/

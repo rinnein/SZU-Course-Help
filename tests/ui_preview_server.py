@@ -27,7 +27,8 @@ if PREVIEW_LOGGED_OUT:
     config.elective_batch_code = ""
     config.elective_batch_name = ""
 else:
-    config.student_id = "2024110122"
+    # Screenshots and demos must never expose a full student number.
+    config.student_id = "2024******"
     config.token = "preview-token"
     config.combined_cookie = "preview-cookie"
     if PREVIEW_PHASE == "closed":
