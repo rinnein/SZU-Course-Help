@@ -2,14 +2,22 @@
 
 本版本提供 Windows、macOS 和 Linux 原生发布包。普通用户请下载与自己系统匹配的 ZIP，不要下载 GitHub 自动附带的 Source code 压缩包。
 
+## v3.2.1 更新说明
+
+1. 修复学校在非开放时段不提供登录验证码时，页面长期停留在“正在获取验证码”的问题。
+2. 验证码加载现在明确区分当前时段不可用、请求超时、学校网络异常、异常响应和本地服务中断；每次失败都会结束加载并给出处理建议。
+3. 关闭时段不会自动循环获取验证码，登录按钮保持禁用；用户可在学校开放后点击“重新获取验证码”。
+4. OCR 的 50 次上限继续用于可恢复的识别失败；学校明确关闭验证码接口时立即停止，避免无意义请求。
+5. 新增相关 API、重试边界和前端终止状态测试，并完成桌面与移动端离线检查。
+
 | 系统 | 下载文件 | 启动方式 |
 | --- | --- | --- |
-| Windows 10/11 64 位 | `SZU-Course-Help-v3.2.0-windows-x64.zip` | 双击 `启动抢课助手.bat` |
-| Apple 芯片 Mac | `SZU-Course-Help-v3.2.0-macos-arm64.zip` | 双击 `启动抢课助手.command` |
-| Intel 芯片 Mac | `SZU-Course-Help-v3.2.0-macos-x64.zip` | 双击 `启动抢课助手.command` |
-| Linux 64 位 | `SZU-Course-Help-v3.2.0-linux-x64.zip` | 运行 `启动抢课助手.sh` |
+| Windows 10/11 64 位 | `SZU-Course-Help-v3.2.1-windows-x64.zip` | 双击 `启动抢课助手.bat` |
+| Apple 芯片 Mac | `SZU-Course-Help-v3.2.1-macos-arm64.zip` | 双击 `启动抢课助手.command` |
+| Intel 芯片 Mac | `SZU-Course-Help-v3.2.1-macos-x64.zip` | 双击 `启动抢课助手.command` |
+| Linux 64 位 | `SZU-Course-Help-v3.2.1-linux-x64.zip` | 运行 `启动抢课助手.sh` |
 
-每个发布包均含可执行程序、平台启动脚本、`使用手册.md`、`使用手册.pdf`、项目说明、许可证和包内文件校验清单。`SZU-Course-Help-v3.2.0-source.zip` 供开发者使用。
+每个发布包均含可执行程序、平台启动脚本、`使用手册.md`、`使用手册.pdf`、`更新记录.md`、项目说明、许可证和包内文件校验清单。`SZU-Course-Help-v3.2.1-source.zip` 供开发者使用。
 
 ## 首次运行
 

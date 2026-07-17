@@ -1,11 +1,28 @@
 from __future__ import annotations
 
 import pytest
+import requests
 
 import config
 import logic
 from school_password import encrypt_school_password
 from services import auth_service
+
+
+class DummyCaptchaResponse:
+    def __init__(self, payload, *, status_code=200, text=""):
+        self._payload = payload
+        self.status_code = status_code
+        self.text = text
+
+    def json(self):
+        if isinstance(self._payload, Exception):
+            raise self._payload
+        return self._payload
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise requests.HTTPError(f"HTTP {self.status_code}", response=self)
 
 
 def test_login_parameter_validation_requires_exact_four_valid_points():
@@ -122,6 +139,52 @@ def test_captcha_fetch_retries_transient_failure(monkeypatch):
 
     result = logic.fetch_vtoken_and_image(max_attempts=3)
     assert result["vtoken"] == "token"
+    assert len(calls) == 2
+
+
+def test_captcha_token_response_classifies_closed_window():
+    response = DummyCaptchaResponse(
+        {"code": "0", "msg": "当前非选课时间，验证码接口尚未开放", "data": {}},
+    )
+
+    with pytest.raises(logic.CaptchaUnavailableError):
+        logic._parse_captcha_token_response(response)
+
+
+def test_captcha_token_response_rejects_malformed_success_payload():
+    response = DummyCaptchaResponse({"code": "1", "data": {"token": ""}})
+
+    with pytest.raises(logic.CaptchaResponseError, match="missing or invalid"):
+        logic._parse_captcha_token_response(response)
+
+
+def test_captcha_unavailable_is_not_retried(monkeypatch):
+    calls = []
+
+    def unavailable():
+        calls.append(1)
+        raise logic.CaptchaUnavailableError("closed")
+
+    monkeypatch.setattr(logic, "_fetch_vtoken_and_image_once", unavailable)
+    monkeypatch.setattr(logic.time, "sleep", lambda *_: None)
+
+    with pytest.raises(logic.CaptchaUnavailableError):
+        logic.fetch_vtoken_and_image(max_attempts=50)
+    assert len(calls) == 1
+
+
+def test_captcha_fetch_preserves_exhausted_transient_failure(monkeypatch):
+    calls = []
+
+    def malformed():
+        calls.append(1)
+        raise logic.CaptchaResponseError("bad image")
+
+    monkeypatch.setattr(logic, "_fetch_vtoken_and_image_once", malformed)
+    monkeypatch.setattr(logic.time, "sleep", lambda *_: None)
+
+    with pytest.raises(logic.CaptchaResponseError, match="bad image"):
+        logic.fetch_vtoken_and_image(max_attempts=2)
     assert len(calls) == 2
 
 

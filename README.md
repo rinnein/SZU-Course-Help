@@ -34,6 +34,15 @@
 
 Release 页面同时提供每个压缩包的 `.sha256` 文件和总表 `SHA256SUMS.txt`，可用于核对下载文件是否完整、是否被替换。
 
+### v3.2.1 更新
+
+- 修复学校未开放验证码接口时，Release 登录页长期停留在“正在获取验证码”的问题。
+- 验证码区域现在明确区分关闭时段、请求超时、学校网络异常、畸形响应和本地服务中断；失败后停止加载，只允许用户手动重试。
+- 关闭时段不会自动循环请求验证码，登录按钮保持禁用；学校明确返回不可用状态时，OCR 自动重登录也会立即停止。
+- 新增验证码边界回归测试、离线关闭时段 UI 验证，以及桌面和移动端布局检查。
+
+完整版本记录见 [CHANGELOG.md](CHANGELOG.md)。
+
 > [!NOTE]
 > 发布程序目前未购买 Windows 或 Apple 商业代码签名证书，系统可能显示未知开发者提示。请只从本仓库 Release 下载并核对 SHA256，不要运行群文件或网盘中的未知副本。
 
@@ -286,6 +295,8 @@ python tests/ui_preview_server.py
 $env:COURSE_SELECT_PREVIEW_PHASE = "closed"      # 非开放期
 $env:COURSE_SELECT_PREVIEW_PHASE = "unknown"     # 无有效批次
 $env:COURSE_SELECT_PREVIEW_PHASE = "automatic"   # 补选阶段
+$env:COURSE_SELECT_PREVIEW_LOGGED_OUT = "1"
+$env:COURSE_SELECT_PREVIEW_CAPTCHA = "unavailable" # 验证码接口未开放
 python tests/ui_preview_server.py
 ```
 
@@ -307,6 +318,10 @@ python -m pip install -e ".[build]"
 ### 登录成功后为什么显示“暂未读取到选课批次”？
 
 登录接口成功，但学校没有返回有效批次。通常是选课尚未开放、批次切换或学校服务短暂波动。点击“重新检查开放状态”即可，本地清单不会丢失。
+
+### 为什么登录页显示“当前时段暂无验证码”？
+
+学校在预选、复选、正选、补选或补退选以外的时段，可能直接关闭登录验证码接口。程序会停止本次加载、禁用登录按钮并保留“重新获取验证码”按钮；等待学校开放或维护结束后再手动重试即可。该状态不表示密码或 Card Key 错误。
 
 ### 为什么非开放期看不到课程？
 

@@ -21,10 +21,27 @@ from school_password import encrypt_school_password
 from school_session import is_session_expired_response
 
 REQUEST_TIMEOUT = (5, 15)
+CAPTCHA_REQUEST_TIMEOUT = (3, 8)
 MAX_CAPTCHA_BYTES = 2 * 1024 * 1024
 CAPTCHA_WIDTH = 250
 CAPTCHA_HEIGHT = 80
 OCR_RETRY_DELAY_SECONDS = 0.25
+CAPTCHA_UNAVAILABLE_KEYWORDS = (
+    "非选课时间",
+    "不在选课时间",
+    "未开放",
+    "尚未开放",
+    "未开始",
+    "尚未开始",
+    "已结束",
+    "已截止",
+    "暂停",
+    "关闭",
+    "停选",
+    "维护",
+    "无选课批次",
+    "没有选课批次",
+)
 logger = logging.getLogger(__name__)
 
 
@@ -34,6 +51,14 @@ class SchoolBatchSessionExpiredError(RuntimeError):
 
 class ElectiveBatchUnavailableError(RuntimeError):
     """The school did not expose an active elective batch."""
+
+
+class CaptchaUnavailableError(RuntimeError):
+    """The school explicitly reports that login captcha is currently unavailable."""
+
+
+class CaptchaResponseError(RuntimeError):
+    """The school captcha response is present but cannot be safely consumed."""
 
 
 def _captcha_image_path() -> Path:
@@ -71,6 +96,9 @@ def verify_vcode(
                 solved_attempt = attempt
                 break
             last_error = RuntimeError("OCR did not return four valid coordinates")
+        except CaptchaUnavailableError:
+            logger.info("School captcha is unavailable; OCR relogin stopped without retrying")
+            raise
         except (ImportError, ModuleNotFoundError):
             raise
         except Exception as exc:
@@ -384,17 +412,56 @@ def recognize_captcha_centers() -> list[list[int]]:
     return result
 
 
+def _extract_captcha_message(payload: Any, response_text: str = "") -> str:
+    """Extract a short school status message without depending on one response schema."""
+    containers = [payload]
+    if isinstance(payload, dict) and isinstance(payload.get("data"), dict):
+        containers.append(payload["data"])
+    for container in containers:
+        if not isinstance(container, dict):
+            continue
+        for key in ("msg", "message", "errorMessage", "error", "detail"):
+            value = container.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    return str(response_text or "").strip()[:2000]
+
+
+def _looks_like_captcha_unavailable(message: str) -> bool:
+    normalized = str(message or "").strip()
+    return any(keyword in normalized for keyword in CAPTCHA_UNAVAILABLE_KEYWORDS)
+
+
+def _parse_captcha_token_response(response: requests.Response) -> str:
+    """Return a validated token while preserving closed-window and transport failures."""
+    response_text = str(getattr(response, "text", "") or "")
+    try:
+        payload = response.json()
+    except ValueError:
+        payload = None
+
+    school_message = _extract_captcha_message(payload, response_text)
+    if _looks_like_captcha_unavailable(school_message):
+        raise CaptchaUnavailableError("school captcha endpoint is not open")
+
+    response.raise_for_status()
+    if not isinstance(payload, dict):
+        raise CaptchaResponseError("school captcha token response is not JSON object")
+
+    data = payload.get("data")
+    token = data.get("token") if isinstance(data, dict) else None
+    if not isinstance(token, str) or not token.strip() or len(token) > 512:
+        raise CaptchaResponseError("school captcha token is missing or invalid")
+    return token.strip()
+
+
 def get_vtoken() -> str:
     time_stamp = int(time.time() * 1000)
     response = requests.post(
         config.SCHOOL_BASE_URL + f"student/4/vcode.do?timestamp={time_stamp}",
-        timeout=REQUEST_TIMEOUT,
+        timeout=CAPTCHA_REQUEST_TIMEOUT,
     )
-    response.raise_for_status()
-    token = response.json().get("data", {}).get("token")
-    if not token:
-        raise RuntimeError("学校验证码接口未返回 vtoken")
-    return token
+    return _parse_captcha_token_response(response)
 
 
 def _validate_captcha_image(image_data: bytes, content_type: str = "") -> None:
@@ -405,7 +472,7 @@ def _validate_captcha_image(image_data: bytes, content_type: str = "") -> None:
         or not image_data.startswith(b"\xff\xd8\xff")
         or (normalized_type and not normalized_type.startswith("image/"))
     ):
-        raise RuntimeError(
+        raise CaptchaResponseError(
             f"验证码图片响应异常(bytes={len(image_data)}, type={normalized_type or 'unknown'})"
         )
 
@@ -413,11 +480,11 @@ def _validate_captcha_image(image_data: bytes, content_type: str = "") -> None:
 def get_new_image() -> tuple[str, str]:
     vtoken = get_vtoken()
     vcode_url = config.SCHOOL_BASE_URL + f"student/vcode/image.do?vtoken={vtoken}"
-    response = requests.get(vcode_url, timeout=REQUEST_TIMEOUT)
+    response = requests.get(vcode_url, timeout=CAPTCHA_REQUEST_TIMEOUT)
     response.raise_for_status()
     cookie = response.headers.get("Set-Cookie", "")
     if not parse_cookie(cookie):
-        raise RuntimeError("验证码图片响应缺少必要 Cookie")
+        raise CaptchaResponseError("验证码图片响应缺少必要 Cookie")
     _validate_captcha_image(
         response.content,
         response.headers.get("Content-Type", ""),
@@ -445,17 +512,14 @@ def _fetch_vtoken_and_image_once() -> dict[str, str]:
     token_response = requests.post(
         f"{captcha_base_url}student/4/vcode.do?timestamp={timestamp}",
         headers=headers,
-        timeout=REQUEST_TIMEOUT,
+        timeout=CAPTCHA_REQUEST_TIMEOUT,
     )
-    token_response.raise_for_status()
-    vtoken = token_response.json().get("data", {}).get("token")
-    if not vtoken:
-        raise RuntimeError("学校验证码接口未返回 vtoken")
+    vtoken = _parse_captcha_token_response(token_response)
 
     image_response = requests.get(
         f"{captcha_base_url}student/vcode/image.do?vtoken={vtoken}",
         headers=headers,
-        timeout=REQUEST_TIMEOUT,
+        timeout=CAPTCHA_REQUEST_TIMEOUT,
     )
     image_response.raise_for_status()
     image_data = image_response.content
@@ -464,7 +528,7 @@ def _fetch_vtoken_and_image_once() -> dict[str, str]:
 
     cookie = image_response.headers.get("Set-Cookie", "")
     if not parse_cookie(cookie):
-        raise RuntimeError("验证码图片响应缺少必要 Cookie")
+        raise CaptchaResponseError("验证码图片响应缺少必要 Cookie")
 
     encoded = base64.b64encode(image_data).decode("ascii")
     return {
@@ -475,7 +539,7 @@ def _fetch_vtoken_and_image_once() -> dict[str, str]:
 
 
 def fetch_vtoken_and_image(max_attempts: int = 3) -> dict[str, str]:
-    """Fetch a click captcha, retrying transient empty or malformed responses."""
+    """Fetch a click captcha while preserving terminal and transient failures."""
     if isinstance(max_attempts, bool) or not isinstance(max_attempts, int):
         raise TypeError("max_attempts must be an integer")
     if max_attempts < 1:
@@ -484,12 +548,16 @@ def fetch_vtoken_and_image(max_attempts: int = 3) -> dict[str, str]:
     for attempt in range(1, max_attempts + 1):
         try:
             return _fetch_vtoken_and_image_once()
-        except (requests.RequestException, ValueError, RuntimeError) as exc:
+        except CaptchaUnavailableError:
+            raise
+        except (requests.RequestException, CaptchaResponseError, ValueError, RuntimeError) as exc:
             last_error = exc
             if attempt < max_attempts:
                 time.sleep(0.25 * attempt)
     logger.warning("Captcha fetch failed after %s attempts: %s", max_attempts, last_error)
-    return {"error": "验证码获取失败，请稍后重试"}
+    if last_error is None:  # Defensive guard; max_attempts validation makes this unreachable.
+        raise CaptchaResponseError("captcha fetch ended without a result")
+    raise last_error
 
 
 def _extract_named_cookies(cookie_string: str | None, names: tuple[str, ...]) -> str:

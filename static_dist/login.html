@@ -6,7 +6,7 @@
   <meta name="color-scheme" content="light">
   <title>登录 | 深大抢课助手</title>
   <link rel="icon" href="/favicon.ico">
-  <link rel="stylesheet" href="/styles.css?build=20260716.1">
+  <link rel="stylesheet" href="/styles.css?build=20260717.1">
 </head>
 <body class="login-page">
   <section class="login-visual" aria-label="深大抢课助手">
@@ -56,10 +56,13 @@
             <span>点击验证码</span>
             <span id="captchaProgress" class="captcha-progress">0 / 4</span>
           </legend>
-          <div id="captchaStage" class="captcha-stage" aria-busy="true">
+          <div id="captchaStage" class="captcha-stage" data-state="idle" aria-busy="false" aria-disabled="true">
             <img id="captchaImage" alt="点击验证码" draggable="false">
             <div id="captchaMarkers" class="captcha-markers" aria-hidden="true"></div>
-            <div id="captchaLoading" class="captcha-loading">正在获取验证码</div>
+            <div id="captchaStatus" class="captcha-status" role="status" aria-live="polite">
+              <strong id="captchaStatusTitle">准备获取验证码</strong>
+              <span id="captchaStatusDetail">正在准备本地登录环境。</span>
+            </div>
           </div>
           <div class="captcha-actions">
             <button id="undoPoint" class="button button-quiet" type="button" disabled>撤销一点</button>
@@ -68,7 +71,7 @@
         </fieldset>
 
         <div id="loginMessage" class="form-message" role="status" aria-live="polite"></div>
-        <button id="loginButton" class="button button-primary button-block" type="submit">
+        <button id="loginButton" class="button button-primary button-block" type="submit" disabled>
           登录并进入工作台
         </button>
       </form>
@@ -78,6 +81,6 @@
   </main>
 
   <noscript>此页面需要启用 JavaScript。</noscript>
-  <script src="/login.js?build=20260716.1" defer></script>
+  <script src="/login.js?build=20260717.1" defer></script>
 </body>
 </html>

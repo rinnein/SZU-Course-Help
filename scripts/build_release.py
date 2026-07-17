@@ -183,6 +183,7 @@ def package_distribution(
 
     required_files = {
         ROOT / "README.md": stage_dir / "README.md",
+        ROOT / "CHANGELOG.md": stage_dir / "更新记录.md",
         ROOT / "LICENSE": stage_dir / "LICENSE",
         ROOT / "docs" / "USER_GUIDE.md": stage_dir / "使用手册.md",
         ROOT / "output" / "pdf" / "SZU-Course-Help-User-Guide.pdf": stage_dir / "使用手册.pdf",

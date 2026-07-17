@@ -16,6 +16,7 @@ os.environ.setdefault("COURSE_SELECT_DB_PATH", str(ROOT / "tests" / "ui_preview.
 PREVIEW_PORT = int(os.getenv("COURSE_SELECT_PREVIEW_PORT", "8001"))
 PREVIEW_LOGGED_OUT = os.getenv("COURSE_SELECT_PREVIEW_LOGGED_OUT", "").strip() == "1"
 PREVIEW_PHASE = os.getenv("COURSE_SELECT_PREVIEW_PHASE", "preselection").strip().lower()
+PREVIEW_CAPTCHA = os.getenv("COURSE_SELECT_PREVIEW_CAPTCHA", "ready").strip().lower()
 
 import app  # noqa: E402
 import config  # noqa: E402
@@ -45,8 +46,14 @@ else:
         config.elective_batch_name = "预选阶段"
 
 
-def fake_fetch_vtoken_and_image() -> dict[str, str]:
+def fake_fetch_vtoken_and_image(*_args) -> dict[str, str]:
     """Return a local placeholder; visual checks must never call the school."""
+    if PREVIEW_CAPTCHA == "unavailable":
+        raise app.logic.CaptchaUnavailableError("preview closed window")
+    if PREVIEW_CAPTCHA == "invalid":
+        raise app.logic.CaptchaResponseError("preview invalid response")
+    if PREVIEW_CAPTCHA == "network":
+        raise app.requests.ConnectionError("preview network failure")
     captcha_svg = """
     <svg xmlns="http://www.w3.org/2000/svg" width="250" height="80" viewBox="0 0 250 80">
       <rect width="250" height="80" fill="#f2f4f7"/>

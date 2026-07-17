@@ -28,10 +28,10 @@ jobs:
 
     steps:
       - name: Check out release tag
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.13"
           cache: pip
@@ -51,7 +51,7 @@ jobs:
         run: python scripts/build_release.py
 
       - name: Upload native package
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: release-${{ matrix.platform }}
           path: |
@@ -67,10 +67,10 @@ jobs:
 
     steps:
       - name: Check out release tag
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.13"
 
@@ -78,7 +78,7 @@ jobs:
         run: python scripts/package_source.py
 
       - name: Upload source package
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: release-source
           path: |
@@ -95,10 +95,10 @@ jobs:
 
     steps:
       - name: Check out release tag
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Download release packages
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v5
         with:
           pattern: release-*
           path: release-assets
@@ -110,15 +110,36 @@ jobs:
           cd release-assets
           sha256sum -- *.zip > SHA256SUMS.txt
 
-      - name: Create GitHub Release
+      - name: Create or update GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
-          gh release create "${GITHUB_REF_NAME}" \
-            release-assets/*.zip \
-            release-assets/*.zip.sha256 \
-            release-assets/SHA256SUMS.txt \
-            --verify-tag \
-            --title "SZU Course Help ${GITHUB_REF_NAME}" \
-            --notes-file docs/RELEASE_NOTES.md
+          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            gh release edit "${GITHUB_REF_NAME}" \
+              --title "SZU Course Help ${GITHUB_REF_NAME}" \
+              --notes-file docs/RELEASE_NOTES.md
+            gh release upload "${GITHUB_REF_NAME}" \
+              release-assets/*.zip \
+              release-assets/*.zip.sha256 \
+              release-assets/SHA256SUMS.txt \
+              --clobber
+          else
+            gh release create "${GITHUB_REF_NAME}" \
+              release-assets/*.zip \
+              release-assets/*.zip.sha256 \
+              release-assets/SHA256SUMS.txt \
+              --verify-tag \
+              --title "SZU Course Help ${GITHUB_REF_NAME}" \
+              --notes-file docs/RELEASE_NOTES.md
+          fi
+
+      - name: Remove superseded v3.2.0 release
+        if: github.ref_name == 'v3.2.1'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          if gh release view "v3.2.0" >/dev/null 2>&1; then
+            gh release delete "v3.2.0" --yes
+          fi

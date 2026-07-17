@@ -33,6 +33,63 @@ def test_health_and_static_login_page():
     assert bootstrap["ui_asset_build"] == app.UI_ASSET_BUILD
 
 
+def test_captcha_api_reports_closed_window_without_generic_502(monkeypatch):
+    monkeypatch.setattr(
+        app.logic,
+        "fetch_vtoken_and_image",
+        lambda *_: (_ for _ in ()).throw(logic.CaptchaUnavailableError("closed")),
+    )
+
+    response = client.get("/api/captcha")
+
+    assert response.status_code == 409
+    assert response.json()["error_code"] == "CAPTCHA_UNAVAILABLE"
+    assert response.json()["retryable"] is True
+    assert "当前未提供登录验证码" in response.json()["message"]
+
+
+def test_captcha_api_reports_finite_timeout(monkeypatch):
+    monkeypatch.setattr(
+        app.logic,
+        "fetch_vtoken_and_image",
+        lambda *_: (_ for _ in ()).throw(requests.Timeout("slow")),
+    )
+
+    response = client.get("/api/captcha")
+
+    assert response.status_code == 504
+    assert response.json()["error_code"] == "CAPTCHA_TIMEOUT"
+    assert "本次加载已停止" in response.json()["message"]
+
+
+def test_captcha_api_reports_network_failure(monkeypatch):
+    monkeypatch.setattr(
+        app.logic,
+        "fetch_vtoken_and_image",
+        lambda *_: (_ for _ in ()).throw(requests.ConnectionError("offline")),
+    )
+
+    response = client.get("/api/captcha")
+
+    assert response.status_code == 503
+    assert response.json()["error_code"] == "CAPTCHA_NETWORK_ERROR"
+    assert response.json()["retryable"] is True
+
+
+def test_captcha_api_reports_malformed_school_response(monkeypatch):
+    monkeypatch.setattr(
+        app.logic,
+        "fetch_vtoken_and_image",
+        lambda *_: (_ for _ in ()).throw(logic.CaptchaResponseError("bad payload")),
+    )
+
+    response = client.get("/api/captcha")
+
+    assert response.status_code == 502
+    assert response.json()["error_code"] == "CAPTCHA_INVALID_RESPONSE"
+    assert "本次加载已停止" in response.json()["message"]
+
+
 def test_courses_require_login(monkeypatch):
     monkeypatch.setattr(config, "token", "")
     monkeypatch.setattr(config, "combined_cookie", "")

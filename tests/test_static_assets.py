@@ -25,7 +25,16 @@ def test_login_and_course_pages_expose_required_controls():
     login = (STATIC / "login.html").read_text(encoding="utf-8")
     course = (STATIC / "index.html").read_text(encoding="utf-8")
 
-    for control_id in ("studentId", "password", "cardKey", "captchaStage", "loginButton"):
+    for control_id in (
+        "studentId",
+        "password",
+        "cardKey",
+        "captchaStage",
+        "captchaStatusTitle",
+        "captchaStatusDetail",
+        "refreshCaptcha",
+        "loginButton",
+    ):
         assert f'id="{control_id}"' in login
     for control_id in (
         "categoryList",
@@ -43,3 +52,14 @@ def test_login_and_course_pages_expose_required_controls():
     assert f"/styles.css?build={app.UI_ASSET_BUILD}" in course
     assert f"/login.js?build={app.UI_ASSET_BUILD}" in login
     assert f"/course-app.js?build={app.UI_ASSET_BUILD}" in course
+
+
+def test_login_captcha_ui_has_terminal_failure_states():
+    login = (STATIC / "login.html").read_text(encoding="utf-8")
+    script = (STATIC / "login.js").read_text(encoding="utf-8")
+
+    assert 'data-state="idle"' in login
+    assert "当前时段暂无验证码" in script
+    assert 'code === "CAPTCHA_UNAVAILABLE"' in script
+    assert "本次加载已经停止，不会在后台自动循环" in script
+    assert "重新获取验证码" in script

@@ -56,7 +56,7 @@ from services.enroll_service import (
 
 SERVER_HOST = "127.0.0.1"
 DEFAULT_SERVER_PORT = 8000
-UI_ASSET_BUILD = "20260716.1"
+UI_ASSET_BUILD = "20260717.1"
 UI_CACHE_TOKEN = secrets.token_urlsafe(8)
 logger = logging.getLogger(__name__)
 
@@ -90,7 +90,7 @@ SERVER_PORT = _find_available_port(_preferred_port())
 _runtime_prefill = {"student_id": "", "card_key": ""}
 
 
-app = FastAPI(title="深大抢课助手 API", version="3.2.0")
+app = FastAPI(title="深大抢课助手 API", version="3.2.1")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -320,10 +320,52 @@ async def api_login(user: LoginRequest):
 
 @app.get("/api/captcha")
 async def api_captcha():
-    result = await asyncio.to_thread(logic.fetch_vtoken_and_image)
-    if "error" in result:
-        raise HTTPException(status_code=502, detail=result["error"])
-    return JSONResponse(content=result, headers=get_no_cache_headers())
+    """Fetch one manual-login captcha and expose a finite, classified failure state."""
+    try:
+        # Manual refresh is the retry boundary. One server attempt prevents stale
+        # requests from accumulating after a browser timeout.
+        result = await asyncio.to_thread(logic.fetch_vtoken_and_image, 1)
+        return JSONResponse(content=result, headers=get_no_cache_headers())
+    except logic.CaptchaUnavailableError:
+        logger.info("School captcha is unavailable in the current window")
+        return _api_error(
+            409,
+            "学校当前未提供登录验证码，可能尚未开放选课、正在切换阶段或处于维护时段。请稍后手动重试。",
+            "CAPTCHA_UNAVAILABLE",
+            retryable=True,
+        )
+    except requests.Timeout:
+        logger.warning("School captcha request timed out")
+        return _api_error(
+            504,
+            "连接学校验证码服务超时，本次加载已停止。请检查网络后手动重试。",
+            "CAPTCHA_TIMEOUT",
+            retryable=True,
+        )
+    except requests.RequestException as exc:
+        logger.warning("School captcha network failure: %s", type(exc).__name__)
+        return _api_error(
+            503,
+            "暂时无法连接学校验证码服务，本次加载已停止。请检查网络或稍后手动重试。",
+            "CAPTCHA_NETWORK_ERROR",
+            retryable=True,
+        )
+    except (logic.CaptchaResponseError, ValueError, RuntimeError) as exc:
+        logger.warning("School captcha response rejected: %s", type(exc).__name__)
+        return _api_error(
+            502,
+            "学校验证码响应异常，本次加载已停止。请稍后手动重试；持续失败时请确认学校系统是否开放。",
+            "CAPTCHA_INVALID_RESPONSE",
+            retryable=True,
+        )
+    except Exception as exc:
+        logger.exception("Unexpected captcha failure: %s", exc)
+        return _api_error(
+            500,
+            "验证码服务发生意外错误，本次加载已停止。请重新启动程序后再试。",
+            "CAPTCHA_INTERNAL_ERROR",
+            retryable=False,
+        )
 
 
 @app.get("/api/session")
