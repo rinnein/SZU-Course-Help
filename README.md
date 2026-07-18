@@ -23,6 +23,8 @@
 
 ## 无需 Python：直接下载 Release
 
+若您使用Linux，建议直接 [源码运行](#源码运行) 以取得更好的使用体验(部分Linux发行版可能无法正常运行打包程序)。  
+
 不熟悉 Python、Conda 或命令行的用户，请直接前往 **[Releases 下载页面](https://github.com/Weeye-hua/SZU-Course-Help/releases/latest)**，下载与系统匹配的压缩包。发布包已经包含程序、OCR 依赖、Markdown/PDF 使用手册和平台启动脚本，完整解压后即可运行。
 
 - Windows 10/11 x64：双击 `启动抢课助手.bat` 或 `SZU-Course-Help.exe`。
@@ -79,6 +81,18 @@ cd SZU-Course-Help
 
 ### 2. 准备环境
 
+您可以自行选择您的python环境管理工具。  
+更建议使用轻量化的[uv(点击前往安装页面)](https://uv.doczh.com/getting-started/installation/)作为python管理工具，其会在运行时自动安装合适项目的python版本。  
+当前项目已为uv配置依赖镜像源为 [MirrorZ 校园网联合镜像站](https://help.mirrors.cernet.edu.cn/) 加速下载。  
+
+#### UV
+
+```sh
+uv sync
+```
+
+#### Conda
+
 项目要求 Python 3.13。使用现有 Conda 环境：
 
 ```powershell
@@ -95,6 +109,14 @@ python -m pip install -r requirements.txt
 ```
 
 ### 3. 启动
+
+#### UV
+
+```sh
+uv run main.py
+```
+
+#### Conda / 其他 Python 环境
 
 ```powershell
 python main.py
