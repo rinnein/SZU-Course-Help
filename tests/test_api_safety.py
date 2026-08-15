@@ -30,11 +30,30 @@ def test_health_and_static_login_page():
     assert app.get_login_url().endswith(f"/login?ui={app.UI_CACHE_TOKEN}")
     response = client.get(f"/login?ui={app.UI_CACHE_TOKEN}")
     assert response.status_code == 200
-    assert "Card Key V3" in response.text
+    assert "进入抢课工作台" in response.text
 
     bootstrap = client.get("/api/bootstrap").json()
     assert bootstrap["ui_cache_token"] == app.UI_CACHE_TOKEN
     assert bootstrap["ui_asset_build"] == app.UI_ASSET_BUILD
+
+
+def test_card_key_endpoint_issues_verifiable_key(tmp_path, monkeypatch):
+    monkeypatch.setenv("COURSE_SELECT_KEY_DIR", str(tmp_path / "keys"))
+
+    response = client.post("/api/card_key", json={"student_id": "2024110122"})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["student_id"] == "2024110122"
+    assert body["card_key"].startswith("SZU3.")
+    assert key_manager.verify_card_key("2024110122", body["card_key"]) is True
+
+
+def test_card_key_endpoint_rejects_invalid_student_id(tmp_path, monkeypatch):
+    monkeypatch.setenv("COURSE_SELECT_KEY_DIR", str(tmp_path / "keys"))
+
+    response = client.post("/api/card_key", json={"student_id": "abc"})
+    assert response.status_code == 422
 
 
 def test_captcha_api_reports_closed_window_without_generic_502(monkeypatch):

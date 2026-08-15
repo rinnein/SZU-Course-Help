@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 import secrets
 import socket
 import threading
@@ -29,6 +30,11 @@ from campus import (
 from card_key import verify_card_key
 from logging_config import configure_logging
 from project_paths import resource_path
+from security.key_manager import (
+    KeyManagementError,
+    generate_card_key,
+    get_or_create_key_pair,
+)
 from services import cart_service
 from services.auth_service import (
     LOGIN_ERROR_MSG,
@@ -127,6 +133,12 @@ class LoginRequest(BaseModel):
         max_length=4,
     )
     cookie: str = Field(min_length=1, max_length=8192)
+
+
+class CardKeyRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    student_id: str = Field(min_length=6, max_length=12, pattern=r"^\d+$")
 
 
 class ApiMessage(BaseModel):
@@ -288,6 +300,31 @@ async def api_bootstrap():
         },
         headers=get_no_cache_headers(),
     )
+
+
+@app.post("/api/card_key", status_code=status.HTTP_200_OK)
+async def api_generate_card_key(req: CardKeyRequest):
+    """Issue a student-bound Card Key V3 straight from the login page.
+
+    Generating the key locally from the student number removes the terminal-only
+    step so the Web UI and the sign-in screen share the same entry point.
+    """
+    student_id = req.student_id.strip()
+    if not re.fullmatch(r"^\d{6,12}$", student_id):
+        return JSONResponse(
+            status_code=400,
+            content={"message": "学号必须是 6 至 12 位数字", "is_error": True},
+        )
+    try:
+        private_key = get_or_create_key_pair()
+        card_key = generate_card_key(student_id, private_key)
+        return {"card_key": card_key, "student_id": student_id}
+    except (KeyManagementError, OSError, ValueError) as exc:
+        logger.warning("Card-key generation failed: %s", exc)
+        return JSONResponse(
+            status_code=500,
+            content={"message": f"卡密生成失败: {exc}", "is_error": True},
+        )
 
 
 @app.post("/api/login", status_code=status.HTTP_200_OK)
