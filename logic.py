@@ -12,6 +12,8 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
+import numpy as np  # used by the per-glyph OCR helpers
+
 # OCR dependencies are imported lazily so manual first login can still start
 # when optional recognition packages are unavailable.
 import requests
@@ -380,30 +382,159 @@ def _ddddocr_engines():
     return DetectionEngine(), OCREngine(beta=True)
 
 
+def _ocr_glyph(ocr: Any, image: Any, upscale: int = 5, padding: int = 14) -> str:
+    """Recognise a single glyph: upscale, pad with white, then run one-char OCR.
+
+    The target glyphs in the top band are only ~12px tall; running OCR on the raw
+    compressed glyph (or the whole strip as one image) bleeds characters together.
+    Upscaling each separated glyph individually produces far more stable reads.
+    """
+    import io
+
+    import cv2
+    from PIL import Image
+
+    glyph = image
+    if len(glyph.shape) == 2:  # grayscale -> BGR
+        glyph = cv2.cvtColor(glyph, cv2.COLOR_GRAY2BGR)
+    upscaled = cv2.resize(glyph, None, fx=upscale, fy=upscale, interpolation=cv2.INTER_LANCZOS4)
+    canvas = np.full(
+        (upscaled.shape[0] + 2 * padding, upscaled.shape[1] + 2 * padding, 3),
+        255,
+        dtype=np.uint8,
+    )
+    canvas[padding : padding + upscaled.shape[0], padding : padding + upscaled.shape[1]] = upscaled
+    buffer = io.BytesIO()
+    Image.fromarray(cv2.cvtColor(canvas, cv2.COLOR_BGR2RGB)).save(buffer, format="PNG")
+    return "".join(ocr.classification(buffer.getvalue()).split())
+
+
+def _segment_columns(
+    binary: Any,
+    y0: int,
+    y1: int,
+    x0: int,
+    x1: int,
+    merge_gap: int = 1,
+    min_width: int = 3,
+) -> list[list[int]]:
+    """Split a horizontal band into glyph x-intervals using column-ink gaps.
+
+    Returns [[x_start, x_end], ...] ordered left to right. Runs with a gap of at
+    most ``merge_gap`` columns are merged; leftover segments narrower than
+    ``min_width`` (e.g. stray border pixels or noise) are discarded.
+    """
+    band = binary[y0:y1, x0:x1]
+    col_ink = (band > 0).sum(axis=0)
+    runs = []
+    start = None
+    for col, value in enumerate(col_ink):
+        if value > 0 and start is None:
+            start = col
+        elif value == 0 and start is not None:
+            runs.append([start, col - 1])
+            start = None
+    if start is not None:
+        runs.append([start, len(col_ink) - 1])
+    if not runs:
+        return []
+
+    merged = [runs[0]]
+    for run in runs[1:]:
+        if run[0] - merged[-1][1] <= merge_gap:
+            merged[-1][1] = run[1]
+        else:
+            merged.append(run)
+    return [[x0 + left, x0 + right] for left, right in merged if right - left >= min_width]
+
+
+def _binary_image(image: Any) -> Any:
+    """Return a binary (black=&gt;255 text) mask for glyph segmentation."""
+    import cv2
+
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    return binary
+
+
+def _candidate_boxes(image: Any) -> list[list[int]]:
+    """Detect and sort the bottom candidate glyph boxes (relative to image coords)."""
+    import io
+
+    import cv2
+    from PIL import Image
+
+    detector, _ocr = _ddddocr_engines()
+
+    buffer = io.BytesIO()
+    Image.fromarray(cv2.cvtColor(image[25:80, 0:250], cv2.COLOR_BGR2RGB)).save(buffer, format="PNG")
+    boxes = sorted(detector.detection(buffer.getvalue()), key=lambda item: item[0])
+    # Convert crop-relative box coordinates back to full-image coordinates.
+    return [[x1, y1 + 25, x2, y2 + 25] for x1, y1, x2, y2 in boxes]
+
+
+def _recognize_candidate_glyphs(
+    ocr: Any,
+    image: Any,
+    boxes: list[list[int]],
+) -> list[str]:
+    """OCR each bottom candidate box individually, aligned with ``boxes``."""
+    chars = []
+    for x1, y1, x2, y2 in boxes:
+        glyph = image[max(y1, 0) : y2, max(x1, 0) : x2]
+        if glyph.shape[0] < 1 or glyph.shape[1] < 1:
+            chars.append("")
+            continue
+        chars.append(_ocr_glyph(ocr, glyph))
+    return chars
+
+
+def _segmented_target_glyphs(binary: Any) -> list[list[int]]:
+    """Segment the top target band (rows 2-14, cols 82-132) into four glyphs.
+
+    The first two image rows are a full-width solid border that the school draws;
+    they carry no character information, so the target band starts at row 2.  A
+    simple 4-column grid split (as the previous template matcher assumed) does not
+    align to the real glyph extents; column-gap segmentation does.
+    """
+    return _segment_columns(binary, 2, 14, 82, 132)
+
+
 def _template_match_targets(
     image: Any,
     bottom_boxes: list[list[int]],
+    target_intervals: list[list[int]] | None = None,
 ) -> list[list[int]]:
     """Match 4 target characters (top region) to bottom candidates by image similarity.
 
-    The top region is a fixed 4-column grid; each column is resized and compared
-    against every unmatched candidate box using normalised cross-correlation.
+    Last-resort fallback only: the top glyphs are only ~12px tall, so image
+    similarity is a weak discriminator and should never be the primary path.  When
+    the real segmented target intervals are supplied they are used instead of the
+    previous fixed 4-column grid over the whole 55px top crop.
     """
     import cv2
 
     if len(bottom_boxes) < 4:
         return []
 
-    top_region = image[0:15, 80:135]
-    top_char_width = 55 // 4
     bottom_img = image[25:80, 0:250]
+
+    if target_intervals and len(target_intervals) == 4:
+        targets = [image[2:14, left:right] for left, right in target_intervals]
+    else:
+        top_region = image[2:14, 82:132]
+        top_region_w = top_region.shape[1]
+        char_width = top_region_w // 4
+        targets = [
+            top_region[:, 0:char_width],
+            top_region[:, char_width : 2 * char_width],
+            top_region[:, 2 * char_width : 3 * char_width],
+            top_region[:, 3 * char_width :],
+        ]
 
     result: list[list[int]] = []
     used: set[int] = set()
-    for ti in range(4):
-        tx1 = ti * top_char_width
-        tx2 = (ti + 1) * top_char_width if ti < 3 else 55
-        target = top_region[:, tx1:tx2]
+    for target in targets:
         th, tw = target.shape[:2]
         if th < 1 or tw < 1:
             return []
@@ -413,7 +544,7 @@ def _template_match_targets(
         for bi, (bx1, by1, bx2, by2) in enumerate(bottom_boxes):
             if bi in used:
                 continue
-            candidate = bottom_img[by1:by2, bx1:bx2]
+            candidate = bottom_img[by1 - 25 : by2 - 25, bx1:bx2]
             ch, cw = candidate.shape[:2]
             if ch < 1 or cw < 1:
                 continue
@@ -428,101 +559,148 @@ def _template_match_targets(
         used.add(best_idx)
         bx1, by1, bx2, by2 = bottom_boxes[best_idx]
         cx = (bx1 + bx2) // 2
-        cy = (by1 + by2) // 2 + 25
+        cy = (by1 + by2) // 2
         result.append([cx, cy])
 
     return result
 
 
 def recognize_captcha_centers() -> list[list[int]]:
-    """Recognize the four captcha targets and return click coordinates."""
+    """Recognize the four captcha targets and return click coordinates.
+
+    Pipeline (best-effort, never guesses with low confidence):
+      1. Segment the top target band into four glyphs (rows 2-14, excl. border).
+      2. Detect the bottom candidate boxes and OCR each one individually so the
+         candidate character list stays aligned with the boxes (fixes the previous
+         "6 boxes vs 5 OCR chars" count mismatch that forced weak template matching).
+      3. Exact-string-match each target glyph to an unused candidate box.
+      4. For a target left unmatched, re-OCR the remaining candidate boxes with a
+         second binarization to try to recover its true character.
+      5. Return exactly four distinct, in-range coordinates; otherwise return [] so
+         the caller retries with a fresh captcha rather than submitting a guess.
+    """
     import cv2
 
-    crop_dir = _captcha_crop_dir()
     image = cv2.imread(str(_captcha_image_path()))
     if image is None or image.shape[0] < CAPTCHA_HEIGHT or image.shape[1] < CAPTCHA_WIDTH:
         raise RuntimeError("验证码图片为空或尺寸异常")
 
-    crop_dir.mkdir(parents=True, exist_ok=True)
-    bottom_path = crop_dir / "bottom.jpg"
-    top_path = crop_dir / "top.jpg"
-    if not cv2.imwrite(str(bottom_path), image[25:80, 0:250]):
-        raise RuntimeError("无法写入验证码候选区")
-    if not cv2.imwrite(str(top_path), image[0:15, 80:135]):
-        raise RuntimeError("无法写入验证码目标区")
-
     detector, ocr = _ddddocr_engines()
-    with open(bottom_path, "rb") as handle:
-        bottom = handle.read()
-    with open(top_path, "rb") as handle:
-        top = handle.read()
 
-    recognition_text = "".join(ocr.classification(bottom).split())
-    boxes = sorted(detector.detection(bottom), key=lambda item: item[0])
+    binary = _binary_image(image)
+    target_intervals = _segmented_target_glyphs(binary)
+    if len(target_intervals) != 4:
+        logger.warning("Target band segmented into %s glyphs (expected 4)", len(target_intervals))
+        return []
+
+    target_chars = [_ocr_glyph(ocr, image[2:14, left:right]) for left, right in target_intervals]
+    if any(not char for char in target_chars) or len(target_chars) != 4:
+        logger.warning("Top target OCR incomplete: %s", target_chars)
+        return []
+
+    boxes = _candidate_boxes(image)
     if len(boxes) < 4:
         logger.warning("OCR detected only %s candidate boxes", len(boxes))
         return []
-    if len(boxes) != len(recognition_text):
-        logger.info(
-            "OCR candidate count mismatch: text=%s boxes=%s, using template matching",
-            len(recognition_text),
-            len(boxes),
-        )
-        return _template_match_targets(image, boxes)
 
-    centers = [[(x1 + x2) // 2, (y1 + y2) // 2 + 25] for x1, y1, x2, y2 in boxes]
+    candidate_chars = _recognize_candidate_glyphs(ocr, image, boxes)
+    logger.debug("OCR targets=%s candidates=%s", target_chars, candidate_chars)
 
-    target_text = ""
-    try:
-        target_text = _recognize_target_with_paddle(top_path) or ""
-    except Exception as exc:
-        logger.warning("PaddleOCR unavailable; using ddddocr: %s", exc)
-    if not target_text:
-        target_text = ocr.classification(top)
-    target_text = "".join(target_text.split())
-
-    logger.debug("OCR target=%s candidates=%s", target_text, recognition_text)
-    if len(target_text) != 4:
-        return []
-
-    result = []
-    used_indexes = set()
-    unmatched_targets = []
-    for target_char in target_text:
+    # Exact matching: each target picks the first unused candidate box holding the
+    # same character.  Two coordinates never share a box.
+    result: list[list[int]] = []
+    used_indexes: set[int] = set()
+    unmatched_targets: list[str] = []
+    for target_char in target_chars:
         matched_index = next(
             (
                 index
-                for index, candidate in enumerate(recognition_text)
+                for index, candidate in enumerate(candidate_chars)
                 if index not in used_indexes and candidate == target_char
             ),
             None,
         )
         if matched_index is not None:
             used_indexes.add(matched_index)
-            result.append((target_char, centers[matched_index]))
+            x1, y1, x2, y2 = boxes[matched_index]
+            result.append([(x1 + x2) // 2, (y1 + y2) // 2])
         else:
             unmatched_targets.append(target_char)
 
-    # Fallback: assign remaining unmatched targets to remaining unmatched candidates
-    # in left-to-right order.  This handles OCR misreads where a target character
-    # was recognised differently in the top and bottom regions.
-    remaining_indexes = [i for i in range(len(centers)) if i not in used_indexes]
-    if unmatched_targets and len(remaining_indexes) == len(unmatched_targets):
-        for _target_char, idx in zip(unmatched_targets, remaining_indexes, strict=True):
-            result.append((_target_char, centers[idx]))
-    elif unmatched_targets:
-        logger.info(
-            "OCR text matching failed (%s vs %s), trying image template matching",
-            target_text,
-            recognition_text,
+    # Re-OCR the still-unused candidate boxes with a second binarization to try to
+    # recover characters the default path misread.  This honours the invariant that
+    # every target is one of the candidate characters.  If a target still cannot be
+    # matched we return [] and let the caller retry with a fresh captcha: the top
+    # glyphs are only ~12px tall so image-template matching cannot reliably
+    # disambiguate them, and submitting a guessed coordinate wastes an attempt
+    # exactly like a clean retry does anyway.
+    if unmatched_targets:
+        passed_bgr = [image[y1:y2, x1:x2] for x1, y1, x2, y2 in boxes]
+        rechars = _re_ocr_remaining_candidates(ocr, passed_bgr, used_indexes)
+        for target_char in unmatched_targets[:]:
+            matched_index = next(
+                (
+                    index
+                    for index, candidate in enumerate(rechars)
+                    if index not in used_indexes and candidate == target_char
+                ),
+                None,
+            )
+            if matched_index is not None:
+                used_indexes.add(matched_index)
+                x1, y1, x2, y2 = boxes[matched_index]
+                result.append([(x1 + x2) // 2, (y1 + y2) // 2])
+                unmatched_targets.remove(target_char)
+
+        if unmatched_targets:
+            logger.info(
+                "OCR unmatched targets=%s (candidates=%s); returning [] to retry",
+                unmatched_targets,
+                candidate_chars,
+            )
+            return []
+
+    if len(result) != 4 or not _all_distinct(result) or not _all_in_range(result):
+        logger.warning(
+            "OCR produced %s points (targets=%s candidates=%s)",
+            len(result),
+            target_chars,
+            candidate_chars,
         )
-        template_result = _template_match_targets(image, boxes)
-        if template_result and len(template_result) == 4:
-            logger.info("Image template matching succeeded")
-            return template_result
         return []
 
-    return [center for _char, center in result]
+    return result
+
+
+def _re_ocr_remaining_candidates(
+    ocr: Any,
+    candidate_images: list[Any],
+    used_indexes: set[int],
+) -> list[str]:
+    """Re-OCR unused candidate glyphs with an OTSU binarization and higher upscale."""
+    import cv2
+
+    results: list[str] = []
+    for index, glyph in enumerate(candidate_images):
+        if index in used_indexes:
+            results.append("")
+            continue
+        gray = cv2.cvtColor(glyph, cv2.COLOR_BGR2GRAY)
+        _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        glyph_bgr = cv2.cvtColor(binary, cv2.COLOR_GRAY2BGR)
+        results.append(_ocr_glyph(ocr, glyph_bgr, upscale=6, padding=16))
+    return results
+
+
+def _all_distinct(points: list[list[int]]) -> bool:
+    return len({tuple(point) for point in points}) == 4
+
+
+def _all_in_range(points: list[list[int]]) -> bool:
+    return all(
+        isinstance(point, (list, tuple)) and len(point) == 2 and 0 <= int(point[0]) <= CAPTCHA_WIDTH and 0 <= int(point[1]) <= CAPTCHA_HEIGHT
+        for point in points
+    )
 
 
 def _extract_captcha_message(payload: Any, response_text: str = "") -> str:
