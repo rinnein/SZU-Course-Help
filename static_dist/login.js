@@ -28,7 +28,6 @@ const loginElements = {
   studentId: document.querySelector("#studentId"),
   password: document.querySelector("#password"),
   passwordToggle: document.querySelector("#passwordToggle"),
-  cardKey: document.querySelector("#cardKey"),
   phaseNotice: document.querySelector("#phaseNotice"),
   stage: document.querySelector("#captchaStage"),
   image: document.querySelector("#captchaImage"),
@@ -65,6 +64,22 @@ function updateLoginControls() {
   loginElements.undo.disabled = busy || !captchaReady || loginState.points.length === 0;
   loginElements.submit.disabled = loginState.submitting || !captchaReady;
 }
+
+function isValidStudentId(value) {
+  return /^\d{6,12}$/.test(String(value || "").trim());
+}
+
+async function fetchCardKeyForStudent(studentId) {
+  const result = await requestJson("/api/card_key", {
+    method: "POST",
+    body: JSON.stringify({ student_id: studentId }),
+  });
+  if (!result || typeof result.card_key !== "string" || !result.card_key.startsWith("SZU3.")) {
+    throw new ApiError("本地卡密生成失败，请稍后重试", { code: "CARD_KEY_INVALID_RESPONSE" });
+  }
+  return result.card_key;
+}
+
 
 function setCaptchaStatus(status, title = "", detail = "") {
   const fallback = captchaStatusCopy[status] || captchaStatusCopy.error;
@@ -322,7 +337,6 @@ async function submitLogin(event) {
 
   const studentId = loginElements.studentId.value.trim();
   const password = loginElements.password.value;
-  const cardKey = loginElements.cardKey.value.trim();
   if (!/^\d{6,12}$/.test(studentId)) {
     setLoginMessage("请输入 6 至 12 位数字学号");
     loginElements.studentId.focus();
@@ -331,11 +345,6 @@ async function submitLogin(event) {
   if (!password) {
     setLoginMessage("请输入选课系统密码");
     loginElements.password.focus();
-    return;
-  }
-  if (!cardKey.startsWith("SZU3.")) {
-    setLoginMessage("请输入终端生成的 Card Key V3");
-    loginElements.cardKey.focus();
     return;
   }
   if (!loginState.captcha || loginState.captchaStatus !== "ready") {
@@ -353,6 +362,7 @@ async function submitLogin(event) {
   setLoginMessage("正在连接学校选课系统...", true);
 
   try {
+    const cardKey = await fetchCardKeyForStudent(studentId);
     const result = await requestJson("/api/login", {
       method: "POST",
       body: JSON.stringify({
@@ -395,7 +405,6 @@ async function initializeLogin() {
       return;
     }
     loginElements.studentId.value = bootstrap.student_id || "";
-    loginElements.cardKey.value = bootstrap.card_key || "";
     if (bootstrap.phase_notice) {
       loginElements.phaseNotice.textContent = bootstrap.phase_notice;
     }

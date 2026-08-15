@@ -28,7 +28,6 @@ def test_login_and_course_pages_expose_required_controls():
     for control_id in (
         "studentId",
         "password",
-        "cardKey",
         "captchaStage",
         "captchaStatusTitle",
         "captchaStatusDetail",
