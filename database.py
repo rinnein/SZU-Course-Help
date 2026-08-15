@@ -68,25 +68,48 @@ class DatabaseManager:
                     name TEXT NOT NULL,
                     status TEXT NOT NULL DEFAULT 'PENDING',
                     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+                    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    teaching_place TEXT NOT NULL DEFAULT '',
+                    course_name TEXT NOT NULL DEFAULT '',
+                    teacher_name TEXT NOT NULL DEFAULT ''
                 )
                 """
             )
+            # Migrate existing databases that predate newer columns
+            columns = {row["name"] for row in connection.execute("PRAGMA table_info(courses)")}
+            if "teaching_place" not in columns:
+                connection.execute(
+                    "ALTER TABLE courses ADD COLUMN teaching_place TEXT NOT NULL DEFAULT ''"
+                )
+            if "course_name" not in columns:
+                connection.execute(
+                    "ALTER TABLE courses ADD COLUMN course_name TEXT NOT NULL DEFAULT ''"
+                )
+            if "teacher_name" not in columns:
+                connection.execute(
+                    "ALTER TABLE courses ADD COLUMN teacher_name TEXT NOT NULL DEFAULT ''"
+                )
 
     def add_course(self, course: CartCourse) -> bool:
         """Insert or refresh one course and reset it to ``PENDING``."""
         try:
             now = datetime.now().isoformat(timespec="seconds")
+            teaching_place = str(getattr(course, "teaching_place", "") or "")
+            course_name = str(getattr(course, "course_name", "") or "")
+            teacher_name = str(getattr(course, "teacher_name", "") or "")
             with self._connect() as connection:
                 connection.execute(
                     """
-                    INSERT INTO courses (id, type, name, status, updated_at)
-                    VALUES (?, ?, ?, ?, ?)
+                    INSERT INTO courses (id, type, name, status, updated_at, teaching_place, course_name, teacher_name)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(id) DO UPDATE SET
                         type = excluded.type,
                         name = excluded.name,
                         status = excluded.status,
-                        updated_at = excluded.updated_at
+                        updated_at = excluded.updated_at,
+                        teaching_place = excluded.teaching_place,
+                        course_name = excluded.course_name,
+                        teacher_name = excluded.teacher_name
                     """,
                     (
                         course.id,
@@ -94,6 +117,9 @@ class DatabaseManager:
                         course.name,
                         STATUS_NOT_STARTED,
                         now,
+                        teaching_place,
+                        course_name,
+                        teacher_name,
                     ),
                 )
             return True

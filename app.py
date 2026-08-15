@@ -62,7 +62,7 @@ from services.enroll_service import (
 
 SERVER_HOST = "127.0.0.1"
 DEFAULT_SERVER_PORT = 8000
-UI_ASSET_BUILD = "20260720.5"
+UI_ASSET_BUILD = "20260721.2"
 UI_CACHE_TOKEN = secrets.token_urlsafe(8)
 logger = logging.getLogger(__name__)
 
@@ -150,6 +150,9 @@ class CartCourse(BaseModel):
     is_conflict: str = Field(default="", max_length=8)
     is_full: str = Field(default="", max_length=8)
     status: str = Field(default="", max_length=16)
+    teaching_place: str = Field(default="", max_length=512)
+    course_name: str = Field(default="", max_length=256)
+    teacher_name: str = Field(default="", max_length=128)
 
     @property
     def type(self) -> str:
@@ -192,6 +195,9 @@ def _cart_from_row(row: dict) -> CartCourse:
         course_type=row.get("type", ""),
         name=row.get("name", ""),
         status=row.get("status", ""),
+        teaching_place=row.get("teaching_place", ""),
+        course_name=row.get("course_name", ""),
+        teacher_name=row.get("teacher_name", ""),
     )
 
 

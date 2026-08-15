@@ -40,6 +40,8 @@ const appState = {
   myCourses: [],
   myCoursesLoaded: false,
   loadingMyCourses: false,
+  myCoursesView: "grid",
+  showCartOnSchedule: true,
   progress: null,
   progressTimer: null,
   loadingProgress: false,
@@ -86,6 +88,10 @@ const appElements = {
   myCoursesList: document.querySelector("#myCoursesList"),
   myCoursesHint: document.querySelector("#myCoursesHint"),
   refreshMyCourses: document.querySelector("#refreshMyCourses"),
+  myCoursesScheduleWrap: document.querySelector("#myCoursesScheduleWrap"),
+  scheduleViewGrid: document.querySelector("#scheduleViewGrid"),
+  scheduleViewList: document.querySelector("#scheduleViewList"),
+  showPendingSwitch: document.querySelector("#showPendingSwitch"),
   enrollProgress: document.querySelector("#enrollProgress"),
   progressCounts: document.querySelector("#progressCounts"),
   progressBarFill: document.querySelector("#progressBarFill"),
@@ -419,6 +425,9 @@ function appendClassRow(container, course, classInfo) {
           is_choose: String(classInfo.is_choose || ""),
           is_conflict: String(classInfo.is_conflict || ""),
           is_full: String(classInfo.is_full || ""),
+          teaching_place: String(classInfo.teaching_place || ""),
+          course_name: String(course.course_name || ""),
+          teacher_name: String(classInfo.teacher_name || ""),
         }),
       });
       if (result.is_error) throw new Error(result.message);
@@ -751,6 +760,263 @@ function renderMyCourses() {
   appElements.myCoursesList.replaceChildren(fragment);
 }
 
+/* ---------------- My courses schedule (weekly grid) ---------------- */
+
+const SCHEDULE_COLORS = 12;
+const BREAK_PERIODS = [3, 6, 9, 11];
+
+/**
+ * Build a course-color mapping so visually distinct courses stand out.
+ * Keyed by course_name|teacher_name for enrolled courses.
+ */
+function buildScheduleColorMap(courses) {
+  const colorMap = new Map();
+  let nextColor = 0;
+  for (const course of courses) {
+    const key = (course.course_name || "未命名课程") + "|" + (course.teacher_name || "");
+    if (colorMap.has(key)) continue;
+    colorMap.set(key, nextColor % SCHEDULE_COLORS);
+    nextColor += 1;
+  }
+  return colorMap;
+}
+
+/**
+ * Parse a course-like object's teaching_place into schedule slots
+ * and split them into placed (on the standard 14-period grid) and
+ * unplaced (go to the right-side non-standard list).
+ */
+function collectScheduleEntries(courseLike, color, pending, placedSlots, unplaced) {
+  const slots = parseScheduleSlots(courseLike.teaching_place || "");
+  let hasPlaced = false;
+  for (const slot of slots) {
+    const ok =
+      slot.dayOfWeek >= 0 && slot.dayOfWeek <= 6 &&
+      slot.startPeriod >= 1 && slot.endPeriod <= MAX_PERIOD &&
+      slot.startPeriod <= slot.endPeriod;
+    if (ok) {
+      placedSlots.push({ course: courseLike, slot, color, pending });
+      hasPlaced = true;
+    }
+  }
+  if (!hasPlaced) {
+    unplaced.push({
+      course: courseLike,
+      color,
+      pending,
+      reason: slots.length ? "时间超出标准节次" : "无时间信息",
+    });
+  }
+}
+
+function formatCourseTooltip(course, slot, pending) {
+  const parts = [];
+  parts.push(course.course_name || "未命名课程");
+  if (pending) parts.push("（待选）");
+  if (course.teacher_name) parts.push("教师：" + course.teacher_name);
+  if (slot.weeks) parts.push("周数：" + slot.weeks);
+  if (slot.dayLabel) parts.push("星期：" + slot.dayLabel);
+  parts.push("节次：第" + slot.startPeriod + "-" + slot.endPeriod + "节");
+  if (slot.place) parts.push("地点：" + slot.place);
+  if (course.teaching_place && course.teaching_place !== slot.raw) {
+    parts.push("完整时间地点：" + course.teaching_place);
+  }
+  return parts.join("\n");
+}
+
+function buildCourseBlock(placed) {
+  const block = element("div", "schedule-course" + (placed.pending ? " is-pending" : ""));
+  block.setAttribute("data-color", String(placed.color));
+  block.title = formatCourseTooltip(placed.course, placed.slot, placed.pending);
+  const nameEl = element("strong", "", placed.course.course_name || "未命名课程");
+  block.append(nameEl);
+  if (placed.pending) {
+    block.append(element("span", "schedule-pending-badge", "待选"));
+  }
+  if (placed.slot.weeks) {
+    block.append(element("span", "schedule-weeks", placed.slot.weeks));
+  }
+  if (placed.slot.place) {
+    block.append(element("span", "schedule-place", placed.slot.place));
+  }
+  if (placed.course.teacher_name) {
+    block.append(element("span", "schedule-teacher", placed.course.teacher_name));
+  }
+  return block;
+}
+
+function renderMyCoursesSchedule() {
+  const wrap = appElements.myCoursesScheduleWrap;
+  const courses = appState.myCourses;
+
+  /* Determine pending (cart) items to show */
+  const enrolledIds = new Set(courses.map((c) => String(c.teaching_class_id || "")));
+  const pendingItems = appState.showCartOnSchedule
+    ? appState.cart.filter(
+        (item) => (item.status || "PENDING") !== "SUCCESS" && !enrolledIds.has(String(item.id)),
+      )
+    : [];
+
+  if (!courses.length && !pendingItems.length) {
+    const empty = element("div", "empty-state");
+    empty.append(element("strong", "", "还没有已选课程"));
+    empty.append(element("p", "", "抢到课程后会显示在这里，也可能是学校系统暂未返回数据。"));
+    wrap.replaceChildren(empty);
+    return;
+  }
+
+  /* Build color map (enrolled + pending share the same palette space) */
+  const colorMap = buildScheduleColorMap(courses);
+  let pendingColorBase = colorMap.size;
+
+  const placedSlots = [];
+  const unplaced = [];
+
+  for (const course of courses) {
+    const key = (course.course_name || "未命名课程") + "|" + (course.teacher_name || "");
+    collectScheduleEntries(course, colorMap.get(key) || 0, false, placedSlots, unplaced);
+  }
+
+  for (const item of pendingItems) {
+    const displayName = item.course_name || item.name || "未命名课程";
+    const teacherName = item.teacher_name || "";
+    const key = displayName + "|" + teacherName;
+    if (!colorMap.has(key)) {
+      colorMap.set(key, pendingColorBase % SCHEDULE_COLORS);
+      pendingColorBase += 1;
+    }
+    collectScheduleEntries(
+      { course_name: displayName, teacher_name: teacherName, teaching_place: item.teaching_place },
+      colorMap.get(key),
+      true,
+      placedSlots,
+      unplaced,
+    );
+  }
+
+  /* ---- Build layout ---- */
+  const container = element("div", "schedule-layout");
+
+  /* Left: weekly grid (14 per-period rows) */
+  const gridWrap = element("div", "schedule-grid-wrap");
+
+  const today = new Date().getDay();
+  const todayIndex = today === 0 ? 6 : today - 1;
+
+  const grid = element("div", "schedule-grid");
+  grid.style.gridTemplateColumns = "58px repeat(7, minmax(78px, 1fr))";
+  grid.style.gridTemplateRows = "auto repeat(" + MAX_PERIOD + ", minmax(28px, auto))";
+
+  /* Corner */
+  const corner = element("div", "schedule-corner", "节");
+  corner.style.gridRow = "1";
+  corner.style.gridColumn = "1";
+  grid.append(corner);
+
+  /* Day headers */
+  for (let d = 0; d < 7; d++) {
+    const header = element("div", "schedule-col-header");
+    if (d === todayIndex) header.classList.add("is-today");
+    header.append(element("span", "", DAYS_OF_WEEK[d].label));
+    header.style.gridRow = "1";
+    header.style.gridColumn = String(d + 2);
+    grid.append(header);
+  }
+
+  /* Row labels + background cells (one per period) */
+  for (let p = 1; p <= MAX_PERIOD; p++) {
+    const isBreak = BREAK_PERIODS.includes(p);
+    const row = p + 1;
+
+    const label = element("div", "schedule-row-label" + (isBreak ? " is-break" : ""));
+    label.append(element("strong", "", String(p)));
+    label.append(element("small", "", PERIODS[p - 1].timeLabel));
+    label.style.gridRow = String(row);
+    label.style.gridColumn = "1";
+    grid.append(label);
+
+    for (let d = 0; d < 7; d++) {
+      const cell = element("div", "schedule-cell" + (isBreak ? " is-break" : ""));
+      if (d === todayIndex) cell.classList.add("is-today");
+      cell.style.gridRow = String(row);
+      cell.style.gridColumn = String(d + 2);
+      grid.append(cell);
+    }
+  }
+
+  /* Course blocks: group by day|startPeriod|endPeriod, each group spans rows */
+  const stackMap = new Map();
+  for (const placed of placedSlots) {
+    const key = placed.slot.dayOfWeek + "|" + placed.slot.startPeriod + "|" + placed.slot.endPeriod;
+    if (!stackMap.has(key)) stackMap.set(key, []);
+    stackMap.get(key).push(placed);
+  }
+
+  for (const entries of stackMap.values()) {
+    const first = entries[0].slot;
+    const stack = element("div", "schedule-stack");
+    stack.style.gridColumn = String(first.dayOfWeek + 2);
+    stack.style.gridRow = (first.startPeriod + 1) + " / " + (first.endPeriod + 2);
+    for (const placed of entries) {
+      stack.append(buildCourseBlock(placed));
+    }
+    grid.append(stack);
+  }
+
+  gridWrap.append(grid);
+
+  /* Right: non-standard time courses */
+  const nonStandard = element("div", "schedule-nonstandard");
+  nonStandard.append(element("p", "schedule-nonstandard-title", "非标准时间课程"));
+
+  if (unplaced.length) {
+    for (const item of unplaced) {
+      const nsItem = element("div", "schedule-nonstandard-item" + (item.pending ? " is-pending" : ""));
+      nsItem.setAttribute("data-color", String(item.color));
+      const nsTitleParts = [item.course.course_name || "未命名课程"];
+      if (item.pending) nsTitleParts.push("（待选）");
+      if (item.course.teacher_name) nsTitleParts.push("教师：" + item.course.teacher_name);
+      if (item.course.teaching_place) nsTitleParts.push("时间地点：" + item.course.teaching_place);
+      nsItem.title = nsTitleParts.join("\n");
+      nsItem.append(element("strong", "", item.course.course_name || "未命名课程"));
+      if (item.pending) {
+        nsItem.append(element("span", "schedule-pending-badge", "待选"));
+      }
+      const meta = element("div", "schedule-nonstandard-meta");
+      if (item.course.teacher_name) meta.append(element("span", "", item.course.teacher_name));
+      if (item.course.teaching_place) meta.append(element("span", "", item.course.teaching_place));
+      meta.append(element("span", "", item.reason));
+      nsItem.append(meta);
+      nonStandard.append(nsItem);
+    }
+  } else {
+    nonStandard.append(element("p", "", "所有课e程均在标准时段内。"));
+  }
+
+  /* Legend */
+  if (pendingItems.length) {
+    const legend = element("p", "schedule-legend");
+    legend.append(element("i", "legend-dot legend-pending"));
+    legend.append(document.createTextNode("虚化块为选课清单中的待选课程（未实际选上）"));
+    nonStandard.append(legend);
+  }
+
+  container.append(gridWrap, nonStandard);
+  wrap.replaceChildren(container);
+}
+
+function switchMyCoursesView(view) {
+  appState.myCoursesView = view;
+  const isGrid = view === "grid";
+  appElements.scheduleViewGrid.classList.toggle("is-active", isGrid);
+  appElements.scheduleViewList.classList.toggle("is-active", !isGrid);
+  appElements.myCoursesScheduleWrap.hidden = !isGrid;
+  appElements.myCoursesList.hidden = isGrid;
+  appElements.myCoursesDialog.classList.toggle("is-wide-schedule", isGrid);
+  if (isGrid) renderMyCoursesSchedule();
+  else renderMyCourses();
+}
+
 async function loadMyCourses(silent = false) {
   if (appState.loadingMyCourses) return;
   if (!appState.session?.logged_in) {
@@ -778,6 +1044,7 @@ async function loadMyCourses(silent = false) {
     appState.myCoursesLoaded = true;
     appElements.myCoursesHint.textContent = `学校系统当前返回 ${appState.myCourses.length} 门已选课程。`;
     renderMyCourses();
+    renderMyCoursesSchedule();
   } catch (error) {
     if (!(error instanceof SessionExpiredError)) {
       if (preserveExisting) {
@@ -937,8 +1204,18 @@ appElements.openCart.addEventListener("click", async () => {
 });
 appElements.openMyCourses.addEventListener("click", async () => {
   appElements.myCoursesDialog.showModal();
+  switchMyCoursesView(appState.myCoursesView);
+  await loadCart();
   await loadMyCourses();
 });
+appElements.scheduleViewGrid.addEventListener("click", () => switchMyCoursesView("grid"));
+appElements.scheduleViewList.addEventListener("click", () => switchMyCoursesView("list"));
+appElements.showPendingSwitch.addEventListener("change", () => {
+  appState.showCartOnSchedule = appElements.showPendingSwitch.checked;
+  renderMyCoursesSchedule();
+});
+appElements.scheduleViewGrid.addEventListener("click", () => switchMyCoursesView("grid"));
+appElements.scheduleViewList.addEventListener("click", () => switchMyCoursesView("list"));
 appElements.refreshMyCourses.addEventListener("click", () => loadMyCourses());
 appElements.openEnrollConfirm.addEventListener("click", () => {
   if (!appState.grabPhase) return;
