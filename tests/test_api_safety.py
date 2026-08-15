@@ -398,3 +398,48 @@ def test_closed_batch_name_cannot_start_enrollment(tmp_path, monkeypatch):
 
     assert response.status_code == 409
     assert "未开放或已结束" in response.json()["message"]
+
+
+def test_keep_alive_skips_when_not_logged_in(monkeypatch):
+    monkeypatch.setattr(config, "token", "")
+    monkeypatch.setattr(config, "combined_cookie", "")
+    called = []
+    monkeypatch.setattr(app, "refresh_elective_batch", lambda *args: called.append(args))
+
+    app._keep_alive_once()
+
+    assert called == []
+
+
+def test_keep_alive_refreshes_session_when_logged_in(monkeypatch):
+    monkeypatch.setattr(config, "token", "active-token")
+    monkeypatch.setattr(config, "combined_cookie", "cookie")
+    monkeypatch.setattr(config, "student_id", "2024110122")
+    called = []
+    monkeypatch.setattr(app, "refresh_elective_batch", lambda *args: called.append(args))
+
+    app._keep_alive_once()
+
+    assert len(called) == 1
+    assert called[0][0] == "2024110122"
+
+
+def test_keep_alive_triggers_ocr_recovery_on_expiry(monkeypatch):
+    monkeypatch.setattr(config, "token", "expired-token")
+    monkeypatch.setattr(config, "combined_cookie", "cookie")
+    monkeypatch.setattr(config, "student_id", "2024110122")
+    monkeypatch.setattr(
+        app,
+        "refresh_elective_batch",
+        lambda *args: (_ for _ in ()).throw(logic.SchoolBatchSessionExpiredError("expired")),
+    )
+    relogin_called = []
+    monkeypatch.setattr(
+        app,
+        "attempt_automatic_relogin",
+        lambda *args, **kwargs: (relogin_called.append(args) or (True, "")),
+    )
+
+    app._keep_alive_once()
+
+    assert len(relogin_called) == 1
