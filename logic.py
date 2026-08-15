@@ -341,9 +341,65 @@ def _paddle_engine():
 
 @lru_cache(maxsize=1)
 def _ddddocr_engines():
-    from ddddocr import DetectionEngine, OCREngine
+    from ddddocr import DdddOcr
 
-    return DetectionEngine(), OCREngine(beta=True)
+    detector = DdddOcr(det=True, show_ad=False)
+    ocr = DdddOcr(ocr=True, beta=True, show_ad=False)
+    return detector, ocr
+
+
+def _template_match_targets(
+    image: Any,
+    bottom_boxes: list[list[int]],
+) -> list[list[int]]:
+    """Match 4 target characters (top region) to bottom candidates by image similarity.
+
+    The top region is a fixed 4-column grid; each column is resized and compared
+    against every unmatched candidate box using normalised cross-correlation.
+    """
+    import cv2
+
+    if len(bottom_boxes) < 4:
+        return []
+
+    top_region = image[0:15, 80:135]
+    top_char_width = 55 // 4
+    bottom_img = image[25:80, 0:250]
+
+    result: list[list[int]] = []
+    used: set[int] = set()
+    for ti in range(4):
+        tx1 = ti * top_char_width
+        tx2 = (ti + 1) * top_char_width if ti < 3 else 55
+        target = top_region[:, tx1:tx2]
+        th, tw = target.shape[:2]
+        if th < 1 or tw < 1:
+            return []
+
+        best_score = -2.0
+        best_idx = -1
+        for bi, (bx1, by1, bx2, by2) in enumerate(bottom_boxes):
+            if bi in used:
+                continue
+            candidate = bottom_img[by1:by2, bx1:bx2]
+            ch, cw = candidate.shape[:2]
+            if ch < 1 or cw < 1:
+                continue
+            target_resized = cv2.resize(target, (cw, ch))
+            score = float(cv2.matchTemplate(candidate, target_resized, cv2.TM_CCOEFF_NORMED).max())
+            if score > best_score:
+                best_score = score
+                best_idx = bi
+
+        if best_idx < 0:
+            return []
+        used.add(best_idx)
+        bx1, by1, bx2, by2 = bottom_boxes[best_idx]
+        cx = (bx1 + bx2) // 2
+        cy = (by1 + by2) // 2 + 25
+        result.append([cx, cy])
+
+    return result
 
 
 def recognize_captcha_centers() -> list[list[int]]:
@@ -369,15 +425,18 @@ def recognize_captcha_centers() -> list[list[int]]:
     with open(top_path, "rb") as handle:
         top = handle.read()
 
-    recognition_text = "".join(ocr.predict(bottom).split())
-    boxes = sorted(detector.predict(bottom), key=lambda item: item[0])
-    if len(boxes) != len(recognition_text) or len(boxes) < 4:
-        logger.warning(
-            "OCR candidate count mismatch: text=%s boxes=%s",
+    recognition_text = "".join(ocr.classification(bottom).split())
+    boxes = sorted(detector.detection(bottom), key=lambda item: item[0])
+    if len(boxes) < 4:
+        logger.warning("OCR detected only %s candidate boxes", len(boxes))
+        return []
+    if len(boxes) != len(recognition_text):
+        logger.info(
+            "OCR candidate count mismatch: text=%s boxes=%s, using template matching",
             len(recognition_text),
             len(boxes),
         )
-        return []
+        return _template_match_targets(image, boxes)
 
     centers = [[(x1 + x2) // 2, (y1 + y2) // 2 + 25] for x1, y1, x2, y2 in boxes]
 
@@ -387,7 +446,7 @@ def recognize_captcha_centers() -> list[list[int]]:
     except Exception as exc:
         logger.warning("PaddleOCR unavailable; using ddddocr: %s", exc)
     if not target_text:
-        target_text = ocr.predict(top)
+        target_text = ocr.classification(top)
     target_text = "".join(target_text.split())
 
     logger.debug("OCR target=%s candidates=%s", target_text, recognition_text)
@@ -396,6 +455,7 @@ def recognize_captcha_centers() -> list[list[int]]:
 
     result = []
     used_indexes = set()
+    unmatched_targets = []
     for target_char in target_text:
         matched_index = next(
             (
@@ -405,11 +465,32 @@ def recognize_captcha_centers() -> list[list[int]]:
             ),
             None,
         )
-        if matched_index is None:
-            return []
-        used_indexes.add(matched_index)
-        result.append(centers[matched_index])
-    return result
+        if matched_index is not None:
+            used_indexes.add(matched_index)
+            result.append((target_char, centers[matched_index]))
+        else:
+            unmatched_targets.append(target_char)
+
+    # Fallback: assign remaining unmatched targets to remaining unmatched candidates
+    # in left-to-right order.  This handles OCR misreads where a target character
+    # was recognised differently in the top and bottom regions.
+    remaining_indexes = [i for i in range(len(centers)) if i not in used_indexes]
+    if unmatched_targets and len(remaining_indexes) == len(unmatched_targets):
+        for _target_char, idx in zip(unmatched_targets, remaining_indexes, strict=True):
+            result.append((_target_char, centers[idx]))
+    elif unmatched_targets:
+        logger.info(
+            "OCR text matching failed (%s vs %s), trying image template matching",
+            target_text,
+            recognition_text,
+        )
+        template_result = _template_match_targets(image, boxes)
+        if template_result and len(template_result) == 4:
+            logger.info("Image template matching succeeded")
+            return template_result
+        return []
+
+    return [center for _char, center in result]
 
 
 def _extract_captcha_message(payload: Any, response_text: str = "") -> str:

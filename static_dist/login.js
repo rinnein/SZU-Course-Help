@@ -122,6 +122,7 @@ const loginState = {
   captchaFailureMessage: "",
   points: [],
   loadingCaptcha: false,
+  solvingCaptcha: false,
   submitting: false,
   uiCacheToken: "",
 };
@@ -141,6 +142,7 @@ const loginElements = {
   statusDetail: document.querySelector("#captchaStatusDetail"),
   undo: document.querySelector("#undoPoint"),
   refresh: document.querySelector("#refreshCaptcha"),
+  solveCaptcha: document.querySelector("#solveCaptcha"),
   message: document.querySelector("#loginMessage"),
   submit: document.querySelector("#loginButton"),
 };
@@ -148,7 +150,7 @@ const loginElements = {
 const captchaStatusCopy = {
   idle: ["准备获取验证码", "正在准备本地登录环境。"],
   loading: ["正在获取验证码", "正在连接学校选课系统，请稍候。"],
-  ready: ["验证码已就绪", "请按顶部提示依次点击四个汉字。"],
+  ready: ["验证码已就绪", "点击“自动识别”自动填入，或按顶部提示依次点击四个汉字。"],
   unavailable: [
     "当前时段暂无验证码",
     "学校当前没有返回登录验证码，请等待选课开放或维护结束后再试。",
@@ -163,10 +165,12 @@ function setLoginMessage(message, success = false) {
 
 function updateLoginControls() {
   const captchaReady = loginState.captchaStatus === "ready" && Boolean(loginState.captcha);
-  const busy = loginState.loadingCaptcha || loginState.submitting;
+  const busy = loginState.loadingCaptcha || loginState.submitting || loginState.solvingCaptcha;
   loginElements.refresh.disabled = busy;
   loginElements.undo.disabled = busy || !captchaReady || loginState.points.length === 0;
-  loginElements.submit.disabled = loginState.submitting || !captchaReady;
+  loginElements.solveCaptcha.disabled = busy || !captchaReady;
+  loginElements.submit.disabled = loginState.submitting || loginState.solvingCaptcha || !captchaReady;
+  loginElements.solveCaptcha.textContent = loginState.solvingCaptcha ? "识别中…" : "自动识别";
 }
 
 function isValidStudentId(value) {
@@ -195,6 +199,50 @@ function setCaptchaStatus(status, title = "", detail = "") {
   loginElements.statusDetail.textContent = detail || fallback[1];
   loginElements.refresh.textContent = status === "ready" ? "刷新验证码" : "重新获取验证码";
   updateLoginControls();
+}
+
+
+async function solveCaptcha() {
+  if (loginState.solvingCaptcha || loginState.submitting) return;
+  if (!loginState.captcha || loginState.captchaStatus !== "ready") return;
+
+  loginState.solvingCaptcha = true;
+  updateLoginControls();
+  clearCaptchaPoints();
+  setLoginMessage("正在自动识别验证码...", true);
+
+  try {
+    const result = await requestJson("/api/captcha/solve", {
+      method: "POST",
+      body: JSON.stringify({
+        imageUrl: loginState.captcha.imageUrl,
+        vtoken: loginState.captcha.vtoken,
+        cookie: loginState.captcha.cookie,
+      }),
+    });
+    if (result.captcha) {
+      loginState.captcha = result.captcha;
+      await loadCaptchaImage(result.captcha.imageUrl);
+      renderCaptchaPoints();
+    }
+    const points = result.points;
+    if (Array.isArray(points) && points.length === 4) {
+      loginState.points = points.map((p) => {
+        const x = Math.max(0, Math.min(250, Math.round(p[0])));
+        const y = Math.max(0, Math.min(80, Math.round(p[1])));
+        return [x, y];
+      });
+      renderCaptchaPoints();
+      setLoginMessage("已自动识别四个汉字，可直接登录", true);
+    } else {
+      setLoginMessage(result.message || "OCR 未能识别，请手动点击四个汉字");
+    }
+  } catch (error) {
+    setLoginMessage(error instanceof Error ? error.message : "OCR 识别失败，请手动点击");
+  } finally {
+    loginState.solvingCaptcha = false;
+    updateLoginControls();
+  }
 }
 
 function versionedPage(path) {
@@ -535,6 +583,7 @@ loginElements.undo.addEventListener("click", () => {
   renderCaptchaPoints();
 });
 loginElements.refresh.addEventListener("click", loadCaptcha);
+loginElements.solveCaptcha.addEventListener("click", solveCaptcha);
 loginElements.form.addEventListener("submit", submitLogin);
 loginElements.passwordToggle.addEventListener("click", () => {
   const hidden = loginElements.password.type === "password";

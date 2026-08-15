@@ -443,3 +443,47 @@ def test_keep_alive_triggers_ocr_recovery_on_expiry(monkeypatch):
     app._keep_alive_once()
 
     assert len(relogin_called) == 1
+
+
+def test_captcha_solve_rejects_missing_image():
+    response = client.post("/api/captcha/solve", json={})
+    assert response.status_code == 400
+    assert response.json()["is_error"] is True
+
+
+def test_captcha_solve_returns_points_when_ocr_succeeds(monkeypatch, tmp_path):
+    import base64
+
+    monkeypatch.setattr(logic, "_captcha_image_path", lambda: tmp_path / "image.jpg")
+    monkeypatch.setattr(
+        logic,
+        "recognize_captcha_centers",
+        lambda: [[10, 30], [40, 40], [80, 50], [120, 60]],
+    )
+
+    tiny_jpeg = b"\xff\xd8\xff\xe0" + b"\x00" * 20
+    image_url = f"data:image/jpeg;base64,{base64.b64encode(tiny_jpeg).decode()}"
+
+    response = client.post("/api/captcha/solve", json={"imageUrl": image_url})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert len(body["points"]) == 4
+    assert body["points"][0] == [10, 30]
+
+
+def test_captcha_solve_returns_empty_when_ocr_fails(monkeypatch, tmp_path):
+    import base64
+
+    monkeypatch.setattr(logic, "_captcha_image_path", lambda: tmp_path / "image.jpg")
+    monkeypatch.setattr(logic, "recognize_captcha_centers", lambda: [])
+
+    tiny_jpeg = b"\xff\xd8\xff\xe0" + b"\x00" * 20
+    image_url = f"data:image/jpeg;base64,{base64.b64encode(tiny_jpeg).decode()}"
+
+    response = client.post("/api/captcha/solve", json={"imageUrl": image_url})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["points"] == []
+    assert "OCR" in body["message"]

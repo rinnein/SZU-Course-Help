@@ -62,7 +62,7 @@ from services.enroll_service import (
 
 SERVER_HOST = "127.0.0.1"
 DEFAULT_SERVER_PORT = 8000
-UI_ASSET_BUILD = "20260720.3"
+UI_ASSET_BUILD = "20260720.5"
 UI_CACHE_TOKEN = secrets.token_urlsafe(8)
 logger = logging.getLogger(__name__)
 
@@ -403,6 +403,90 @@ async def api_captcha():
             "CAPTCHA_INTERNAL_ERROR",
             retryable=False,
         )
+
+
+CAPTCHA_SOLVE_MAX_RETRIES = 20
+
+
+@app.post("/api/captcha/solve", status_code=status.HTTP_200_OK)
+async def api_captcha_solve(payload: dict):
+    """Run local OCR on the captcha image and return four click coordinates.
+
+    If OCR fails on the provided image, the server automatically fetches fresh
+    captchas and retries.  When a retry succeeds the new captcha data
+    (``vtoken``, ``cookie``, ``imageUrl``) is returned so the frontend can
+    update its state.
+    """
+    import base64
+
+    image_url = str(payload.get("imageUrl", "")).strip()
+    if not image_url.startswith("data:image/"):
+        return JSONResponse(
+            status_code=400,
+            content={"message": "缺少验证码图片数据", "is_error": True},
+        )
+
+    current_vtoken = str(payload.get("vtoken", "")).strip()
+    current_cookie = str(payload.get("cookie", "")).strip()
+    current_image_url = image_url
+
+    for attempt in range(1, CAPTCHA_SOLVE_MAX_RETRIES + 1):
+        try:
+            header, encoded = current_image_url.split(",", 1)
+            image_bytes = base64.b64decode(encoded)
+            image_path = logic._captcha_image_path()
+            image_path.parent.mkdir(parents=True, exist_ok=True)
+            image_path.write_bytes(image_bytes)
+
+            centers = await asyncio.to_thread(logic.recognize_captcha_centers)
+            if centers and len(centers) == 4:
+                response = {"points": centers, "message": ""}
+                if attempt > 1:
+                    response["captcha"] = {
+                        "vtoken": current_vtoken,
+                        "cookie": current_cookie,
+                        "imageUrl": current_image_url,
+                    }
+                return JSONResponse(content=response)
+
+            logger.info(
+                "Captcha solve attempt %s/%s: OCR returned %s points",
+                attempt,
+                CAPTCHA_SOLVE_MAX_RETRIES,
+                len(centers) if centers else 0,
+            )
+        except (ImportError, ModuleNotFoundError) as exc:
+            logger.warning("OCR dependency unavailable: %s", exc)
+            return JSONResponse(
+                status_code=500,
+                content={"points": [], "message": f"OCR 依赖不可用: {exc}"},
+            )
+        except Exception as exc:
+            logger.warning("Captcha solve attempt %s/%s failed: %s", attempt, CAPTCHA_SOLVE_MAX_RETRIES, exc)
+
+        # Fetch a fresh captcha for the next retry
+        if attempt < CAPTCHA_SOLVE_MAX_RETRIES:
+            try:
+                fresh = await asyncio.to_thread(logic.fetch_vtoken_and_image, 1)
+                current_vtoken = fresh["vtoken"]
+                current_cookie = fresh["cookie"]
+                current_image_url = fresh["imageUrl"]
+            except Exception as exc:
+                logger.warning("Failed to fetch fresh captcha for retry: %s", exc)
+                break
+
+    return JSONResponse(
+        status_code=200,
+        content={
+            "points": [],
+            "message": "OCR 多次尝试未能识别，请手动点击或刷新验证码重试",
+            "captcha": {
+                "vtoken": current_vtoken,
+                "cookie": current_cookie,
+                "imageUrl": current_image_url,
+            },
+        },
+    )
 
 
 @app.get("/api/session")
