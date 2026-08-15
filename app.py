@@ -62,7 +62,7 @@ from services.enroll_service import (
 
 SERVER_HOST = "127.0.0.1"
 DEFAULT_SERVER_PORT = 8000
-UI_ASSET_BUILD = "20260720.1"
+UI_ASSET_BUILD = "20260720.3"
 UI_CACHE_TOKEN = secrets.token_urlsafe(8)
 logger = logging.getLogger(__name__)
 

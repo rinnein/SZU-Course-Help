@@ -6,7 +6,7 @@
   <meta name="color-scheme" content="light">
   <title>登录 | 深大抢课助手</title>
   <link rel="icon" href="/favicon.ico">
-  <link rel="stylesheet" href="/styles.css?build=20260720.1">
+  <link rel="stylesheet" href="/styles.css?build=20260720.3">
 </head>
 <body class="login-page">
   <section class="login-visual" aria-label="深大抢课助手">
@@ -46,6 +46,11 @@
           </span>
         </label>
 
+        <label class="remember-row">
+          <input id="rememberCredentials" type="checkbox">
+          <span>记住账号密码（仅保存在本浏览器）</span>
+        </label>
+
         <fieldset class="captcha-fieldset">
           <legend>
             <span>点击验证码</span>
@@ -71,11 +76,11 @@
         </button>
       </form>
 
-      <p class="privacy-note">密码仅保存在本次进程内存中，用于会话过期后的 OCR 自动重登录。</p>
+      <p class="privacy-note">勾选"记住账号密码"后，学号以明文、密码经本机 AES-GCM 加密后保存在本浏览器本地，下次自动解密填充；不勾选则仅保存在本次进程内存中，用于会话过期后的 OCR 自动重登录。</p>
     </div>
   </main>
 
   <noscript>此页面需要启用 JavaScript。</noscript>
-  <script src="/login.js?build=20260720.1" defer></script>
+  <script src="/login.js?build=20260720.3" defer></script>
 </body>
 </html>
