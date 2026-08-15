@@ -1079,6 +1079,42 @@ def open_browser() -> None:
     webbrowser.open(get_login_url())
 
 
+KEEP_ALIVE_INTERVAL_SECONDS = 60
+
+
+def _keep_alive_once() -> None:
+    """Refresh the school session so it does not expire while the user is idle."""
+    snapshot = get_session_snapshot()
+    if not snapshot["logged_in"] or not snapshot["student_id"]:
+        return
+    student_id = str(snapshot["student_id"])
+    token = str(config.token)
+    try:
+        refresh_elective_batch(student_id, token)
+        logger.info("Keep-alive: school session refreshed")
+    except logic.SchoolBatchSessionExpiredError:
+        logger.info("Keep-alive: session expired; starting OCR recovery")
+        recovered, error = attempt_automatic_relogin(config.ocr_relogin_max_attempts)
+        if not recovered:
+            logger.warning("Keep-alive OCR recovery failed: %s", error)
+    except logic.ElectiveBatchUnavailableError as exc:
+        logger.info("Keep-alive: school session alive but no batch: %s", exc)
+    except (requests.Timeout, requests.RequestException) as exc:
+        logger.info("Keep-alive network issue (session unaffected): %s", exc)
+    except Exception as exc:
+        logger.warning("Keep-alive unexpected failure: %s", exc)
+
+
+def _keep_alive_loop() -> None:
+    """Run periodic session refresh on a daemon thread until the process exits."""
+    while True:
+        threading.Event().wait(KEEP_ALIVE_INTERVAL_SECONDS)
+        try:
+            _keep_alive_once()
+        except Exception as exc:
+            logger.warning("Keep-alive loop error: %s", exc)
+
+
 def start_server() -> None:
     import uvicorn
 
@@ -1087,6 +1123,9 @@ def start_server() -> None:
         timer = threading.Timer(1.2, open_browser)
         timer.daemon = True
         timer.start()
+    keep_alive = threading.Thread(target=_keep_alive_loop, name="session-keep-alive", daemon=True)
+    keep_alive.start()
+    logger.info("Session keep-alive started (every %ds)", KEEP_ALIVE_INTERVAL_SECONDS)
     uvicorn.run(app, host=SERVER_HOST, port=SERVER_PORT)
 
 
