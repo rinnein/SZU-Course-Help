@@ -2309,3 +2309,455 @@ dialog::backdrop {
     transition-duration: 0.01ms !important;
   }
 }
+
+
+/* ==================================================================
+   Schedule (weekly grid) view
+   ================================================================== */
+
+.schedule-view-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 26px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.schedule-view-toggle-group {
+  display: flex;
+  gap: 0;
+}
+
+.schedule-view-toggle-group .button {
+  min-height: 34px;
+  padding: 6px 16px;
+  border-radius: 0;
+  border: 1px solid var(--line);
+  border-right-width: 0;
+  font-size: 12.5px;
+  background: var(--surface-2);
+  color: var(--muted);
+  cursor: pointer;
+  transition: background-color 120ms ease, color 120ms ease;
+}
+
+.schedule-view-toggle-group .button:first-child {
+  border-radius: var(--radius-xs) 0 0 var(--radius-xs);
+}
+
+.schedule-view-toggle-group .button:last-child {
+  border-radius: 0 var(--radius-xs) var(--radius-xs) 0;
+  border-right-width: 1px;
+}
+
+.schedule-view-toggle-group .button.is-active {
+  background: var(--brand);
+  color: var(--brand-ink);
+  border-color: var(--brand);
+}
+
+.schedule-view-toggle-group .button:hover:not(.is-active) {
+  background: var(--surface-3);
+  color: var(--ink-soft);
+}
+
+.my-courses-schedule-wrap {
+  min-height: 160px;
+  max-height: calc(100dvh - 320px);
+  overflow-y: auto;
+  padding: 16px 26px;
+}
+
+.schedule-layout {
+  display: flex;
+  gap: 16px;
+  align-items: flex-start;
+}
+
+.schedule-grid-wrap {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-x: auto;
+}
+
+.schedule-grid {
+  display: grid;
+  gap: 1px;
+  background: var(--line);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  min-width: 680px;
+}
+
+.schedule-corner {
+  display: grid;
+  place-items: center;
+  background: var(--surface-2);
+  font-size: 10px;
+  color: var(--muted);
+}
+
+.schedule-col-header {
+  display: grid;
+  place-items: center;
+  padding: 8px 4px;
+  background: var(--surface-2);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ink-soft);
+}
+
+.schedule-col-header.is-today {
+  background: var(--brand-tint);
+  color: var(--brand);
+}
+
+.schedule-row-label {
+  display: grid;
+  place-items: center;
+  padding: 2px;
+  background: var(--surface-2);
+  text-align: center;
+}
+
+.schedule-row-label.is-break {
+  border-top: 1px solid var(--line-strong);
+}
+
+.schedule-row-label strong {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--ink);
+}
+
+.schedule-row-label small {
+  display: block;
+  margin-top: 1px;
+  color: var(--faint);
+  font-size: 9px;
+  font-family: var(--font-num);
+}
+
+.schedule-cell {
+  min-height: 30px;
+  padding: 0;
+  background: var(--surface);
+  overflow: hidden;
+}
+
+.schedule-cell.is-break {
+  border-top: 1px solid var(--line-strong);
+}
+
+.schedule-cell.is-today {
+  background: var(--surface-2);
+}
+
+.schedule-course {
+  border-radius: var(--radius-xs);
+  padding: 4px 6px;
+  font-size: 11px;
+  cursor: default;
+  overflow: hidden;
+  border: 1px solid transparent;
+}
+
+.schedule-course strong {
+  display: block;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1.3;
+  overflow-wrap: anywhere;
+}
+
+.schedule-weeks {
+  display: block;
+  margin-top: 2px;
+  font-size: 10px;
+  font-family: var(--font-num);
+  opacity: 0.85;
+}
+
+.schedule-place {
+  display: block;
+  margin-top: 1px;
+  font-size: 10px;
+  opacity: 0.7;
+  overflow-wrap: anywhere;
+}
+
+.schedule-teacher {
+  display: block;
+  margin-top: 1px;
+  font-size: 10px;
+  opacity: 0.6;
+}
+
+/* Course color palette — 12 distinct, soft background colors */
+.schedule-course[data-color="0"],
+.schedule-nonstandard-item[data-color="0"] {
+  background: #e8f0fe;
+  color: #1565c0;
+  border-color: #c3d7f5;
+}
+
+.schedule-course[data-color="1"],
+.schedule-nonstandard-item[data-color="1"] {
+  background: #e8f5e9;
+  color: #2e7d32;
+  border-color: #c8e6c9;
+}
+
+.schedule-course[data-color="2"],
+.schedule-nonstandard-item[data-color="2"] {
+  background: #fff3e0;
+  color: #e65100;
+  border-color: #ffe0b2;
+}
+
+.schedule-course[data-color="3"],
+.schedule-nonstandard-item[data-color="3"] {
+  background: #fce4ec;
+  color: #c2185b;
+  border-color: #f8bbd0;
+}
+
+.schedule-course[data-color="4"],
+.schedule-nonstandard-item[data-color="4"] {
+  background: #f3e5f5;
+  color: #7b1fa2;
+  border-color: #e1bee7;
+}
+
+.schedule-course[data-color="5"],
+.schedule-nonstandard-item[data-color="5"] {
+  background: #e0f7fa;
+  color: #00838f;
+  border-color: #b2ebf2;
+}
+
+.schedule-course[data-color="6"],
+.schedule-nonstandard-item[data-color="6"] {
+  background: #fffde7;
+  color: #827717;
+  border-color: #fff9c4;
+}
+
+.schedule-course[data-color="7"],
+.schedule-nonstandard-item[data-color="7"] {
+  background: #efebe9;
+  color: #4e342e;
+  border-color: #d7ccc8;
+}
+
+.schedule-course[data-color="8"],
+.schedule-nonstandard-item[data-color="8"] {
+  background: #e8eaf6;
+  color: #283593;
+  border-color: #c5cae9;
+}
+
+.schedule-course[data-color="9"],
+.schedule-nonstandard-item[data-color="9"] {
+  background: #f1f8e9;
+  color: #558b2f;
+  border-color: #dcedc8;
+}
+
+.schedule-course[data-color="10"],
+.schedule-nonstandard-item[data-color="10"] {
+  background: #fbe9e7;
+  color: #bf360c;
+  border-color: #ffccbc;
+}
+
+.schedule-course[data-color="11"],
+.schedule-nonstandard-item[data-color="11"] {
+  background: #e0f2f1;
+  color: #00695c;
+  border-color: #b2dfdb;
+}
+
+/* Non-standard time list (right side) */
+.schedule-nonstandard {
+  flex: 0 0 220px;
+  padding: 0 0 0 16px;
+  border-left: 1px solid var(--line);
+  max-height: calc(100dvh - 380px);
+  overflow-y: auto;
+}
+
+.schedule-nonstandard-title {
+  margin: 0 0 10px;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--ink-soft);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.schedule-nonstandard-item {
+  border-radius: var(--radius-xs);
+  padding: 8px 10px;
+  margin-bottom: 8px;
+  font-size: 11.5px;
+  border: 1px solid transparent;
+}
+
+.schedule-nonstandard-item strong {
+  display: block;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.3;
+  overflow-wrap: anywhere;
+}
+
+.schedule-nonstandard-meta {
+  margin-top: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  font-size: 10.5px;
+  opacity: 0.8;
+}
+
+.schedule-nonstandard > p:last-child {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+/* Wide dialog for schedule view */
+.drawer-dialog.is-wide-schedule {
+  width: min(1180px, calc(100vw - 28px));
+  max-height: calc(100dvh - 28px);
+}
+
+/* Course stack (spans multiple period rows) */
+.schedule-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 2px;
+  position: relative;
+  z-index: 1;
+  min-width: 0;
+  min-height: 100%;
+  overflow: hidden;
+}
+
+.schedule-stack > .schedule-course {
+  flex: 1 1 0;
+  min-height: 0;
+}
+
+/* Pending (cart, not yet enrolled) course styles */
+.schedule-course.is-pending {
+  opacity: 0.5;
+  border-style: dashed;
+  filter: saturate(0.6);
+}
+
+.schedule-course.is-pending:hover {
+  opacity: 0.8;
+}
+
+.schedule-nonstandard-item.is-pending {
+  opacity: 0.65;
+  border-style: dashed;
+}
+
+.schedule-pending-badge {
+  display: inline-block;
+  margin-top: 2px;
+  padding: 1px 5px;
+  border-radius: 999px;
+  font-size: 9px;
+  font-weight: 700;
+  color: var(--gold);
+  background: var(--gold-tint);
+}
+
+/* Pending toggle switch */
+.schedule-pending-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--ink-soft);
+  cursor: pointer;
+  user-select: none;
+}
+
+.schedule-pending-toggle input {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 34px;
+  height: 19px;
+  border-radius: 999px;
+  background: var(--surface-3);
+  border: 1px solid var(--line-strong);
+  position: relative;
+  cursor: pointer;
+  transition: background 140ms ease, border-color 140ms ease;
+  margin: 0;
+}
+
+.schedule-pending-toggle input::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 13px;
+  height: 13px;
+  border-radius: 50%;
+  background: #fff;
+  border: 1px solid var(--line-strong);
+  transition: transform 140ms ease;
+}
+
+.schedule-pending-toggle input:checked {
+  background: var(--brand);
+  border-color: var(--brand);
+}
+
+.schedule-pending-toggle input:checked::after {
+  transform: translateX(15px);
+}
+
+/* Legend */
+.schedule-legend {
+  margin-top: 12px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.legend-pending {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  border-radius: 3px;
+  border: 1px dashed var(--muted);
+  background: var(--surface-3);
+  opacity: 0.6;
+}
+
+/* Responsive */
+@media (max-width: 900px) {
+  .schedule-layout {
+    flex-direction: column;
+  }
+
+  .schedule-nonstandard {
+    flex: 0 0 auto;
+    width: 100%;
+    border-left: 0;
+    border-top: 1px solid var(--line);
+    padding: 16px 0 0;
+    max-height: none;
+  }
+}
