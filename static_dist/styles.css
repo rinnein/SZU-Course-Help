@@ -611,6 +611,34 @@ a {
   margin-top: 8px;
 }
 
+.captcha-webvpn-auth {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  margin-top: 10px;
+  padding: 12px;
+  border: 2px solid var(--brand);
+  border-radius: var(--radius-sm);
+  color: var(--ink);
+  background: var(--brand-tint);
+  box-shadow: 0 4px 14px rgba(29, 85, 208, 0.16);
+}
+
+.captcha-webvpn-auth strong {
+  color: var(--brand);
+  font-size: 14px;
+}
+
+.captcha-webvpn-auth span {
+  color: var(--ink-soft);
+  font-size: 12px;
+}
+
+.captcha-webvpn-auth .button {
+  align-self: flex-start;
+  margin-top: 3px;
+}
+
 .captcha-actions .button {
   min-height: 34px;
   padding: 6px 12px;
@@ -647,6 +675,70 @@ a {
 }
 
 .remember-row span {
+  line-height: 1.5;
+}
+
+.backend-fieldset {
+  min-width: 0;
+  margin: 0;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+}
+
+.backend-fieldset legend {
+  padding: 0 6px;
+  color: var(--ink-soft);
+  font-size: 12.5px;
+  font-weight: 700;
+}
+
+.backend-options {
+  display: grid;
+  gap: 8px;
+}
+
+.backend-option {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  padding: 9px 10px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-xs);
+  cursor: pointer;
+}
+
+.backend-option:has(input:checked) {
+  border-color: var(--brand);
+  background: var(--brand-tint);
+}
+
+.backend-option input {
+  margin-top: 3px;
+  accent-color: var(--brand);
+}
+
+.backend-option span {
+  display: grid;
+  gap: 2px;
+}
+
+.backend-option strong {
+  color: var(--ink);
+  font-size: 13px;
+}
+
+.backend-option small {
+  color: var(--muted);
+  font-size: 11.5px;
+  line-height: 1.4;
+}
+
+.backend-status {
+  margin-top: 10px;
+  color: var(--brand);
+  font-size: 12px;
   line-height: 1.5;
 }
 
@@ -698,6 +790,19 @@ a {
   color: var(--ink-soft);
   background: var(--surface-2);
   font-size: 12.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.backend-indicator {
+  max-width: 170px;
+  padding: 6px 11px;
+  border: 1px solid rgba(42, 93, 180, 0.2);
+  border-radius: 999px;
+  overflow: hidden;
+  color: var(--brand);
+  background: var(--brand-tint);
+  font-size: 11.5px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }

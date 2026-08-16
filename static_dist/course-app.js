@@ -50,6 +50,7 @@ const appState = {
   loadingProgress: false,
   knownSuccessIds: new Set(),
   wasTaskRunning: false,
+  backend: null,
 };
 
 const appElements = {
@@ -87,6 +88,7 @@ const appElements = {
   logout: document.querySelector("#logoutButton"),
   openSchoolRaw: document.querySelector("#openSchoolRaw"),
   toastRegion: document.querySelector("#toastRegion"),
+  backendIndicator: document.querySelector("#backendIndicator"),
   openMyCourses: document.querySelector("#openMyCourses"),
   myCoursesDialog: document.querySelector("#myCoursesDialog"),
   myCoursesList: document.querySelector("#myCoursesList"),
@@ -363,6 +365,8 @@ function setPhasePresentation() {
 
 function applySessionData(session) {
   appState.session = session;
+  appState.backend = session;
+  appElements.backendIndicator.textContent = `当前后端：${session.active_backend_label || "主站"}`;
   appElements.studentLabel.textContent = session.logged_in
     ? `学号 ${session.student_id}`
     : "未登录";
@@ -1270,8 +1274,8 @@ appElements.phaseConfirmation.addEventListener("change", () => {
   appElements.startEnroll.disabled = !appElements.phaseConfirmation.checked;
 });
 appElements.startEnroll.addEventListener("click", startEnrollment);
-appElements.openSchoolRaw.addEventListener("click", () => {
-  openSchoolRawPage();
+appElements.openSchoolRaw.addEventListener("click", async () => {
+  await openSchoolRawPage();
 });
 appElements.logout.addEventListener("click", async () => {
   try {
@@ -1285,14 +1289,23 @@ appElements.logout.addEventListener("click", async () => {
   }
 });
 
-function openSchoolRawPage() {
+async function openSchoolRawPage() {
   if (!appState.session?.logged_in) {
     showToast("请先登录，再打开学校原始页面", true);
     return;
   }
+  const session = appState.session;
+  const targetPath = "/xsxkapp/sys/xsxkapp/*default/index.do";
+  const useControlledBrowser = session.preference === "webvpn"
+    || session.active_backend === "webvpn"
+    || session.auto_fallback_active === true;
+  if (useControlledBrowser) {
+    showToast("WebVPN 模式暂不支持打开学校原始页面，请使用 API 工作台。", true);
+    return;
+  }
   // Same-origin path via the local reverse proxy; reuses the shared school
   // session, so no second login (which would kick the API session out).
-  const target = `${window.location.origin}/proxy/bkxk.szu.edu.cn/xsxkapp/sys/xsxkapp/*default/index.do`;
+  const target = `${window.location.origin}/proxy/bkxk.szu.edu.cn${targetPath}`;
   window.open(target, "_blank", "noopener,noreferrer");
 }
 

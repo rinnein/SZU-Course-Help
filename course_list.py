@@ -13,6 +13,7 @@ import requests
 
 import config
 from course_models import CoursesResponse
+from services import backend_service
 
 REQUEST_TIMEOUT = (5, 20)
 
@@ -28,22 +29,15 @@ class CourseQueryFailure:
 
 def get_headers() -> dict[str, str]:
     """Build headers from the latest in-memory school session."""
-    return {
-        "Accept": "application/json, text/javascript, */*; q=0.01",
-        "Accept-Encoding": "gzip, deflate",
-        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
-        "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-        "Cookie": config.combined_cookie,
-        "Host": "bkxk.szu.edu.cn",
-        "Origin": "http://bkxk.szu.edu.cn",
-        "Referer": (
-            "http://bkxk.szu.edu.cn/xsxkapp/sys/xsxkapp/"
-            f"*default/grablessons.do?token={config.token}"
-        ),
-        "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"),
-        "X-Requested-With": "XMLHttpRequest",
-        "token": config.token,
-    }
+    profile = backend_service.active_profile()
+    return backend_service.build_headers(
+        profile,
+        token=config.token,
+        cookie=backend_service.cookie_header(profile),
+        content_type="application/x-www-form-urlencoded; charset=UTF-8",
+        accept="application/json, text/javascript, */*; q=0.01",
+        referer=f"{profile.origin}/xsxkapp/sys/xsxkapp/*default/grablessons.do?token={config.token}",
+    )
 
 
 def _query_courses(
@@ -68,9 +62,15 @@ def _query_courses(
         "order": "",
         "orderBy": "courseNumber",
     }
-    response = requests.post(
-        config.SCHOOL_BASE_URL + endpoint,
-        headers=get_headers(),
+    def sender(**kwargs):
+        kwargs.pop("method", None)
+        return requests.post(**kwargs)
+
+    profile = backend_service.active_profile()
+    response = backend_service.request_with_failover(
+        "POST",
+        endpoint,
+        sender=sender,
         data={
             "querySetting": json.dumps(
                 query_setting,
@@ -79,6 +79,11 @@ def _query_courses(
             )
         },
         timeout=REQUEST_TIMEOUT,
+        token=config.token,
+        cookie=backend_service.cookie_header(profile),
+        content_type="application/x-www-form-urlencoded; charset=UTF-8",
+        accept="application/json, text/javascript, */*; q=0.01",
+        referer=f"{profile.origin}/xsxkapp/sys/xsxkapp/*default/grablessons.do?token={config.token}",
     )
     try:
         return CoursesResponse.from_response(response)

@@ -34,6 +34,7 @@ CourseEnroll/
 *.sqlite3
 session_state.bin
 session_state.key
+webvpn-browser-profile
 
 *.log
 .server.pid

@@ -31,6 +31,34 @@ def test_health_and_static_login_page():
     bootstrap = client.get("/api/bootstrap").json()
     assert bootstrap["ui_cache_token"] == app.UI_CACHE_TOKEN
     assert bootstrap["ui_asset_build"] == app.UI_ASSET_BUILD
+    assert bootstrap["preference"] in {"auto", "primary", "webvpn"}
+    assert "active_backend_label" in bootstrap
+
+
+def test_backend_selection_requires_webvpn_auth(monkeypatch):
+    monkeypatch.setattr(config, "webvpn_cookie", "")
+    response = client.post("/api/backend/select", json={"backend": "webvpn"})
+    assert response.status_code == 200
+    assert response.json()["requires_webvpn_auth"] is True
+    assert response.json()["preference"] == "webvpn"
+
+
+def test_logout_clears_proxy_cookie_mirrors(monkeypatch):
+    monkeypatch.setattr(config, "token", "token")
+    monkeypatch.setattr(config, "combined_cookie", "route=route; JSESSIONID=session; _WEU=weu")
+    monkeypatch.setattr(
+        config,
+        "webvpn_cookie",
+        "_webvpn_key=key; webvpn_username=user; webvpn_username_NS_Sig=sig",
+    )
+
+    response = client.post("/api/logout")
+    cookie_headers = response.headers.get_list("set-cookie")
+
+    assert response.status_code == 200
+    assert any("_webvpn_key=;" in value for value in cookie_headers)
+    assert any("Path=/proxy/bkxk.webvpn.szu.edu.cn/" in value for value in cookie_headers)
+    assert any("Path=/proxy/bkxk.szu.edu.cn/" in value for value in cookie_headers)
 
 
 def test_school_proxy_route_separates_host_from_school_path(monkeypatch):
@@ -447,7 +475,6 @@ def test_keep_alive_skips_when_not_logged_in(monkeypatch):
 
 
 def test_keep_alive_refreshes_session_when_logged_in(monkeypatch):
-    monkeypatch.setattr(app, "_last_frontend_session_success", 0.0)
     monkeypatch.setattr(config, "token", "active-token")
     monkeypatch.setattr(config, "combined_cookie", "cookie")
     monkeypatch.setattr(config, "student_id", "2024110122")
@@ -461,7 +488,6 @@ def test_keep_alive_refreshes_session_when_logged_in(monkeypatch):
 
 
 def test_keep_alive_triggers_ocr_recovery_on_expiry(monkeypatch):
-    monkeypatch.setattr(app, "_last_frontend_session_success", 0.0)
     monkeypatch.setattr(config, "token", "expired-token")
     monkeypatch.setattr(config, "combined_cookie", "cookie")
     monkeypatch.setattr(config, "student_id", "2024110122")
@@ -483,7 +509,6 @@ def test_keep_alive_triggers_ocr_recovery_on_expiry(monkeypatch):
 
 
 def test_keep_alive_requires_manual_login_for_unvalidated_restored_session(monkeypatch):
-    monkeypatch.setattr(app, "_last_frontend_session_success", 0.0)
     monkeypatch.setattr(config, "token", "expired-token")
     monkeypatch.setattr(config, "combined_cookie", "cookie")
     monkeypatch.setattr(config, "student_id", "2024110122")
@@ -509,7 +534,7 @@ def test_keep_alive_requires_manual_login_for_unvalidated_restored_session(monke
     assert config.combined_cookie == ""
 
 
-def test_keep_alive_skips_when_frontend_session_heartbeat_is_active(monkeypatch):
+def test_keep_alive_runs_even_when_frontend_session_is_active(monkeypatch):
     monkeypatch.setattr(config, "token", "active-token")
     monkeypatch.setattr(config, "combined_cookie", "cookie")
     monkeypatch.setattr(config, "student_id", "2024110122")
@@ -519,7 +544,7 @@ def test_keep_alive_skips_when_frontend_session_heartbeat_is_active(monkeypatch)
     assert client.get("/api/session").status_code == 200
     app._keep_alive_once()
 
-    assert called == []
+    assert called == [("2024110122", "active-token")]
 
 
 def test_captcha_solve_rejects_missing_image():

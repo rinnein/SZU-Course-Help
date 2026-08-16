@@ -9,7 +9,6 @@ import re
 import secrets
 import socket
 import threading
-import time
 import webbrowser
 from datetime import datetime
 from pathlib import Path
@@ -30,7 +29,7 @@ from security.key_manager import (
     generate_card_key,
     get_or_create_key_pair,
 )
-from services import cart_service
+from services import backend_service, cart_service, webvpn_auth_service
 from services.auth_service import (
     LOGIN_ERROR_MSG,
     attempt_automatic_relogin,
@@ -45,6 +44,7 @@ from services.auth_service import (
     restore_login_state,
     restored_session_validation_pending,
     save_login_state,
+    update_backend_preference,
     validate_login_params,
 )
 from services.cache_service import get_no_cache_headers
@@ -65,11 +65,11 @@ from services.enroll_service import (
     run_enroll_task,
     stop_enroll_task,
 )
-from services.proxy_service import SCHOOL_HOST, proxy_request
+from services.proxy_service import SCHOOL_HOST, clear_proxy_cookie_mirror, proxy_request
 
 SERVER_HOST = "127.0.0.1"
 DEFAULT_SERVER_PORT = 8000
-UI_ASSET_BUILD = "20260816.1"
+UI_ASSET_BUILD = "20260817.1"
 UI_CACHE_TOKEN = secrets.token_urlsafe(8)
 logger = logging.getLogger(__name__)
 
@@ -129,6 +129,33 @@ class LoginRequest(BaseModel):
         max_length=4,
     )
     cookie: str = Field(min_length=1, max_length=8192)
+    backend: str = Field(default=config.BACKEND_AUTO, pattern=r"^(auto|primary|webvpn)$")
+
+
+class BackendSelectRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    backend: str = Field(pattern=r"^(auto|primary|webvpn)$")
+
+
+class WebVPNAuthStartRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    target_path: str = Field(
+        default="/xsxkapp/sys/xsxkapp/*default/index.do",
+        min_length=1,
+        max_length=512,
+    )
+
+
+class ProxyBrowserOpenRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    target_path: str = Field(
+        default="/xsxkapp/sys/xsxkapp/*default/index.do",
+        min_length=1,
+        max_length=512,
+    )
 
 
 class CardKeyRequest(BaseModel):
@@ -200,6 +227,11 @@ def _start_runtime_services() -> None:
 @app.on_event("startup")
 async def startup_runtime_services() -> None:
     _start_runtime_services()
+
+
+@app.on_event("shutdown")
+async def shutdown_runtime_services() -> None:
+    webvpn_auth_service.close_auth()
 
 
 def configure_runtime_prefill(student_id: str, card_key: str) -> None:
@@ -281,6 +313,7 @@ def _session_payload() -> dict:
         "automatic_enroll_allowed": phase == config.PHASE_AUTOMATIC,
         "task_running": is_enroll_task_running(),
         "ui_cache_token": UI_CACHE_TOKEN,
+        **backend_service.backend_payload(),
     }
 
 
@@ -294,8 +327,99 @@ async def api_bootstrap():
             "ui_cache_token": UI_CACHE_TOKEN,
             "ui_asset_build": UI_ASSET_BUILD,
             "phase_notice": "预选阶段只用于浏览和整理课程；自动抢课仅用于复选、正选或补选阶段。",
+            **backend_service.backend_payload(),
         },
         headers=get_no_cache_headers(),
+    )
+
+
+@app.get("/api/backend")
+async def api_backend():
+    return JSONResponse(content=backend_service.backend_payload(), headers=get_no_cache_headers())
+
+
+@app.post("/api/backend/select")
+async def api_backend_select(payload: BackendSelectRequest):
+    selected = update_backend_preference(payload.backend)
+    if selected == config.BACKEND_WEBVPN and not backend_service.has_webvpn_cookies():
+        return JSONResponse(
+            content={
+                **backend_service.backend_payload(),
+                "requires_webvpn_auth": True,
+                "message": "请先完成 WebVPN 统一认证",
+            },
+            headers=get_no_cache_headers(),
+        )
+    return JSONResponse(content=backend_service.backend_payload(), headers=get_no_cache_headers())
+
+
+@app.get("/api/webvpn/auth/status")
+async def api_webvpn_auth_status():
+    browser_status = webvpn_auth_service.get_status()
+    return JSONResponse(
+        content={
+            **backend_service.backend_payload(),
+            **browser_status,
+        },
+        headers=get_no_cache_headers(),
+    )
+
+
+@app.post("/api/webvpn/auth/start")
+async def api_webvpn_auth_start(payload: WebVPNAuthStartRequest):
+    try:
+        browser_status = webvpn_auth_service.start_auth(payload.target_path)
+    except webvpn_auth_service.ControlledBrowserUnavailableError as exc:
+        return _api_error(
+            503,
+            str(exc),
+            "WEBVPN_BROWSER_UNAVAILABLE",
+            retryable=False,
+        )
+    return JSONResponse(
+        content={
+            **backend_service.backend_payload(),
+            **browser_status,
+        },
+        headers=get_no_cache_headers(),
+    )
+
+
+@app.post("/api/webvpn/auth/close")
+async def api_webvpn_auth_close():
+    return JSONResponse(
+        content={
+            **backend_service.backend_payload(),
+            **webvpn_auth_service.close_auth(),
+        },
+        headers=get_no_cache_headers(),
+    )
+
+
+@app.post("/api/proxy/browser/open")
+async def api_proxy_browser_open(payload: ProxyBrowserOpenRequest):
+    """Open a WebVPN proxy page in the persistent controlled browser."""
+    snapshot = get_session_snapshot()
+    if not snapshot.get("logged_in"):
+        return _not_logged_in_response()
+    backend = backend_service.backend_payload()
+    use_webvpn = (
+        backend["preference"] == config.BACKEND_WEBVPN
+        or backend["active_backend"] == config.BACKEND_WEBVPN
+        or backend["auto_fallback_active"]
+    )
+    if not use_webvpn:
+        return _api_error(
+            409,
+            "当前使用主站，请使用普通浏览器打开学校原始页面",
+            "PRIMARY_BROWSER_REQUIRED",
+            retryable=False,
+        )
+    return _api_error(
+        409,
+        "WebVPN 模式暂不支持打开学校原始页面，请使用 API 工作台",
+        "WEBVPN_RAW_PAGE_UNSUPPORTED",
+        retryable=False,
     )
 
 
@@ -328,6 +452,14 @@ async def api_generate_card_key(req: CardKeyRequest):
 async def api_login(user: LoginRequest):
     """Verify the local card key, then establish a school session."""
     try:
+        backend_service.set_preference(user.backend)
+        if user.backend == config.BACKEND_WEBVPN and not backend_service.has_webvpn_cookies():
+            return _api_error(
+                409,
+                "请先完成 WebVPN 统一认证",
+                "WEBVPN_AUTH_REQUIRED",
+                retryable=True,
+            )
         student_id = user.student_id.strip()
         err = validate_login_params(
             student_id,
@@ -398,9 +530,11 @@ async def api_login(user: LoginRequest):
 
 
 @app.get("/api/captcha")
-async def api_captcha():
+async def api_captcha(backend: str | None = Query(default=None)):
     """Fetch one manual-login captcha and expose a finite, classified failure state."""
     try:
+        if backend:
+            backend_service.set_preference(backend)
         # Manual refresh is the retry boundary. One server attempt prevents stale
         # requests from accumulating after a browser timeout.
         result = await asyncio.to_thread(logic.fetch_vtoken_and_image, 1)
@@ -411,6 +545,13 @@ async def api_captcha():
             409,
             "学校当前未提供登录验证码，可能尚未开放选课、正在切换阶段或处于维护时段。请稍后手动重试。",
             "CAPTCHA_UNAVAILABLE",
+            retryable=True,
+        )
+    except backend_service.WebVPNAuthenticationRequiredError:
+        return _api_error(
+            409,
+            "主站暂时无法访问，请先完成 WebVPN 统一认证后重试",
+            "WEBVPN_AUTH_REQUIRED",
             retryable=True,
         )
     except requests.Timeout:
@@ -558,7 +699,6 @@ async def api_session():
         except Exception as exc:
             logger.warning("Restored session validation failed without expiring session: %s", exc)
         payload = _session_payload()
-    _record_frontend_session_success()
     return JSONResponse(
         content=payload,
         headers=get_no_cache_headers(),
@@ -603,6 +743,13 @@ async def api_session_refresh():
             retryable=True,
             session=_session_payload(),
         )
+    except backend_service.WebVPNAuthenticationRequiredError:
+        return _api_error(
+            409,
+            "主站暂时无法访问，请先完成 WebVPN 统一认证后重试",
+            "WEBVPN_AUTH_REQUIRED",
+            retryable=True,
+        )
     except requests.Timeout:
         logger.warning("Batch refresh timed out")
         return _api_error(
@@ -641,8 +788,13 @@ async def api_logout():
             status_code=409,
             content={"message": "抢课任务运行中，暂不能清除登录态", "is_error": True},
         )
+    webvpn_auth_service.clear_proxy_cookies()
     clear_login_state()
-    return ApiMessage(message="已清除本地登录态", is_error=False)
+    response = JSONResponse(
+        content=ApiMessage(message="已清除本地登录态", is_error=False).model_dump(),
+        headers=get_no_cache_headers(),
+    )
+    return clear_proxy_cookie_mirror(response)
 
 
 @app.get("/api/school/courses")
@@ -757,6 +909,13 @@ async def api_school_courses(
             "SCHOOL_TIMEOUT",
             retryable=True,
         )
+    except backend_service.WebVPNAuthenticationRequiredError:
+        return _api_error(
+            409,
+            "主站暂时无法访问，请先完成 WebVPN 统一认证后重试",
+            "WEBVPN_AUTH_REQUIRED",
+            retryable=True,
+        )
     except requests.RequestException as exc:
         logger.warning("Course-list endpoint network failure: %s", exc)
         return _api_error(
@@ -815,6 +974,13 @@ async def api_school_enrolled():
             504,
             "学校已选课程接口响应超时，请稍后刷新",
             "SCHOOL_TIMEOUT",
+            retryable=True,
+        )
+    except backend_service.WebVPNAuthenticationRequiredError:
+        return _api_error(
+            409,
+            "主站暂时无法访问，请先完成 WebVPN 统一认证后重试",
+            "WEBVPN_AUTH_REQUIRED",
             retryable=True,
         )
     except requests.RequestException as exc:
@@ -1002,9 +1168,18 @@ async def api_school_proxy(school_host: str, school_path: str, request: Request)
     school page never logs the session out (the school kicks all previous
     sessions on a fresh login).
     """
-    if school_host.lower() != SCHOOL_HOST:
+    allowed_proxy_hosts = {
+        "auto",
+        backend_service.PRIMARY_HOST,
+        backend_service.WEBVPN_HOST,
+        backend_service.WEBVPN_ROOT_HOST,
+        backend_service.AUTHSERVER_HOST,
+    }
+    if school_host.lower() not in allowed_proxy_hosts:
         raise HTTPException(status_code=404, detail="不支持的代理目标")
-    return await proxy_request(request, school_path)
+    if school_host.lower() == SCHOOL_HOST:
+        return await proxy_request(request, school_path)
+    return await proxy_request(request, school_path, school_host.lower())
 
 
 @app.get("/{full_path:path}")
@@ -1032,35 +1207,12 @@ def open_browser() -> None:
 
 
 KEEP_ALIVE_INTERVAL_SECONDS = 60
-FRONTEND_SESSION_HEARTBEAT_GRACE_SECONDS = KEEP_ALIVE_INTERVAL_SECONDS + 10
-_frontend_session_heartbeat_lock = threading.Lock()
-_last_frontend_session_success = 0.0
-
-
-def _record_frontend_session_success() -> None:
-    """Record a successful browser session read for keep-alive coordination."""
-    global _last_frontend_session_success
-    with _frontend_session_heartbeat_lock:
-        _last_frontend_session_success = time.monotonic()
-
-
-def _frontend_session_heartbeat_is_active() -> bool:
-    """Return whether the browser has recently completed a session request."""
-    with _frontend_session_heartbeat_lock:
-        last_success = _last_frontend_session_success
-    return (
-        last_success > 0
-        and time.monotonic() - last_success < FRONTEND_SESSION_HEARTBEAT_GRACE_SECONDS
-    )
 
 
 def _keep_alive_once() -> None:
     """Refresh the school session so it does not expire while the user is idle."""
     snapshot = get_session_snapshot()
     if not snapshot["logged_in"] or not snapshot["student_id"]:
-        return
-    if _frontend_session_heartbeat_is_active():
-        logger.debug("Keep-alive skipped: frontend session heartbeat is active")
         return
     restored_session = restored_session_validation_pending()
     student_id = str(snapshot["student_id"])

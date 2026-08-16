@@ -6,7 +6,7 @@
   <meta name="color-scheme" content="light">
   <title>登录 | 深大抢课助手</title>
   <link rel="icon" href="/favicon.ico">
-  <link rel="stylesheet" href="/styles.css?build=20260816.1">
+  <link rel="stylesheet" href="/styles.css?build=20260817.1">
 </head>
 <body class="login-page">
   <section class="login-visual" aria-label="深大抢课助手">
@@ -51,6 +51,26 @@
           <span>记住账号密码（仅保存在本浏览器）</span>
         </label>
 
+        <fieldset class="backend-fieldset">
+          <legend>访问后端</legend>
+          <div class="backend-options">
+            <label class="backend-option">
+              <input type="radio" name="backend" value="auto" checked>
+              <span><strong>自动</strong><small>优先主站，故障时切换 WebVPN</small></span>
+            </label>
+            <label class="backend-option">
+              <input type="radio" name="backend" value="primary">
+              <span><strong>主站</strong><small>仅使用 bkxk.szu.edu.cn</small></span>
+            </label>
+            <label class="backend-option">
+              <input type="radio" name="backend" value="webvpn">
+              <span><strong>WebVPN</strong><small>使用统一认证后的备用入口</small></span>
+            </label>
+          </div>
+          <div id="backendStatus" class="backend-status" role="status" aria-live="polite">当前后端：自动（优先主站）</div>
+          <button id="webvpnAuthButton" class="button button-quiet button-block" type="button" hidden>完成 WebVPN 统一认证</button>
+        </fieldset>
+
         <fieldset class="captcha-fieldset">
           <legend>
             <span>点击验证码</span>
@@ -63,6 +83,11 @@
               <strong id="captchaStatusTitle">准备获取验证码</strong>
               <span id="captchaStatusDetail">正在准备本地登录环境。</span>
             </div>
+          </div>
+          <div id="captchaWebvpnAuth" class="captcha-webvpn-auth" hidden>
+            <strong>需要 WebVPN 统一认证</strong>
+            <span>验证码接口正在等待 WebVPN 登录，请先完成统一认证。</span>
+            <button id="captchaWebvpnAuthButton" class="button button-primary" type="button">完成 WebVPN 统一认证</button>
           </div>
           <div class="captcha-actions">
             <button id="undoPoint" class="button button-quiet" type="button" disabled>撤销一点</button>
@@ -82,6 +107,6 @@
   </main>
 
   <noscript>此页面需要启用 JavaScript。</noscript>
-  <script src="/login.js?build=20260816.1" defer></script>
+  <script src="/login.js?build=20260817.1" defer></script>
 </body>
 </html>
