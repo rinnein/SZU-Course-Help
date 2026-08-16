@@ -23,6 +23,7 @@ import config
 from project_paths import data_dir
 from school_password import encrypt_school_password
 from school_session import is_session_expired_response
+from services import backend_service
 
 REQUEST_TIMEOUT = (5, 15)
 CAPTCHA_REQUEST_TIMEOUT = (3, 8)
@@ -47,6 +48,22 @@ CAPTCHA_UNAVAILABLE_KEYWORDS = (
     "没有选课批次",
 )
 logger = logging.getLogger(__name__)
+
+
+def _school_request(method: str, path: str, **kwargs):
+    """Send one school request through the shared backend/failover policy."""
+    request_function = getattr(requests, method.lower())
+
+    def sender(**request_kwargs):
+        request_kwargs.pop("method", None)
+        return request_function(**request_kwargs)
+
+    return backend_service.request_with_failover(
+        method,
+        path,
+        sender=sender,
+        **kwargs,
+    )
 
 
 class SchoolBatchSessionExpiredError(RuntimeError):
@@ -170,26 +187,12 @@ def fetch_elective_batch(
     combined_cookie: str,
 ) -> ElectiveBatchResult:
     """Fetch the enrollment batch using one consistent session snapshot."""
-    headers = {
-        "Accept": "*/*",
-        "Accept-Encoding": "gzip, deflate",
-        "Accept-Language": ("zh-CN,zh;q=0.9,en;q=0.8,en-GB;q=0.7,en-US;q=0.6,zh-TW;q=0.5"),
-        "Cookie": combined_cookie,
-        "Host": "bkxk.szu.edu.cn",
-        "Origin": "http://bkxk.szu.edu.cn",
-        "Referer": ("http://bkxk.szu.edu.cn/xsxkapp/sys/xsxkapp/*default/index.do"),
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 "
-            "Safari/537.36 Edg/139.0.0.0"
-        ),
-        "token": token,
-        "X-Requested-With": "XMLHttpRequest",
-    }
-    response = requests.post(
-        f"{config.SCHOOL_BASE_URL}student/{student_id}.do",
-        headers=headers,
+    response = _school_request(
+        "POST",
+        f"student/{student_id}.do",
         timeout=REQUEST_TIMEOUT,
+        token=token,
+        cookie=combined_cookie,
     )
     response_text = response.text
     try:
@@ -244,23 +247,6 @@ def login(
     parsed_cookie: str,
 ) -> dict[str, Any]:
     """Establish a school session using the legacy login form contract."""
-    headers = {
-        "Accept": "*/*",
-        "Accept-Encoding": "gzip, deflate",
-        "Accept-Language": ("zh-CN,zh;q=0.9,en;q=0.8,en-GB;q=0.7,en-US;q=0.6,zh-TW;q=0.5"),
-        "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-        "Cookie": parsed_cookie,
-        "Host": "bkxk.szu.edu.cn",
-        "Origin": "http://bkxk.szu.edu.cn",
-        "Referer": ("http://bkxk.szu.edu.cn/xsxkapp/sys/xsxkapp/*default/index.do"),
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 "
-            "Safari/537.36 Edg/139.0.0.0"
-        ),
-        "X-Requested-With": "XMLHttpRequest",
-    }
-
     form_data = {
         "loginPwd": login_pwd,
         "loginName": student_id,
@@ -268,12 +254,25 @@ def login(
         "verifyCode": coordinate_string,
     }
 
-    response = requests.post(
-        config.SCHOOL_BASE_URL + "student/check/login.do",
+    profile = backend_service.active_profile()
+    existing_cookie = backend_service.cookie_header(profile)
+    request_cookie = "; ".join(value for value in (existing_cookie, parsed_cookie) if value)
+    response = _school_request(
+        "POST",
+        "student/check/login.do",
         data=form_data,
-        headers=headers,
         timeout=REQUEST_TIMEOUT,
+        content_type="application/x-www-form-urlencoded; charset=UTF-8",
+        cookie=request_cookie,
     )
+    profile = backend_service.active_profile()
+    set_cookie = (
+        response.headers.get_list("set-cookie")
+        if hasattr(response.headers, "get_list")
+        else [response.headers.get("Set-Cookie", "")]
+    )
+    if set_cookie:
+        backend_service.merge_set_cookie(set_cookie, profile.host)
     try:
         payload = response.json()
     except ValueError:
@@ -828,8 +827,9 @@ def _parse_captcha_token_response(response: requests.Response) -> str:
 
 def get_vtoken() -> str:
     time_stamp = int(time.time() * 1000)
-    response = requests.post(
-        config.SCHOOL_BASE_URL + f"student/4/vcode.do?timestamp={time_stamp}",
+    response = _school_request(
+        "POST",
+        f"student/4/vcode.do?timestamp={time_stamp}",
         timeout=CAPTCHA_REQUEST_TIMEOUT,
     )
     return _parse_captcha_token_response(response)
@@ -850,8 +850,11 @@ def _validate_captcha_image(image_data: bytes, content_type: str = "") -> None:
 
 def get_new_image() -> tuple[str, str]:
     vtoken = get_vtoken()
-    vcode_url = config.SCHOOL_BASE_URL + f"student/vcode/image.do?vtoken={vtoken}"
-    response = requests.get(vcode_url, timeout=CAPTCHA_REQUEST_TIMEOUT)
+    response = _school_request(
+        "GET",
+        f"student/vcode/image.do?vtoken={vtoken}",
+        timeout=CAPTCHA_REQUEST_TIMEOUT,
+    )
     response.raise_for_status()
     cookie = response.headers.get("Set-Cookie", "")
     if not parse_cookie(cookie):
@@ -867,30 +870,20 @@ def get_new_image() -> tuple[str, str]:
 
 
 def _fetch_vtoken_and_image_once() -> dict[str, str]:
-    captcha_base_url = config.SCHOOL_BASE_URL
-    headers = {
-        "Accept": "application/json, text/javascript, */*; q=0.01",
-        "Accept-Encoding": "gzip, deflate",
-        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
-        "Host": "bkxk.szu.edu.cn",
-        "Origin": "http://bkxk.szu.edu.cn",
-        "Referer": f"{captcha_base_url}*default/index.do",
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        "X-Requested-With": "XMLHttpRequest",
-    }
-
     timestamp = int(time.time() * 1000)
-    token_response = requests.post(
-        f"{captcha_base_url}student/4/vcode.do?timestamp={timestamp}",
-        headers=headers,
+    token_response = _school_request(
+        "POST",
+        f"student/4/vcode.do?timestamp={timestamp}",
         timeout=CAPTCHA_REQUEST_TIMEOUT,
+        accept="application/json, text/javascript, */*; q=0.01",
     )
     vtoken = _parse_captcha_token_response(token_response)
 
-    image_response = requests.get(
-        f"{captcha_base_url}student/vcode/image.do?vtoken={vtoken}",
-        headers=headers,
+    image_response = _school_request(
+        "GET",
+        f"student/vcode/image.do?vtoken={vtoken}",
         timeout=CAPTCHA_REQUEST_TIMEOUT,
+        accept="application/json, text/javascript, */*; q=0.01",
     )
     image_response.raise_for_status()
     image_data = image_response.content

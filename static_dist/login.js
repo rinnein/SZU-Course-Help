@@ -125,6 +125,9 @@ const loginState = {
   solvingCaptcha: false,
   submitting: false,
   uiCacheToken: "",
+  backend: "auto",
+  webvpnAuthTimer: 0,
+  webvpnAuthRequested: false,
 };
 
 const loginElements = {
@@ -145,6 +148,10 @@ const loginElements = {
   solveCaptcha: document.querySelector("#solveCaptcha"),
   message: document.querySelector("#loginMessage"),
   submit: document.querySelector("#loginButton"),
+  backendStatus: document.querySelector("#backendStatus"),
+  webvpnAuthButton: document.querySelector("#webvpnAuthButton"),
+  captchaWebvpnAuth: document.querySelector("#captchaWebvpnAuth"),
+  captchaWebvpnAuthButton: document.querySelector("#captchaWebvpnAuthButton"),
 };
 
 const captchaStatusCopy = {
@@ -161,6 +168,41 @@ const captchaStatusCopy = {
 function setLoginMessage(message, success = false) {
   loginElements.message.textContent = message || "";
   loginElements.message.classList.toggle("is-success", success);
+}
+
+function selectedBackend() {
+  return document.querySelector("input[name='backend']:checked")?.value || "auto";
+}
+
+function setBackendPresentation(payload = {}) {
+  const preference = payload.preference || loginState.backend || "auto";
+  loginState.backend = preference;
+  const preferenceLabel = payload.preference_label || (preference === "auto" ? "自动（优先主站）" : preference === "webvpn" ? "WebVPN 备用" : "主站");
+  const activeLabel = payload.active_backend_label ? `；当前后端：${payload.active_backend_label}` : "";
+  loginElements.backendStatus.textContent = `访问策略：${preferenceLabel}${activeLabel}`;
+  const webvpnReady = Boolean(payload.webvpn_authenticated || payload.authenticated);
+  const authNeeded = Boolean(payload.requires_webvpn_auth) || loginState.webvpnAuthRequested;
+  loginElements.webvpnAuthButton.hidden = (!authNeeded && preference !== "webvpn") || webvpnReady;
+  if (webvpnReady) loginElements.webvpnAuthButton.textContent = "WebVPN 已认证";
+}
+
+async function selectBackend(value) {
+  loginState.backend = value;
+  loginState.webvpnAuthRequested = value === "webvpn";
+  try {
+    const payload = await requestJson("/api/backend/select", {
+      method: "POST",
+      body: JSON.stringify({ backend: value }),
+    });
+    setBackendPresentation(payload);
+    if (payload.requires_webvpn_auth) {
+      setLoginMessage("请先完成 WebVPN 统一认证", false);
+      return;
+    }
+    await loadCaptcha();
+  } catch (error) {
+    setLoginMessage(error instanceof Error ? error.message : "后端切换失败");
+  }
 }
 
 function updateLoginControls() {
@@ -197,6 +239,7 @@ function setCaptchaStatus(status, title = "", detail = "") {
   loginElements.stage.setAttribute("aria-disabled", String(status !== "ready"));
   loginElements.statusTitle.textContent = title || fallback[0];
   loginElements.statusDetail.textContent = detail || fallback[1];
+  loginElements.captchaWebvpnAuth.hidden = status !== "webvpn-auth-required";
   loginElements.refresh.textContent = status === "ready" ? "刷新验证码" : "重新获取验证码";
   updateLoginControls();
 }
@@ -396,6 +439,14 @@ function describeCaptchaFailure(error) {
       message,
     };
   }
+  if (code === "WEBVPN_AUTH_REQUIRED") {
+    return {
+      status: "webvpn-auth-required",
+      title: "需要 WebVPN 统一认证",
+      detail: "验证码接口需要 WebVPN 登录，请先完成统一认证后再获取验证码。",
+      message,
+    };
+  }
   if (["CAPTCHA_TIMEOUT", "CLIENT_TIMEOUT", "CAPTCHA_IMAGE_TIMEOUT"].includes(code)) {
     return {
       status: "error",
@@ -447,7 +498,7 @@ async function loadCaptcha() {
   setLoginMessage("");
 
   try {
-    const captcha = validateCaptchaPayload(await requestJson(`/api/captcha?t=${Date.now()}`));
+    const captcha = validateCaptchaPayload(await requestJson(`/api/captcha?backend=${encodeURIComponent(loginState.backend)}&t=${Date.now()}`));
     await loadCaptchaImage(captcha.imageUrl);
     loginState.captcha = captcha;
     setCaptchaStatus("ready");
@@ -455,6 +506,9 @@ async function loadCaptcha() {
   } catch (error) {
     loginState.captcha = null;
     clearCaptchaImage();
+    if (error?.code === "WEBVPN_AUTH_REQUIRED") {
+      loginElements.webvpnAuthButton.hidden = false;
+    }
     const failure = describeCaptchaFailure(error);
     loginState.captchaFailureMessage = failure.message;
     setCaptchaStatus(failure.status, failure.title, failure.detail);
@@ -463,6 +517,64 @@ async function loadCaptcha() {
   } finally {
     loginState.loadingCaptcha = false;
     updateLoginControls();
+  }
+}
+
+function stopWebvpnAuthPolling() {
+  if (loginState.webvpnAuthTimer) {
+    window.clearTimeout(loginState.webvpnAuthTimer);
+    loginState.webvpnAuthTimer = 0;
+  }
+}
+
+async function pollWebvpnAuth() {
+  stopWebvpnAuthPolling();
+  try {
+    const payload = await requestJson("/api/webvpn/auth/status");
+    setBackendPresentation(payload);
+    if (payload.state === "authenticated" || payload.authenticated) {
+      loginState.webvpnAuthRequested = false;
+      loginElements.webvpnAuthButton.textContent = "WebVPN 已认证";
+      setLoginMessage("WebVPN 统一认证完成，正在刷新验证码。", true);
+      await loadCaptcha();
+      return;
+    }
+    if (payload.state === "error") {
+      loginElements.webvpnAuthButton.textContent = "重新完成 WebVPN 统一认证";
+      setLoginMessage(payload.message || "WebVPN 认证未完成");
+      return;
+    }
+    loginElements.webvpnAuthButton.textContent = "认证进行中…";
+    setLoginMessage(payload.message || "请在新打开的受控浏览器中完成认证");
+    loginState.webvpnAuthTimer = window.setTimeout(pollWebvpnAuth, 1000);
+  } catch (error) {
+    loginState.webvpnAuthTimer = window.setTimeout(pollWebvpnAuth, 2000);
+    setLoginMessage(error instanceof Error ? error.message : "无法读取 WebVPN 认证状态");
+  }
+}
+
+async function startWebvpnAuth() {
+  if (loginState.webvpnAuthTimer) return;
+  loginState.webvpnAuthRequested = true;
+  loginElements.webvpnAuthButton.disabled = true;
+  loginElements.webvpnAuthButton.textContent = "正在打开受控浏览器…";
+  setLoginMessage("正在启动独立认证浏览器，请稍候。", true);
+  try {
+    const payload = await requestJson("/api/webvpn/auth/start", {
+      method: "POST",
+      body: JSON.stringify({}),
+    });
+    setBackendPresentation(payload);
+    if (payload.state === "authenticated" || payload.authenticated) {
+      await loadCaptcha();
+      return;
+    }
+    await pollWebvpnAuth();
+  } catch (error) {
+    loginElements.webvpnAuthButton.textContent = "完成 WebVPN 统一认证";
+    setLoginMessage(error instanceof Error ? error.message : "受控浏览器启动失败");
+  } finally {
+    loginElements.webvpnAuthButton.disabled = false;
   }
 }
 
@@ -524,6 +636,7 @@ async function submitLogin(event) {
         vtoken: loginState.captcha.vtoken,
         verifyCode: loginState.points,
         cookie: loginState.captcha.cookie,
+        backend: loginState.backend,
       }),
     });
     if (loginElements.rememberCredentials.checked) {
@@ -557,6 +670,9 @@ async function initializeLogin() {
       requestJson("/api/session"),
     ]);
     loginState.uiCacheToken = bootstrap.ui_cache_token || "";
+    setBackendPresentation(bootstrap);
+    const radio = document.querySelector(`input[name='backend'][value='${bootstrap.preference || "auto"}']`);
+    if (radio) radio.checked = true;
     if (session.logged_in) {
       window.location.replace(versionedPage("/"));
       return;
@@ -591,5 +707,12 @@ loginElements.passwordToggle.addEventListener("click", () => {
   loginElements.passwordToggle.textContent = hidden ? "隐藏" : "显示";
   loginElements.passwordToggle.setAttribute("aria-label", hidden ? "隐藏密码" : "显示密码");
 });
+
+for (const radio of document.querySelectorAll("input[name='backend']")) {
+  radio.addEventListener("change", () => selectBackend(radio.value));
+}
+
+loginElements.webvpnAuthButton.addEventListener("click", startWebvpnAuth);
+loginElements.captchaWebvpnAuthButton.addEventListener("click", startWebvpnAuth);
 
 initializeLogin();

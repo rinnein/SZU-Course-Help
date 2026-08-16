@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 
 import pytest
+from starlette.responses import Response
 
 import config
 from services import auth_service, proxy_service
@@ -44,6 +45,12 @@ class TestLinkRewrite:
             "/proxy/bkxk.szu.edu.cn/foo.js"
         )
 
+    def test_absolute_webvpn_redirect_with_port_is_rewritten(self):
+        ref = "https://webvpn.szu.edu.cn:443/vpn_key/update?origin=x"
+        assert proxy_service.rewrite_link_ref(ref) == (
+            "/proxy/webvpn.szu.edu.cn/vpn_key/update?origin=x"
+        )
+
     def test_other_host_untouched(self):
         assert proxy_service.rewrite_link_ref("http://example.com/x") == (
             "http://example.com/x"
@@ -73,6 +80,28 @@ class TestLinkRewrite:
         body = b'<a href="http://bkxk.szu.edu.cn/x">y</a>'
         out = proxy_service.rewrite_text_body(body, "text/html; charset=utf-8")
         assert b"/proxy/bkxk.szu.edu.cn/x" in out
+
+    def test_webvpn_text_rewrites_primary_absolute_links_to_webvpn_proxy(self):
+        body = b'<script src="http://bkxk.szu.edu.cn/xsxkapp/app.js"></script>'
+        out = proxy_service.rewrite_text_body(
+            body,
+            "text/html; charset=utf-8",
+            proxy_service.backend_service.WEBVPN_HOST,
+        )
+        assert b"/proxy/bkxk.webvpn.szu.edu.cn/xsxkapp/app.js" in out
+
+    def test_authserver_script_root_paths_are_rewritten(self):
+        body = (
+            b'$.ajax({url: contextPath + "/qrCode/getToken"});'
+            b'var image = "/authserver/qrCode/getCode?uuid=x";'
+        )
+        out = proxy_service.rewrite_text_body(
+            body,
+            "application/javascript; charset=utf-8",
+            proxy_service.backend_service.AUTHSERVER_HOST,
+        )
+        assert b"/proxy/authserver-443.webvpn.szu.edu.cn/authserver/qrCode/getToken" in out
+        assert b"/proxy/authserver-443.webvpn.szu.edu.cn/authserver/qrCode/getCode?uuid=x" in out
 
     def test_html_bootstraps_shared_browser_session(self):
         out = proxy_service.inject_shared_session_bootstrap(
@@ -111,8 +140,57 @@ class TestUpstreamHeaders:
         assert headers["Cookie"] == "route=a; JSESSIONID=b"
         assert headers["token"] == "tok"
         assert headers["X-Requested-With"] == "XMLHttpRequest"
-        # Browser cookie is replaced, not echoed back.
         assert "bogus-jsessionid" not in headers["Cookie"]
+
+    def test_proxy_cookie_mirror_is_path_scoped_and_keeps_backend_cookies(self, monkeypatch):
+        set_logged_session(
+            monkeypatch,
+            cookie="route=route1; insert_cookie=insert1; JSESSIONID=session1; _WEU=weu1",
+        )
+        monkeypatch.setattr(
+            config,
+            "webvpn_cookie",
+            "_webvpn_key=key; webvpn_username=user; webvpn_username_NS_Sig=sig",
+        )
+        monkeypatch.setattr(config, "combined_cookie", "route=route1; insert_cookie=insert1; JSESSIONID=session1; _WEU=weu1")
+
+        headers = proxy_service.proxy_cookie_headers(proxy_service.backend_service.WEBVPN_HOST)
+
+        assert len(headers) == 7
+        assert all("Path=/proxy/bkxk.webvpn.szu.edu.cn/" in value for value in headers)
+        assert any(value.startswith("_webvpn_key=key;") for value in headers)
+        assert any(value.startswith("JSESSIONID=session1;") for value in headers)
+        assert all("Domain=" not in value for value in headers)
+
+    def test_primary_proxy_cookie_mirror_excludes_webvpn_cookies(self, monkeypatch):
+        set_logged_session(monkeypatch)
+        monkeypatch.setattr(
+            config,
+            "webvpn_cookie",
+            "_webvpn_key=key; webvpn_username=user; webvpn_username_NS_Sig=sig",
+        )
+
+        headers = proxy_service.proxy_cookie_headers(proxy_service.SCHOOL_HOST)
+
+        assert {value.split("=", 1)[0] for value in headers} == {
+            "route",
+            "JSESSIONID",
+            "_WEU",
+        }
+        assert all("Path=/proxy/bkxk.szu.edu.cn/" in value for value in headers)
+        assert all("webvpn" not in value.lower() for value in headers)
+
+    def test_clear_proxy_cookie_mirror_expires_both_namespaces(self):
+        response = proxy_service.clear_proxy_cookie_mirror(Response(content=b"ok"))
+        headers = [
+            value.decode("latin-1")
+            for name, value in response.raw_headers
+            if name.lower() == b"set-cookie"
+        ]
+
+        assert any("_webvpn_key=;" in value for value in headers)
+        assert any("Path=/proxy/bkxk.webvpn.szu.edu.cn/" in value for value in headers)
+        assert any("Path=/proxy/bkxk.szu.edu.cn/" in value for value in headers)
 
     def test_forwarded_content_type_and_custom_x_headers(self):
         headers = proxy_service.build_upstream_headers(
@@ -248,6 +326,28 @@ class FakeAsyncClient:
         self.closed = True
 
 
+class RetryingAsyncClient(FakeAsyncClient):
+    def __init__(self, response, attempts):
+        super().__init__(response)
+        self.attempts = attempts
+
+    async def send(self, built_request, stream=False, follow_redirects=False):
+        self.attempts.append(built_request)
+        if len(self.attempts) == 1:
+            raise proxy_service.httpx.RemoteProtocolError("connection closed")
+        assert built_request is self.sent
+        assert stream is True
+        return self._response
+
+
+class WebVPNFakeAsyncClient(FakeAsyncClient):
+    async def send(self, built_request, stream=False, follow_redirects=False):
+        assert built_request is self.sent
+        assert stream is True
+        assert follow_redirects is False
+        return self._response
+
+
 class FakeRequest:
     """Minimal starlette Request stand-in with the fields proxy_request reads."""
 
@@ -326,6 +426,104 @@ class TestProxyRequest:
         # Shared session is injected into the forwarded request.
         assert "route=a" in client.sent["headers"]["Cookie"]
 
+    def test_webvpn_remote_protocol_error_retries_on_fresh_connection(self, monkeypatch):
+        set_logged_session(monkeypatch)
+        monkeypatch.setattr(
+            config,
+            "webvpn_cookie",
+            "_webvpn_key=key; webvpn_username=user; webvpn_username_NS_Sig=sig",
+        )
+        clients = []
+        attempts = []
+
+        def client_factory(*args, **kwargs):
+            client = RetryingAsyncClient(FakeResponse(text="ok"), attempts)
+            clients.append(client)
+            return client
+
+        monkeypatch.setattr(proxy_service.httpx, "AsyncClient", client_factory)
+        response = asyncio.run(
+            proxy_service.proxy_request(
+                FakeRequest(),
+                "xsxkapp/sys/xsxkapp/*default/index.do",
+                proxy_service.backend_service.WEBVPN_HOST,
+            )
+        )
+
+        assert response.status_code == 200
+        assert len(clients) == 2
+        assert clients[0].closed is True
+        assert "_webvpn_key=key" in clients[1].sent["headers"]["Cookie"]
+        assert clients[1].sent["url"].startswith("https://bkxk.webvpn.szu.edu.cn/")
+        assert clients[1].sent["headers"]["Origin"] == "https://bkxk.webvpn.szu.edu.cn"
+        assert clients[1].sent["headers"]["Referer"].startswith(
+            "https://bkxk.webvpn.szu.edu.cn/"
+        )
+
+    def test_webvpn_proxy_sends_school_and_webvpn_cookies_and_mirrors_them(self, monkeypatch):
+        set_logged_session(
+            monkeypatch,
+            cookie="route=route1; insert_cookie=insert1; JSESSIONID=session1; _WEU=weu1",
+        )
+        monkeypatch.setattr(
+            config,
+            "webvpn_cookie",
+            "_webvpn_key=key; webvpn_username=user; webvpn_username_NS_Sig=sig",
+        )
+        fake = FakeResponse(headers={"Content-Type": "text/plain"}, text="ok")
+        client = WebVPNFakeAsyncClient(fake)
+        monkeypatch.setattr(proxy_service.httpx, "AsyncClient", lambda *a, **k: client)
+
+        response = asyncio.run(
+            proxy_service.proxy_request(
+                FakeRequest(),
+                "xsxkapp/sys/xsxkapp/*default/index.do",
+                proxy_service.backend_service.WEBVPN_HOST,
+            )
+        )
+
+        sent_cookie = client.sent["headers"]["Cookie"]
+        assert "route=route1" in sent_cookie
+        assert "JSESSIONID=session1" in sent_cookie
+        assert "_webvpn_key=key" in sent_cookie
+        assert "webvpn_username=user" in sent_cookie
+        assert "webvpn_username_NS_Sig=sig" in sent_cookie
+        mirrored = [
+            value.decode("latin-1")
+            for name, value in response.raw_headers
+            if name.lower() == b"set-cookie"
+        ]
+        assert len(mirrored) == 7
+        assert all("Path=/proxy/bkxk.webvpn.szu.edu.cn/" in value for value in mirrored)
+
+    def test_auto_proxy_uses_actual_successful_backend_for_rewrite_and_cookies(self, monkeypatch):
+        set_logged_session(monkeypatch)
+        monkeypatch.setattr(
+            config,
+            "backend_preference",
+            config.BACKEND_AUTO,
+        )
+        monkeypatch.setattr(
+            config,
+            "webvpn_cookie",
+            "_webvpn_key=key; webvpn_username=user; webvpn_username_NS_Sig=sig",
+        )
+        fake = FakeResponse(
+            headers={"Content-Type": "text/html"},
+            text='<a href="http://bkxk.szu.edu.cn/x">x</a>',
+        )
+        client = WebVPNFakeAsyncClient(fake)
+        monkeypatch.setattr(proxy_service.httpx, "AsyncClient", lambda *a, **k: client)
+
+        response = asyncio.run(proxy_service.proxy_request(FakeRequest(), "x", "auto"))
+
+        assert "/proxy/bkxk.szu.edu.cn/x" in response.body.decode()
+        assert any(
+            "Path=/proxy/bkxk.szu.edu.cn/" in value.decode("latin-1")
+            for name, value in response.raw_headers
+            if name == b"set-cookie"
+        )
+
     def test_query_token_is_replaced_with_shared_token(self, monkeypatch):
         set_logged_session(monkeypatch, token="shared-token")
         fake = FakeResponse(headers={"Content-Type": "text/plain"}, text="ok")
@@ -383,9 +581,14 @@ class TestProxyRequest:
         assert asyncio.run(consume_stream(resp)) == b"\x89PNGdata"
         assert fake.closed is True
         assert client.closed is True
-        # Set-Cookie is never forwarded back to the browser.
-        headers = {k.lower(): v for k, v in resp.headers.items()}
-        assert "set-cookie" not in headers
+        # The browser receives only local, path-scoped mirror cookies.
+        headers = [
+            value.decode("latin-1")
+            for name, value in resp.raw_headers
+            if name.lower() == b"set-cookie"
+        ]
+        assert all("Path=/proxy/bkxk.szu.edu.cn/" in value for value in headers)
+        assert all("Domain=" not in value for value in headers)
 
     def test_empty_text_response_is_not_streamed(self, monkeypatch):
         set_logged_session(monkeypatch)
@@ -417,8 +620,42 @@ class TestProxyRequest:
         assert resp.status_code == 200
         assert "JSESSIONID=new" in config.combined_cookie
         assert "JSESSIONID=old" not in config.combined_cookie
-        headers = {k.lower(): v for k, v in resp.headers.items()}
-        assert "set-cookie" not in headers
+        headers = [
+            value.decode("latin-1")
+            for name, value in resp.raw_headers
+            if name.lower() == b"set-cookie"
+        ]
+        assert any(value.startswith("JSESSIONID=new;") for value in headers)
+        assert all("Path=/proxy/bkxk.szu.edu.cn/" in value for value in headers)
+
+    def test_authserver_cookies_are_saved_for_qr_polling(self, monkeypatch):
+        set_logged_session(monkeypatch)
+        monkeypatch.setattr(config, "authserver_cookie", "")
+        fake = FakeResponse(
+            headers={
+                "Content-Type": "text/html",
+                "Set-Cookie": (
+                    "route=auth-route; Path=/authserver; Secure, "
+                    "JSESSIONID=auth-session; Path=/authserver; Secure, "
+                    "insert_cookie=auth-insert; Path=/; Secure"
+                ),
+            },
+            text="<html>login</html>",
+        )
+        monkeypatch_proxy_client(monkeypatch, fake)
+
+        resp = asyncio.run(
+            proxy_service.proxy_request(
+                FakeRequest(),
+                "authserver/login",
+                proxy_service.backend_service.AUTHSERVER_HOST,
+            )
+        )
+
+        assert resp.status_code == 200
+        assert "route=auth-route" in config.authserver_cookie
+        assert "JSESSIONID=auth-session" in config.authserver_cookie
+        assert "insert_cookie=auth-insert" in config.authserver_cookie
 
     def test_each_proxy_request_reads_the_current_shared_session(self, monkeypatch):
         clients = []

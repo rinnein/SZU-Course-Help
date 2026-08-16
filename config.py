@@ -27,6 +27,15 @@ def _positive_env_int(name: str, default: int) -> int:
 # ====================================================================
 SCHOOL_BASE_URL = "http://bkxk.szu.edu.cn/xsxkapp/sys/xsxkapp/"
 
+# Runtime backend selection.  ``auto`` always tries the primary backend first
+# for each request; the active backend is the last backend that completed a
+# request successfully.
+BACKEND_AUTO = "auto"
+BACKEND_PRIMARY = "primary"
+BACKEND_WEBVPN = "webvpn"
+backend_preference = BACKEND_AUTO
+active_backend = BACKEND_PRIMARY
+
 # ====================================================================
 # 用户登录凭据（命令行模式使用，Web UI 模式下由前端传入）
 # ====================================================================
@@ -75,6 +84,11 @@ unknown_response_pause_threshold: int = _positive_env_int(
 # ====================================================================
 # 合并后的完整 Cookie（包含 route、insert_cookie、JSESSIONID、_WEU）
 combined_cookie = ""
+
+# Cookies issued by the WebVPN and CAS hosts are kept separate from the
+# school's own session cookies and are only sent to their matching backend.
+webvpn_cookie = ""
+authserver_cookie = ""
 
 # 登录令牌（服务器返回的 token，用于后续接口鉴权）
 token = ""
