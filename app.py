@@ -15,7 +15,7 @@ from datetime import datetime
 from pathlib import Path
 
 import requests
-from fastapi import FastAPI, HTTPException, Query, status
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Query, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, ConfigDict, Field
 from starlette.responses import FileResponse, JSONResponse
@@ -1142,6 +1142,25 @@ def _safe_static_file(relative_path: str) -> Path | None:
     except (OSError, ValueError):
         return None
     return candidate if candidate.is_file() else None
+
+
+@app.api_route(
+    "/proxy/{school_host}/{school_path:path}",
+    methods=["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"],
+    include_in_schema=False,
+)
+async def api_school_proxy(school_host: str, school_path: str, request: Request):
+    """Reverse-proxy arbitrary ``bkxk.szu.edu.cn`` pages through the shared session.
+
+    The browser never performs its own school login here; every request reuses
+    the server-side ``config.combined_cookie``/``config.token`` established by
+    the API-mode login, so switching between the API workbench and the proxied
+    school page never logs the session out (the school kicks all previous
+    sessions on a fresh login).
+    """
+    if school_host.lower() != SCHOOL_HOST:
+        raise HTTPException(status_code=404, detail="不支持的代理目标")
+    return await proxy_request(request, school_path)
 
 
 @app.get("/{full_path:path}")

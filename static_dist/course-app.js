@@ -108,6 +108,7 @@ const appElements = {
   sessionLoginLink: document.querySelector("#sessionDialog a[href^='/login']"),
   brandLink: document.querySelector(".topbar .brand-lockup"),
   logout: document.querySelector("#logoutButton"),
+  openSchoolRaw: document.querySelector("#openSchoolRaw"),
   toastRegion: document.querySelector("#toastRegion"),
   openMyCourses: document.querySelector("#openMyCourses"),
   myCoursesDialog: document.querySelector("#myCoursesDialog"),
@@ -2025,6 +2026,9 @@ appElements.phaseConfirmation.addEventListener("change", () => {
 });
 appElements.startEnroll.addEventListener("click", startEnrollment);
 appElements.taskControlButton.addEventListener("click", toggleEnrollmentPause);
+appElements.openSchoolRaw.addEventListener("click", () => {
+  openSchoolRawPage();
+});
 appElements.logout.addEventListener("click", async () => {
   try {
     const result = await api("/api/logout", { method: "POST" });
@@ -2036,6 +2040,17 @@ appElements.logout.addEventListener("click", async () => {
     if (!(error instanceof SessionExpiredError)) showToast(error.message, true);
   }
 });
+
+function openSchoolRawPage() {
+  if (!appState.session?.logged_in) {
+    showToast("请先登录，再打开学校原始页面", true);
+    return;
+  }
+  // Same-origin path via the local reverse proxy; reuses the shared school
+  // session, so no second login (which would kick the API session out).
+  const target = `${window.location.origin}/proxy/bkxk.szu.edu.cn/xsxkapp/sys/xsxkapp/*default/index.do`;
+  window.open(target, "_blank", "noopener,noreferrer");
+}
 
 for (const closeButton of document.querySelectorAll("[data-close-dialog]")) {
   closeButton.addEventListener("click", () => {

@@ -43,7 +43,9 @@ def test_school_proxy_route_separates_host_from_school_path(monkeypatch):
 
     monkeypatch.setattr(app, "proxy_request", fake_proxy)
 
-    response = client.get("/proxy/bkxk.szu.edu.cn/xsxkapp/sys/xsxkapp/%2Adefault/index.do")
+    response = client.get(
+        "/proxy/bkxk.szu.edu.cn/xsxkapp/sys/xsxkapp/%2Adefault/index.do"
+    )
     assert response.status_code == 200
     assert response.json()["school_path"] == "xsxkapp/sys/xsxkapp/*default/index.do"
 
