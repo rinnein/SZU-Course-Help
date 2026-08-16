@@ -136,6 +136,101 @@ def get_session_snapshot() -> dict[str, str | bool]:
         }
 
 
+def get_shared_session() -> tuple[bool, str, str]:
+    """Return one immutable copy of the shared school session for the proxy.
+
+    Reads ``config.combined_cookie`` and ``config.token`` atomically so the
+    reverse proxy always injects the *current* server-side session on every
+    request.  After an OCR automatic re-login the returned values change on
+    the next call; the caller never holds a cached copy across requests.
+
+    Returns ``(logged_in, combined_cookie, token)``.
+    """
+    with _state_lock:
+        combined_cookie = str(config.combined_cookie or "")
+        token = str(config.token or "")
+    logged_in = bool(combined_cookie and token)
+    return logged_in, combined_cookie, token
+
+
+def get_shared_browser_session() -> tuple[bool, str, str, str]:
+    """Return the shared session plus student id for the proxied school UI.
+
+    The original school page checks ``sessionStorage`` before it makes its
+    first API request.  The proxy uses this atomic snapshot to bootstrap that
+    browser-side check from the same server-side session used by API mode.
+    """
+    with _state_lock:
+        combined_cookie = str(config.combined_cookie or "")
+        token = str(config.token or "")
+        student_id = str(config.student_id or "")
+    logged_in = bool(combined_cookie and token and student_id)
+    return logged_in, combined_cookie, token, student_id
+
+
+def merge_session_cookies(cookie_header: str) -> bool:
+    """Fold school ``Set-Cookie`` values back into the shared session cookie.
+
+    The reverse proxy must not leak ``Set-Cookie`` to the browser (the browser
+    holds no meaningful school cookie and preserving a mismatched jar would
+    promote session drift).  Instead the proxy hands every school ``Set-Cookie``
+    here so cookies the school rotates in-flight (e.g. a fresh ``JSESSIONID``
+    or ``_WEU``) stay merged into ``config.combined_cookie`` and the API mode
+    keeps using the very same session.
+
+    ``token``/``student_id``/batch state are intentionally left untouched, and
+    when no valid in-memory session exists the merge is a safe no-op.
+    """
+    if not cookie_header or not str(cookie_header).strip():
+        return False
+    updates = []
+    for name, value in _iter_set_cookie_pairs(str(cookie_header)):
+        updates.append(f"{name}={value}")
+    if not updates:
+        return False
+    merged = "; ".join(updates)
+    with _state_lock:
+        if not config.combined_cookie:
+            return False
+        config.combined_cookie = _combine_cookie_header(config.combined_cookie, merged)
+    return True
+
+
+def _iter_set_cookie_pairs(cookie_header: str, names: tuple[str, ...] = ("route", "insert_cookie", "JSESSIONID", "_WEU")):
+    """Yield ``(name, value)`` pairs from a raw ``Set-Cookie`` header string.
+
+    The school returns cookies mixed with path/expires directives (and commas
+    inside ``Expires``), so they are matched piecemeal via the same regex
+    approach that ``logic.parse_cookie`` already uses.
+    """
+    if not cookie_header:
+        return
+    name_pattern = "|".join(re.escape(name) for name in names)
+    for match in re.finditer(rf"(?:^|[,;]\s*)({name_pattern})=([^;,]+)", cookie_header):
+        yield match.group(1), match.group(2).strip()
+
+
+def _combine_cookie_header(existing: str, additions: str) -> str:
+    """Overlay ``additions`` onto ``existing`` without duplicating names.
+
+    ``existing`` is the current ``config.combined_cookie`` (``name=value; ...``);
+    ``additions`` is a ``; ``-joined string of fresh ``name=value`` pairs.
+    Later values win (school rotation is authoritative).
+    """
+    values: dict[str, str] = {}
+    for segment in str(existing).split(";"):
+        segment = segment.strip()
+        if "=" in segment:
+            name, _, value = segment.partition("=")
+            values[name.strip()] = value.strip()
+    for segment in str(additions).split(";"):
+        segment = segment.strip()
+        if "=" in segment:
+            name, _, value = segment.partition("=")
+            values[name.strip()] = value.strip()
+    return "; ".join(f"{name}={values[name]}" for name in values)
+
+
 def refresh_elective_batch(student_id: str, token: str) -> str:
     """Refresh the batch only if the originating session is still current."""
     normalized_student_id = str(student_id)
@@ -236,8 +331,11 @@ __all__ = [
     "clear_elective_batch",
     "clear_login_state",
     "encrypt_password",
+    "get_shared_session",
+    "get_shared_browser_session",
     "get_session_snapshot",
     "invalidate_school_session",
+    "merge_session_cookies",
     "perform_school_login",
     "refresh_elective_batch",
     "save_login_state",
