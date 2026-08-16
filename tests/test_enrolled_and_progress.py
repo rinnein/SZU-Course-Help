@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
 from fastapi.testclient import TestClient
 
 import app
@@ -149,6 +150,28 @@ def test_terminal_error_marks_failed_and_stops(tmp_path, monkeypatch):
     assert enroll_service.grab_courses([course]) is True
     assert db.get_courses_by_status(database.STATUS_FAILED)[0]["id"] == "bad1"
     assert calls == ["bad1"]
+
+
+def test_generic_conflict_word_alone_is_not_terminal(tmp_path, monkeypatch):
+    """回归：泛化的「冲突」一词不应误判为终态，避免误杀可重试课程。"""
+    course = _course(id="conf1", name="泛冲突课")
+    _prime_cart(monkeypatch, tmp_path, [course])
+    monkeypatch.setattr(
+        enroll_service.choose_course,
+        "submit_course_selection",
+        lambda cid, ctype: Resp("此操作与系统策略无冲突", code="0"),
+    )
+    assert enroll_service.grab_courses([course]) is True
+    # 仅含「冲突」但无具体时间冲突关键词 → 归类为 unknown，不会立即标 FAILED
+    # 课程仍保持 ENROLLING（未被标 FAILED）
+    assert not db_under(monkeypatch).get_courses_by_status(database.STATUS_FAILED)
+
+
+def db_under(_monkeypatch):
+    """Helper returning the cart_service.db used by current tests."""
+    from services import cart_service
+
+    return cart_service.db
 
 
 def test_capacity_full_keeps_retrying(tmp_path, monkeypatch):
@@ -313,3 +336,197 @@ def test_run_enroll_task_stops_after_consecutive_relogin_failures(tmp_path, monk
     # 连续失败达到阈值后停止
     assert len(relogin_calls) == 3
     assert db.get_courses_by_status(database.STATUS_FAILED)[0]["id"] == "R2"
+
+
+# ------------------------------------------------------------------
+# 任务取消与异常回退
+# ------------------------------------------------------------------
+
+
+def test_stop_enroll_task_stops_running_worker(tmp_path, monkeypatch):
+    db = DatabaseManager(str(tmp_path / "stop.db"))
+    monkeypatch.setattr(cart_service, "db", db)
+    cart_service.add_course(_course(id="S1", name="待停课"))
+
+    # 确保任务占用状态干净
+    enroll_service._release_enroll_task()
+
+    seen_stop = {"value": False}
+
+    def fake_grab(courses):
+        # 模拟用户在第一轮后请求停止
+        assert enroll_service.is_enroll_task_running() is True
+        result = enroll_service.stop_enroll_task()
+        seen_stop["value"] = enroll_service.is_stop_requested()
+        return result
+
+    monkeypatch.setattr(enroll_service, "grab_courses", fake_grab)
+    # reserved=False → 内部调用 reserve_enroll_task() 正确设置 _task_running
+    enroll_service.run_enroll_task(reserved=False)
+
+    assert seen_stop["value"] is True
+    assert enroll_service.is_enroll_task_running() is False
+    # 任务被用户停止后，活动课程回退为 PENDING（可重新启动）
+    assert db.get_courses_by_status(database.STATUS_NOT_STARTED)[0]["id"] == "S1"
+
+
+def test_stop_enroll_task_returns_false_when_no_task_running():
+    assert enroll_service.is_enroll_task_running() is False
+    assert enroll_service.stop_enroll_task() is False
+
+
+def test_abnormal_exit_reverts_in_progress_to_pending(tmp_path, monkeypatch):
+    db = DatabaseManager(str(tmp_path / "crash.db"))
+    monkeypatch.setattr(cart_service, "db", db)
+    cart_service.add_course(_course(id="C1", name="崩溃课"))
+
+    def raising_grab(courses):
+        raise RuntimeError("模拟崩溃")
+
+    monkeypatch.setattr(enroll_service, "grab_courses", raising_grab)
+
+    with pytest.raises(RuntimeError, match="模拟崩溃"):
+        enroll_service.run_enroll_task(reserved=True)
+
+    # 异常中止后，ENROLLING 课程应回退为 PENDING，而非 FAILED
+    assert db.get_courses_by_status(database.STATUS_NOT_STARTED)[0]["id"] == "C1"
+    assert not db.get_courses_by_status(database.STATUS_FAILED)
+
+
+def test_normal_exit_marks_unresolved_as_failed(tmp_path, monkeypatch):
+    db = DatabaseManager(str(tmp_path / "normal.db"))
+    monkeypatch.setattr(cart_service, "db", db)
+    cart_service.add_course(_course(id="N1", name="正常结束课"))
+
+    # grab_courses 返回 True（流程结束），但课程仍处于 ENROLLING（未抢到）
+    monkeypatch.setattr(
+        enroll_service,
+        "grab_courses",
+        lambda courses: cart_service.update_status(
+            courses[0].id, database.STATUS_IN_PROGRESS
+        ) or True,
+    )
+
+    enroll_service.run_enroll_task(reserved=True)
+
+    assert db.get_courses_by_status(database.STATUS_FAILED)[0]["id"] == "N1"
+
+
+# ------------------------------------------------------------------
+# 退避与熔断
+# ------------------------------------------------------------------
+
+
+def test_network_failures_back_off_and_circuit_break(tmp_path, monkeypatch):
+    course = _course(id="NET1", name="网络课")
+    db = _prime_cart(monkeypatch, tmp_path, [course])
+    monkeypatch.setattr(config, "count", 100)  # 足够多轮
+
+    sleeps = []
+    monkeypatch.setattr(enroll_service.time, "sleep", lambda s: sleeps.append(s))
+
+    call_count = {"n": 0}
+
+    def always_failing(cid, ctype):
+        call_count["n"] += 1
+        raise ConnectionError("网络中断")
+
+    monkeypatch.setattr(
+        enroll_service.choose_course, "submit_course_selection", always_failing
+    )
+
+    assert enroll_service.grab_courses([course]) is True
+    # 达到 MAX_NETWORK_FAILURES 后降级为 FAILED
+    assert call_count["n"] == enroll_service.MAX_NETWORK_FAILURES
+    assert db.get_courses_by_status(database.STATUS_FAILED)[0]["id"] == "NET1"
+    # 熔断前的每次失败都退避；最后一次触发熔断后直接移出活动集，不再退避
+    assert len(sleeps) == enroll_service.MAX_NETWORK_FAILURES - 1
+    # 指数退避：首次退避为基准值
+    assert sleeps[0] == pytest.approx(enroll_service.NETWORK_BACKOFF_BASE_MS / 1000.0)
+
+
+def test_unknown_response_backoff_grows(tmp_path, monkeypatch):
+    course = _course(id="UNK1", name="未知课")
+    _prime_cart(monkeypatch, tmp_path, [course])
+    monkeypatch.setattr(config, "count", 3)
+
+    sleeps = []
+    monkeypatch.setattr(enroll_service.time, "sleep", lambda s: sleeps.append(s))
+
+    monkeypatch.setattr(
+        enroll_service.choose_course,
+        "submit_course_selection",
+        lambda cid, ctype: Resp("系统繁忙，请稍后再试", code="0"),
+    )
+
+    enroll_service.grab_courses([course])
+    # 未知分支每次都 sleep，且退避递增
+    assert len(sleeps) == 3
+    assert sleeps[1] > sleeps[0]
+    assert sleeps[2] > sleeps[1]
+
+
+# ------------------------------------------------------------------
+# 事件队列上限与聚合指标
+# ------------------------------------------------------------------
+
+
+def test_event_queue_caps_at_max(tmp_path, monkeypatch):
+    course = _course(id="E1", name="事件课")
+    _prime_cart(monkeypatch, tmp_path, [course])
+    monkeypatch.setattr(config, "count", 1)
+
+    monkeypatch.setattr(
+        enroll_service.choose_course,
+        "submit_course_selection",
+        lambda cid, ctype: Resp("添加选课志愿成功"),
+    )
+
+    enroll_service._reset_progress([course])
+    # 灌入超过上限的事件
+    for i in range(enroll_service.MAX_EVENTS + 50):
+        enroll_service._add_event("info", f"事件 {i}")
+
+    snapshot = enroll_service.get_enroll_progress()
+    assert len(snapshot["events"]) == enroll_service.MAX_EVENTS
+    # 保留的是最后 MAX_EVENTS 条
+    assert snapshot["events"][-1]["message"] == f"事件 {enroll_service.MAX_EVENTS + 49}"
+
+
+def test_progress_snapshot_reports_aggregates(tmp_path, monkeypatch):
+    course = _course(id="A1", name="聚合课")
+    _prime_cart(monkeypatch, tmp_path, [course])
+    monkeypatch.setattr(config, "count", 1)
+
+    monkeypatch.setattr(
+        enroll_service.choose_course,
+        "submit_course_selection",
+        lambda cid, ctype: Resp("添加选课志愿成功"),
+    )
+
+    enroll_service._reset_progress([course])
+    enroll_service.grab_courses([course])
+    snapshot = enroll_service.get_enroll_progress()
+
+    assert snapshot["rounds"] == 1
+    assert snapshot["total_requests"] == 1
+    assert snapshot["counts"]["success"] == 1
+
+
+# ------------------------------------------------------------------
+# 并发 reserve
+# ------------------------------------------------------------------
+
+
+def test_reserve_enroll_task_is_exclusive(tmp_path, monkeypatch):
+    db = DatabaseManager(str(tmp_path / "reserve.db"))
+    monkeypatch.setattr(cart_service, "db", db)
+    cart_service.add_course(_course(id="X1", name="并发课"))
+
+    # 重置任务占用状态
+    enroll_service._release_enroll_task()
+    assert enroll_service.reserve_enroll_task() is True
+    assert enroll_service.reserve_enroll_task() is False
+    assert enroll_service.is_enroll_task_running() is True
+    enroll_service._release_enroll_task()
+    assert enroll_service.is_enroll_task_running() is False

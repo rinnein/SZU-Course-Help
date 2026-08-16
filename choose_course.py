@@ -7,12 +7,40 @@ import time
 from typing import Any
 
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 import config
 from school_session import is_session_expired_response
 
 REQUEST_TIMEOUT = (5, 20)
 logger = logging.getLogger(__name__)
+
+
+def _build_session() -> requests.Session:
+    """Create a session with connection pooling and transport-layer retries.
+
+    Only connection-level and transient HTTP failures are retried here; the
+    school's business payload (success / capacity full / terminal) is still
+    classified by the caller in ``services.enroll_service``.
+    """
+    session = requests.Session()
+    retry = Retry(
+        total=2,
+        connect=2,
+        read=2,
+        backoff_factor=0.3,
+        status_forcelist=(502, 503, 504),
+        allowed_methods=frozenset(("GET", "POST")),
+        raise_on_status=False,
+    )
+    adapter = HTTPAdapter(pool_connections=4, pool_maxsize=8, max_retries=retry)
+    session.mount("http://", adapter)
+    session.mount("https://", adapter)
+    return session
+
+
+_session = _build_session()
 
 
 class SchoolSessionExpiredError(RuntimeError):
@@ -44,7 +72,7 @@ def query_enrolled_courses(
 ) -> list[dict[str, Any]]:
     """Return the current student's selected courses from the school system."""
     timestamp = int(time.time() * 1000)
-    response = requests.post(
+    response = _session.post(
         url=(
             f"{config.SCHOOL_BASE_URL}elective/courseResult.do"
             f"?timestamp={timestamp}&studentCode={config.student_id}"
@@ -102,7 +130,7 @@ def submit_course_selection(class_id: str, teaching_class_type: str):
         class_id,
         teaching_class_type,
     )
-    return requests.post(
+    return _session.post(
         url=config.SCHOOL_BASE_URL + "elective/volunteer.do",
         data=form_data,
         headers=headers,

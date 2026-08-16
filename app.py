@@ -60,6 +60,7 @@ from services.enroll_service import (
     is_enroll_task_running,
     reserve_enroll_task,
     run_enroll_task,
+    stop_enroll_task,
 )
 from services.proxy_service import SCHOOL_HOST, proxy_request
 
@@ -914,6 +915,30 @@ async def api_enroll_status():
     return JSONResponse(
         content={"running": is_enroll_task_running(), **progress},
         headers=get_no_cache_headers(),
+    )
+
+
+@app.post("/api/enroll/stop")
+async def api_stop_enroll():
+    """Request the running enrollment worker to stop gracefully.
+
+    Returns 404 when no task is running (nothing to stop), 202 when the stop
+    flag was set.  The worker observes the flag at the next checkpoint and
+    exits through its normal ``finally`` block.
+    """
+    if not is_enroll_task_running():
+        return JSONResponse(
+            status_code=404,
+            content={"message": "当前没有正在运行的抢课任务", "is_error": True},
+        )
+    if not stop_enroll_task():
+        return JSONResponse(
+            status_code=409,
+            content={"message": "抢课任务状态已变化，请重试", "is_error": True},
+        )
+    return JSONResponse(
+        status_code=202,
+        content={"message": "已请求停止抢课任务，等待当前轮次结束", "is_error": False},
     )
 
 
