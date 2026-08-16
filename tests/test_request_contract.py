@@ -51,7 +51,7 @@ def test_enrollment_request_contract_is_source_compatible(monkeypatch):
         captured.update(kwargs)
         return DummyResponse()
 
-    monkeypatch.setattr(choose_course.requests, "post", fake_post)
+    monkeypatch.setattr(choose_course._session, "post", fake_post)
     monkeypatch.setattr(config, "student_id", "2024110122")
     monkeypatch.setattr(config, "elective_batch_code", "2025202601")
     monkeypatch.setattr(config, "combined_cookie", "route=x; JSESSIONID=y")
@@ -154,7 +154,7 @@ def test_closed_phase_keywords_override_automatic_keywords(batch_name):
 
 def test_selected_course_login_page_is_not_treated_as_empty(monkeypatch):
     monkeypatch.setattr(
-        choose_course.requests,
+        choose_course._session,
         "post",
         lambda **kwargs: LoginPageResponse(),
     )

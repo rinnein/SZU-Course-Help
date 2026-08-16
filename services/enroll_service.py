@@ -140,6 +140,10 @@ TERMINAL_ERROR_KEYWORDS = (
 )
 # 连续未知或网络异常达到阈值时触发保护性暂停，不会把课程写成 FAILED。
 MAX_NETWORK_STREAK = 8
+NETWORK_BACKOFF_BASE_MS = 500
+NETWORK_BACKOFF_CAP_MS = 30_000
+UNKNOWN_BACKOFF_STEP_MS = 200
+UNKNOWN_BACKOFF_CAP_MS = 2_000
 # 事件队列上限（仅保留最近的事件）
 MAX_EVENTS = 200
 
@@ -393,6 +397,29 @@ def _wait_between_requests(seconds: float) -> bool:
     return True
 
 
+def is_stop_requested() -> bool:
+    """Return whether the worker should stop at the next request boundary."""
+    with _task_state_lock:
+        return bool(_task_state["stop_requested"])
+
+
+def stop_enroll_task() -> bool:
+    """Request a graceful stop while preserving courses that were not completed."""
+    with _task_condition:
+        if not _task_state["running"]:
+            return False
+        _task_state.update(
+            {
+                "stop_requested": True,
+                "stop_reason": "用户请求停止抢课任务",
+                "paused": False,
+            }
+        )
+        _task_condition.notify_all()
+    _add_event("info", "收到停止请求，抢课任务将在当前请求边界结束")
+    return True
+
+
 def _release_enroll_task() -> None:
     with _task_condition:
         _task_state.update(
@@ -602,10 +629,14 @@ def grab_courses(courses: list) -> GrabOutcome:
 
     max_rounds = max(1, int(config.count))
     for _ in range(max_rounds):
+        if is_stop_requested():
+            return GrabOutcome.COMPLETED
         if not active:
             break
 
         for course in list(active):
+            if is_stop_requested():
+                return GrabOutcome.COMPLETED
             if get_enroll_task_state()["paused"]:
                 return GrabOutcome.PAUSED
             try:
@@ -695,6 +726,14 @@ def grab_courses(courses: list) -> GrabOutcome:
                             course.name,
                             snippet,
                         )
+                        backoff_ms = min(
+                            UNKNOWN_BACKOFF_STEP_MS * unknown_streak[course.id],
+                            UNKNOWN_BACKOFF_CAP_MS,
+                        )
+                        if not _wait_between_requests(
+                            (config.delay + backoff_ms) / 1000.0
+                        ):
+                            return GrabOutcome.PAUSED
 
                 if active and not _wait_between_requests(config.delay / 1000.0):
                     return GrabOutcome.PAUSED
@@ -720,7 +759,11 @@ def grab_courses(courses: list) -> GrabOutcome:
                     _update_course_progress(course.id, message=reason)
                     pause_enroll_task(reason, source="network_error")
                     return GrabOutcome.PAUSED
-                if not _wait_between_requests(max(config.delay, 350) / 1000.0):
+                backoff_ms = min(
+                    NETWORK_BACKOFF_BASE_MS * (2 ** (network_streak[course.id] - 1)),
+                    NETWORK_BACKOFF_CAP_MS,
+                )
+                if not _wait_between_requests(max(config.delay, backoff_ms) / 1000.0):
                     return GrabOutcome.PAUSED
                 continue
             except Exception as exc:

@@ -20,11 +20,21 @@ logger = logging.getLogger(__name__)
 
 
 def _build_session() -> requests.Session:
+    """Create a session with connection pooling and transport-layer retries.
+
+    Only connection-level and transient HTTP failures are retried here; the
+    school's business payload (success / capacity full / terminal) is still
+    classified by the caller in ``services.enroll_service``.
+    """
     session = requests.Session()
     retry = Retry(
-        total=2, connect=2, read=2, backoff_factor=0.3,
+        total=2,
+        connect=2,
+        read=2,
+        backoff_factor=0.3,
         status_forcelist=(502, 503, 504),
-        allowed_methods=frozenset(("GET", "POST")), raise_on_status=False,
+        allowed_methods=frozenset(("GET", "POST")),
+        raise_on_status=False,
     )
     adapter = HTTPAdapter(pool_connections=4, pool_maxsize=8, max_retries=retry)
     session.mount("http://", adapter)
@@ -49,7 +59,7 @@ def _school_request(path: str, *, data=None, params=None, token: str = "", cooki
     def sender(**kwargs):
         kwargs.pop("method", None)
         kwargs.pop("json", None)
-        return requests.post(**kwargs)
+        return _session.post(**kwargs)
 
     return backend_service.request_with_failover(
         "POST", path, sender=sender, data=data, params=params,
