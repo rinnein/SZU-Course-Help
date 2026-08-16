@@ -28,6 +28,7 @@ const appState = {
   courses: [],
   cart: [],
   session: null,
+  sessionExpired: false,
   loadingCourses: false,
   courseRequestController: null,
   courseRequestId: 0,
@@ -178,6 +179,7 @@ async function api(url, options = {}) {
     if (response.status === 401) {
       const message = data.message || "登录已过期，请重新登录";
       showSessionDialog(message);
+      markSessionExpired(message);
       throw new SessionExpiredError(message, {
         status: response.status,
         code: data.error_code || "NOT_LOGGED_IN",
@@ -228,6 +230,26 @@ function showSessionDialog(message) {
   appElements.sessionMessage.textContent = message;
   appElements.sessionLoginLink.href = versionedPage("/login");
   if (!appElements.sessionDialog.open) appElements.sessionDialog.showModal();
+}
+
+function markSessionExpired(message = "保存的登录会话已失效，请返回登录页重新登录。") {
+  if (appState.sessionExpired) return;
+  appState.sessionExpired = true;
+  stopProgressPolling();
+  stopSessionPolling();
+  appState.courseRequestId += 1;
+  appState.courseRequestController?.abort();
+  appState.courseRequestController = null;
+  appState.session = {
+    ...(appState.session || {}),
+    logged_in: false,
+    task_running: false,
+  };
+  appElements.studentLabel.textContent = "未登录";
+  renderState("登录状态已失效", message, {
+    tone: "error",
+    note: "请返回登录页重新完成验证码校验。",
+  });
 }
 
 function renderLoading() {
@@ -367,8 +389,11 @@ async function loadSession(showDialog = true) {
     const session = await api("/api/session");
     applySessionData(session);
     if (!appState.session.logged_in && showDialog) {
-      showSessionDialog("当前没有有效登录状态，请返回登录页完成登录。");
+      const message = "当前没有有效登录状态，请返回登录页完成登录。";
+      showSessionDialog(message);
+      markSessionExpired(message);
     }
+    if (appState.sessionExpired) return appState.session;
     if (previousTaskState !== Boolean(appState.session.task_running)) {
       await loadCart();
     }
@@ -1279,6 +1304,7 @@ for (const closeButton of document.querySelectorAll("[data-close-dialog]")) {
 
 async function initializeApp() {
   await loadSession(true);
+  if (appState.sessionExpired) return;
   startSessionPolling();
   appElements.brandLink.href = versionedPage("/");
   appElements.sessionLoginLink.href = versionedPage("/login");

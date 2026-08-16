@@ -36,11 +36,14 @@ from services.auth_service import (
     attempt_automatic_relogin,
     clear_elective_batch,
     clear_login_state,
+    consume_restored_session_validation,
     encrypt_password,
     get_session_snapshot,
+    invalidate_school_session,
     perform_school_login,
     refresh_elective_batch,
     restore_login_state,
+    restored_session_validation_pending,
     save_login_state,
     validate_login_params,
 )
@@ -255,11 +258,14 @@ def _api_error(
     )
 
 
-def _not_logged_in_response():
+def _not_logged_in_response(
+    message: str = "登录状态无效，请重新登录",
+    error_code: str = "NOT_LOGGED_IN",
+):
     return _api_error(
         401,
-        "登录状态无效，请重新登录",
-        "NOT_LOGGED_IN",
+        message,
+        error_code,
         retryable=False,
         requires_manual_login=True,
     )
@@ -530,6 +536,28 @@ async def api_captcha_solve(payload: dict):
 @app.get("/api/session")
 async def api_session():
     payload = _session_payload()
+    if payload["logged_in"] and consume_restored_session_validation():
+        try:
+            await asyncio.to_thread(
+                refresh_elective_batch,
+                str(payload["student_id"]),
+                config.token,
+            )
+        except logic.SchoolBatchSessionExpiredError:
+            logger.info("Restored session is expired; requiring manual login")
+            invalidate_school_session()
+            return _not_logged_in_response(
+                "保存的登录会话已失效，请重新登录",
+                "SESSION_RESTORE_EXPIRED",
+            )
+        except logic.ElectiveBatchUnavailableError as exc:
+            clear_elective_batch()
+            logger.info("Restored session is valid but no batch is available: %s", exc)
+        except (requests.Timeout, requests.RequestException) as exc:
+            logger.info("Restored session validation deferred after network issue: %s", exc)
+        except Exception as exc:
+            logger.warning("Restored session validation failed without expiring session: %s", exc)
+        payload = _session_payload()
     _record_frontend_session_success()
     return JSONResponse(
         content=payload,
@@ -1034,17 +1062,26 @@ def _keep_alive_once() -> None:
     if _frontend_session_heartbeat_is_active():
         logger.debug("Keep-alive skipped: frontend session heartbeat is active")
         return
+    restored_session = restored_session_validation_pending()
     student_id = str(snapshot["student_id"])
     token = str(config.token)
     try:
         refresh_elective_batch(student_id, token)
+        if restored_session:
+            consume_restored_session_validation()
         logger.info("Keep-alive: school session refreshed")
     except logic.SchoolBatchSessionExpiredError:
+        if restored_session:
+            logger.info("Keep-alive: restored session expired; requiring manual login")
+            invalidate_school_session()
+            return
         logger.info("Keep-alive: session expired; starting OCR recovery")
         recovered, error = attempt_automatic_relogin(config.ocr_relogin_max_attempts)
         if not recovered:
             logger.warning("Keep-alive OCR recovery failed: %s", error)
     except logic.ElectiveBatchUnavailableError as exc:
+        if restored_session:
+            consume_restored_session_validation()
         logger.info("Keep-alive: school session alive but no batch: %s", exc)
     except (requests.Timeout, requests.RequestException) as exc:
         logger.info("Keep-alive network issue (session unaffected): %s", exc)

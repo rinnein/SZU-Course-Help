@@ -21,6 +21,7 @@ LOGIN_ERROR_MSG = "登录失败，请检查学号、密码、卡密或验证码�
 _state_lock = threading.RLock()
 _automatic_relogin_lock = threading.Lock()
 _session_generation = 0
+_restored_session_pending_validation = False
 
 
 def validate_login_params(
@@ -113,6 +114,7 @@ def save_login_state(
     """Atomically store the local credentials needed for session recovery."""
     if not login_cookie or not captcha_cookie or not token:
         raise ValueError("complete login cookies and token are required")
+    global _restored_session_pending_validation
     with _state_lock:
         config.combined_cookie = f"{login_cookie}; {captcha_cookie}"
         config.token = str(token)
@@ -121,11 +123,13 @@ def save_login_state(
         config.elective_batch_code = ""
         config.elective_batch_name = ""
         _advance_session_generation()
+        _restored_session_pending_validation = False
         _persist_current_session()
 
 
 def clear_login_state() -> None:
     """Clear credentials and all school-session state."""
+    global _restored_session_pending_validation
     with _state_lock:
         config.combined_cookie = ""
         config.token = ""
@@ -134,6 +138,7 @@ def clear_login_state() -> None:
         config.elective_batch_code = ""
         config.elective_batch_name = ""
         _advance_session_generation()
+        _restored_session_pending_validation = False
         try:
             clear_persisted_session()
         except OSError as exc:
@@ -142,12 +147,14 @@ def clear_login_state() -> None:
 
 def invalidate_school_session() -> None:
     """Drop expired school tokens while retaining credentials for recovery."""
+    global _restored_session_pending_validation
     with _state_lock:
         config.combined_cookie = ""
         config.token = ""
         config.elective_batch_code = ""
         config.elective_batch_name = ""
         _advance_session_generation()
+        _restored_session_pending_validation = False
         _persist_current_session()
 
 
@@ -300,6 +307,7 @@ def refresh_elective_batch(student_id: str, token: str) -> str:
 
 def restore_login_state() -> str:
     """Restore a persisted school session into the current process."""
+    global _restored_session_pending_validation
     with _state_lock:
         if config.token and config.combined_cookie and config.student_id:
             return str(config.student_id)
@@ -323,7 +331,24 @@ def restore_login_state() -> str:
         config.elective_batch_code = str(payload.get("batch_code", ""))
         config.elective_batch_name = str(payload.get("batch_name", ""))
         _advance_session_generation()
+        _restored_session_pending_validation = True
     return str(payload["student_id"])
+
+
+def consume_restored_session_validation() -> bool:
+    """Claim the one-time school validation for a session restored from disk."""
+    global _restored_session_pending_validation
+    with _state_lock:
+        if not _restored_session_pending_validation:
+            return False
+        _restored_session_pending_validation = False
+        return True
+
+
+def restored_session_validation_pending() -> bool:
+    """Return whether the current session still came from unvalidated disk state."""
+    with _state_lock:
+        return _restored_session_pending_validation
 
 
 def attempt_ocr_relogin(
@@ -395,6 +420,7 @@ __all__ = [
     "attempt_ocr_relogin",
     "clear_elective_batch",
     "clear_login_state",
+    "consume_restored_session_validation",
     "encrypt_password",
     "get_shared_session",
     "get_shared_browser_session",
@@ -404,6 +430,7 @@ __all__ = [
     "perform_school_login",
     "refresh_elective_batch",
     "restore_login_state",
+    "restored_session_validation_pending",
     "save_login_state",
     "validate_login_params",
 ]

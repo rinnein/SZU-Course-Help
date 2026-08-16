@@ -260,6 +260,8 @@ def test_login_state_persists_and_restores_across_process_state(monkeypatch, tmp
     config.elective_batch_name = ""
 
     assert auth_service.restore_login_state() == "2024110122"
+    assert auth_service.consume_restored_session_validation() is True
+    assert auth_service.consume_restored_session_validation() is False
     assert config.password == "secret"
     assert config.token == "token"
     assert config.combined_cookie == "cookie"

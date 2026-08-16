@@ -152,6 +152,27 @@ def test_session_uses_backend_phase_classification(monkeypatch):
     assert body["automatic_enroll_allowed"] is False
 
 
+def test_expired_restored_session_requires_manual_login(monkeypatch):
+    set_logged_session(monkeypatch)
+    monkeypatch.setattr(app, "consume_restored_session_validation", lambda: True)
+    monkeypatch.setattr(
+        app,
+        "refresh_elective_batch",
+        lambda *_args: (_ for _ in ()).throw(
+            logic.SchoolBatchSessionExpiredError("expired")
+        ),
+    )
+
+    response = client.get("/api/session")
+
+    assert response.status_code == 401
+    assert response.json()["error_code"] == "SESSION_RESTORE_EXPIRED"
+    assert response.json()["requires_manual_login"] is True
+    assert "保存的登录会话已失效" in response.json()["message"]
+    assert config.token == ""
+    assert config.combined_cookie == ""
+
+
 def test_course_api_converts_ui_pages_to_school_zero_based_pages(monkeypatch):
     observed_pages = []
 
@@ -459,6 +480,33 @@ def test_keep_alive_triggers_ocr_recovery_on_expiry(monkeypatch):
     app._keep_alive_once()
 
     assert len(relogin_called) == 1
+
+
+def test_keep_alive_requires_manual_login_for_unvalidated_restored_session(monkeypatch):
+    monkeypatch.setattr(app, "_last_frontend_session_success", 0.0)
+    monkeypatch.setattr(config, "token", "expired-token")
+    monkeypatch.setattr(config, "combined_cookie", "cookie")
+    monkeypatch.setattr(config, "student_id", "2024110122")
+    monkeypatch.setattr(app, "restored_session_validation_pending", lambda: True)
+    monkeypatch.setattr(
+        app,
+        "refresh_elective_batch",
+        lambda *args: (_ for _ in ()).throw(
+            logic.SchoolBatchSessionExpiredError("expired")
+        ),
+    )
+    monkeypatch.setattr(
+        app,
+        "attempt_automatic_relogin",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("must require manual login")
+        ),
+    )
+
+    app._keep_alive_once()
+
+    assert config.token == ""
+    assert config.combined_cookie == ""
 
 
 def test_keep_alive_skips_when_frontend_session_heartbeat_is_active(monkeypatch):
