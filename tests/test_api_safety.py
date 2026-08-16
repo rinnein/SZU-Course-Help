@@ -39,9 +39,7 @@ def test_school_proxy_route_separates_host_from_school_path(monkeypatch):
 
     monkeypatch.setattr(app, "proxy_request", fake_proxy)
 
-    response = client.get(
-        "/proxy/bkxk.szu.edu.cn/xsxkapp/sys/xsxkapp/%2Adefault/index.do"
-    )
+    response = client.get("/proxy/bkxk.szu.edu.cn/xsxkapp/sys/xsxkapp/%2Adefault/index.do")
     assert response.status_code == 200
     assert response.json()["school_path"] == "xsxkapp/sys/xsxkapp/*default/index.do"
 
@@ -428,6 +426,7 @@ def test_keep_alive_skips_when_not_logged_in(monkeypatch):
 
 
 def test_keep_alive_refreshes_session_when_logged_in(monkeypatch):
+    monkeypatch.setattr(app, "_last_frontend_session_success", 0.0)
     monkeypatch.setattr(config, "token", "active-token")
     monkeypatch.setattr(config, "combined_cookie", "cookie")
     monkeypatch.setattr(config, "student_id", "2024110122")
@@ -441,6 +440,7 @@ def test_keep_alive_refreshes_session_when_logged_in(monkeypatch):
 
 
 def test_keep_alive_triggers_ocr_recovery_on_expiry(monkeypatch):
+    monkeypatch.setattr(app, "_last_frontend_session_success", 0.0)
     monkeypatch.setattr(config, "token", "expired-token")
     monkeypatch.setattr(config, "combined_cookie", "cookie")
     monkeypatch.setattr(config, "student_id", "2024110122")
@@ -453,12 +453,25 @@ def test_keep_alive_triggers_ocr_recovery_on_expiry(monkeypatch):
     monkeypatch.setattr(
         app,
         "attempt_automatic_relogin",
-        lambda *args, **kwargs: (relogin_called.append(args) or (True, "")),
+        lambda *args, **kwargs: relogin_called.append(args) or (True, ""),
     )
 
     app._keep_alive_once()
 
     assert len(relogin_called) == 1
+
+
+def test_keep_alive_skips_when_frontend_session_heartbeat_is_active(monkeypatch):
+    monkeypatch.setattr(config, "token", "active-token")
+    monkeypatch.setattr(config, "combined_cookie", "cookie")
+    monkeypatch.setattr(config, "student_id", "2024110122")
+    called = []
+    monkeypatch.setattr(app, "refresh_elective_batch", lambda *args: called.append(args))
+
+    assert client.get("/api/session").status_code == 200
+    app._keep_alive_once()
+
+    assert called == []
 
 
 def test_captcha_solve_rejects_missing_image():

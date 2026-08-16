@@ -2,6 +2,7 @@
 
 const REQUEST_TIMEOUT_MS = 30000;
 const SESSION_RECOVERY_TIMEOUT_MS = 180000;
+const SESSION_POLL_INTERVAL_MS = 5000;
 
 const categoryNames = {
   TJKC: "本班推荐",
@@ -33,6 +34,7 @@ const appState = {
   courseDataKey: "",
   catalogBlockedCode: "",
   loadingSession: false,
+  sessionTimer: null,
   refreshingPhase: false,
   preselection: false,
   closedPhase: false,
@@ -1150,6 +1152,20 @@ function stopProgressPolling() {
   }
 }
 
+function startSessionPolling() {
+  if (appState.sessionTimer) return;
+  appState.sessionTimer = window.setInterval(() => {
+    if (!appState.refreshingPhase) loadSession(false);
+  }, SESSION_POLL_INTERVAL_MS);
+}
+
+function stopSessionPolling() {
+  if (appState.sessionTimer) {
+    window.clearInterval(appState.sessionTimer);
+    appState.sessionTimer = null;
+  }
+}
+
 async function startEnrollment() {
   if (!appElements.phaseConfirmation.checked || !appState.grabPhase) return;
   appElements.startEnroll.disabled = true;
@@ -1237,6 +1253,7 @@ appElements.logout.addEventListener("click", async () => {
     const result = await api("/api/logout", { method: "POST" });
     if (result.is_error) throw new Error(result.message);
     stopProgressPolling();
+    stopSessionPolling();
     window.location.assign(versionedPage("/login"));
   } catch (error) {
     if (!(error instanceof SessionExpiredError)) showToast(error.message, true);
@@ -1262,14 +1279,12 @@ for (const closeButton of document.querySelectorAll("[data-close-dialog]")) {
 
 async function initializeApp() {
   await loadSession(true);
+  startSessionPolling();
   appElements.brandLink.href = versionedPage("/");
   appElements.sessionLoginLink.href = versionedPage("/login");
   await loadCart();
   if (appState.session?.logged_in) await loadCourses();
   else renderState("尚未登录", "返回登录页完成学号、密码、卡密和验证码校验。");
-  window.setInterval(() => {
-    if (!appState.refreshingPhase) loadSession(false);
-  }, 5000);
 }
 
 initializeApp();

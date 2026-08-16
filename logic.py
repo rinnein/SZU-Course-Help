@@ -7,6 +7,7 @@ import logging
 import os
 import re
 import time
+import unicodedata
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -350,6 +351,13 @@ def _ddddocr_engines():
     return detector, ocr
 
 
+def _normalize_ocr_text(value: Any) -> str:
+    """Normalize one OCR result and reject accidental multi-character reads."""
+    normalized = unicodedata.normalize("NFKC", str(value or ""))
+    normalized = "".join(normalized.split())
+    return normalized if len(normalized) == 1 else ""
+
+
 def _ocr_glyph(ocr: Any, image: Any, upscale: int = 5, padding: int = 14) -> str:
     """Recognise a single glyph: upscale, pad with white, then run one-char OCR.
 
@@ -374,7 +382,20 @@ def _ocr_glyph(ocr: Any, image: Any, upscale: int = 5, padding: int = 14) -> str
     canvas[padding : padding + upscaled.shape[0], padding : padding + upscaled.shape[1]] = upscaled
     buffer = io.BytesIO()
     Image.fromarray(cv2.cvtColor(canvas, cv2.COLOR_BGR2RGB)).save(buffer, format="PNG")
-    return "".join(ocr.classification(buffer.getvalue()).split())
+    return _normalize_ocr_text(ocr.classification(buffer.getvalue()))
+
+
+def _ocr_glyph_options(ocr: Any, image: Any) -> list[str]:
+    """Return distinct OCR reads from the raw and two OTSU image variants."""
+    import cv2
+
+    options = [_ocr_glyph(ocr, image)]
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if len(image.shape) == 3 else image
+    for threshold_type in (cv2.THRESH_BINARY, cv2.THRESH_BINARY_INV):
+        _, binary = cv2.threshold(gray, 0, 255, threshold_type + cv2.THRESH_OTSU)
+        variant = cv2.cvtColor(binary, cv2.COLOR_GRAY2BGR)
+        options.append(_ocr_glyph(ocr, variant, upscale=6, padding=16))
+    return list(dict.fromkeys(option for option in options if option))
 
 
 def _segment_columns(
@@ -436,9 +457,38 @@ def _candidate_boxes(image: Any) -> list[list[int]]:
 
     buffer = io.BytesIO()
     Image.fromarray(cv2.cvtColor(image[25:80, 0:250], cv2.COLOR_BGR2RGB)).save(buffer, format="PNG")
-    boxes = sorted(detector.detection(buffer.getvalue()), key=lambda item: item[0])
+    boxes = _sanitize_candidate_boxes(detector.detection(buffer.getvalue()), image.shape)
     # Convert crop-relative box coordinates back to full-image coordinates.
     return [[x1, y1 + 25, x2, y2 + 25] for x1, y1, x2, y2 in boxes]
+
+
+def _sanitize_candidate_boxes(raw_boxes: Any, image_shape: tuple[int, ...]) -> list[list[int]]:
+    """Clamp, discard noise, and de-duplicate detector boxes before OCR."""
+    height, width = image_shape[:2]
+    sanitized: list[list[int]] = []
+    for raw_box in raw_boxes or []:
+        if not isinstance(raw_box, (list, tuple)) or len(raw_box) != 4:
+            continue
+        try:
+            x1, y1, x2, y2 = (int(round(value)) for value in raw_box)
+        except (TypeError, ValueError):
+            continue
+        x1, x2 = max(0, min(x1, width)), max(0, min(x2, width))
+        y1, y2 = max(0, min(y1, height)), max(0, min(y2, height))
+        if x2 <= x1 or y2 <= y1 or x2 - x1 < 8 or y2 - y1 < 10:
+            continue
+        area = (x2 - x1) * (y2 - y1)
+        if any(
+            (min(x2, old_x2) - max(x1, old_x1))
+            * (min(y2, old_y2) - max(y1, old_y1))
+            / min(area, (old_x2 - old_x1) * (old_y2 - old_y1))
+            >= 0.95
+            for old_x1, old_y1, old_x2, old_y2 in sanitized
+            if min(x2, old_x2) > max(x1, old_x1) and min(y2, old_y2) > max(y1, old_y1)
+        ):
+            continue
+        sanitized.append([x1, y1, x2, y2])
+    return sorted(sanitized, key=lambda item: (item[0], item[1]))
 
 
 def _recognize_candidate_glyphs(
@@ -576,10 +626,10 @@ def recognize_captcha_centers() -> list[list[int]]:
 
     # Exact matching: each target picks the first unused candidate box holding the
     # same character.  Two coordinates never share a box.
-    result: list[list[int]] = []
+    matched_indexes: list[int | None] = [None] * len(target_chars)
     used_indexes: set[int] = set()
-    unmatched_targets: list[str] = []
-    for target_char in target_chars:
+    unmatched_targets: list[tuple[int, str]] = []
+    for target_position, target_char in enumerate(target_chars):
         matched_index = next(
             (
                 index
@@ -590,10 +640,9 @@ def recognize_captcha_centers() -> list[list[int]]:
         )
         if matched_index is not None:
             used_indexes.add(matched_index)
-            x1, y1, x2, y2 = boxes[matched_index]
-            result.append([(x1 + x2) // 2, (y1 + y2) // 2])
+            matched_indexes[target_position] = matched_index
         else:
-            unmatched_targets.append(target_char)
+            unmatched_targets.append((target_position, target_char))
 
     # Re-OCR the still-unused candidate boxes with a second binarization to try to
     # recover characters the default path misread.  This honours the invariant that
@@ -605,7 +654,7 @@ def recognize_captcha_centers() -> list[list[int]]:
     if unmatched_targets:
         passed_bgr = [image[y1:y2, x1:x2] for x1, y1, x2, y2 in boxes]
         rechars = _re_ocr_remaining_candidates(ocr, passed_bgr, used_indexes)
-        for target_char in unmatched_targets[:]:
+        for target_position, target_char in unmatched_targets[:]:
             matched_index = next(
                 (
                     index
@@ -616,9 +665,35 @@ def recognize_captcha_centers() -> list[list[int]]:
             )
             if matched_index is not None:
                 used_indexes.add(matched_index)
-                x1, y1, x2, y2 = boxes[matched_index]
-                result.append([(x1 + x2) // 2, (y1 + y2) // 2])
-                unmatched_targets.remove(target_char)
+                matched_indexes[target_position] = matched_index
+                unmatched_targets.remove((target_position, target_char))
+
+        # If the first OCR pass read a character differently in the top and
+        # bottom regions, compare the raw and binarized reads without guessing.
+        if unmatched_targets and any(rechars):
+            candidate_options = {
+                index: _ocr_glyph_options(ocr, passed_bgr[index])
+                for index in range(len(boxes))
+                if index not in used_indexes
+            }
+            target_options = {}
+            for position, _target_char in unmatched_targets:
+                left, right = target_intervals[position]
+                target_options[position] = _ocr_glyph_options(ocr, image[2:14, left:right])
+            for target_position, _target_char in unmatched_targets[:]:
+                target_reads = set(target_options.get(target_position, ()))
+                matched_index = next(
+                    (
+                        index
+                        for index, candidate_reads in candidate_options.items()
+                        if index not in used_indexes and target_reads.intersection(candidate_reads)
+                    ),
+                    None,
+                )
+                if matched_index is not None:
+                    used_indexes.add(matched_index)
+                    matched_indexes[target_position] = matched_index
+                    unmatched_targets.remove((target_position, _target_char))
 
         if unmatched_targets:
             logger.info(
@@ -628,6 +703,12 @@ def recognize_captcha_centers() -> list[list[int]]:
             )
             return []
 
+    if any(index is None for index in matched_indexes):
+        return []
+    result = [
+        [(boxes[index][0] + boxes[index][2]) // 2, (boxes[index][1] + boxes[index][3]) // 2]
+        for index in matched_indexes
+    ]
     if len(result) != 4 or not _all_distinct(result) or not _all_in_range(result):
         logger.warning(
             "OCR produced %s points (targets=%s candidates=%s)",
@@ -646,17 +727,13 @@ def _re_ocr_remaining_candidates(
     used_indexes: set[int],
 ) -> list[str]:
     """Re-OCR unused candidate glyphs with an OTSU binarization and higher upscale."""
-    import cv2
-
     results: list[str] = []
     for index, glyph in enumerate(candidate_images):
         if index in used_indexes:
             results.append("")
             continue
-        gray = cv2.cvtColor(glyph, cv2.COLOR_BGR2GRAY)
-        _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-        glyph_bgr = cv2.cvtColor(binary, cv2.COLOR_GRAY2BGR)
-        results.append(_ocr_glyph(ocr, glyph_bgr, upscale=6, padding=16))
+        options = _ocr_glyph_options(ocr, glyph)
+        results.append(options[0] if options else "")
     return results
 
 
@@ -666,7 +743,10 @@ def _all_distinct(points: list[list[int]]) -> bool:
 
 def _all_in_range(points: list[list[int]]) -> bool:
     return all(
-        isinstance(point, (list, tuple)) and len(point) == 2 and 0 <= int(point[0]) <= CAPTCHA_WIDTH and 0 <= int(point[1]) <= CAPTCHA_HEIGHT
+        isinstance(point, (list, tuple))
+        and len(point) == 2
+        and 0 <= int(point[0]) <= CAPTCHA_WIDTH
+        and 0 <= int(point[1]) <= CAPTCHA_HEIGHT
         for point in points
     )
 
