@@ -9,6 +9,7 @@ import re
 import secrets
 import socket
 import threading
+import time
 import webbrowser
 from datetime import datetime
 from pathlib import Path
@@ -507,7 +508,9 @@ async def api_captcha_solve(payload: dict):
                 content={"points": [], "message": f"OCR 依赖不可用: {exc}"},
             )
         except Exception as exc:
-            logger.warning("Captcha solve attempt %s/%s failed: %s", attempt, CAPTCHA_SOLVE_MAX_RETRIES, exc)
+            logger.warning(
+                "Captcha solve attempt %s/%s failed: %s", attempt, CAPTCHA_SOLVE_MAX_RETRIES, exc
+            )
 
         # Fetch a fresh captcha for the next retry
         if attempt < CAPTCHA_SOLVE_MAX_RETRIES:
@@ -536,8 +539,10 @@ async def api_captcha_solve(payload: dict):
 
 @app.get("/api/session")
 async def api_session():
+    payload = _session_payload()
+    _record_frontend_session_success()
     return JSONResponse(
-        content=_session_payload(),
+        content=payload,
         headers=get_no_cache_headers(),
     )
 
@@ -1164,12 +1169,35 @@ def open_browser() -> None:
 
 
 KEEP_ALIVE_INTERVAL_SECONDS = 60
+FRONTEND_SESSION_HEARTBEAT_GRACE_SECONDS = KEEP_ALIVE_INTERVAL_SECONDS + 10
+_frontend_session_heartbeat_lock = threading.Lock()
+_last_frontend_session_success = 0.0
+
+
+def _record_frontend_session_success() -> None:
+    """Record a successful browser session read for keep-alive coordination."""
+    global _last_frontend_session_success
+    with _frontend_session_heartbeat_lock:
+        _last_frontend_session_success = time.monotonic()
+
+
+def _frontend_session_heartbeat_is_active() -> bool:
+    """Return whether the browser has recently completed a session request."""
+    with _frontend_session_heartbeat_lock:
+        last_success = _last_frontend_session_success
+    return (
+        last_success > 0
+        and time.monotonic() - last_success < FRONTEND_SESSION_HEARTBEAT_GRACE_SECONDS
+    )
 
 
 def _keep_alive_once() -> None:
     """Refresh the school session so it does not expire while the user is idle."""
     snapshot = get_session_snapshot()
     if not snapshot["logged_in"] or not snapshot["student_id"]:
+        return
+    if _frontend_session_heartbeat_is_active():
+        logger.debug("Keep-alive skipped: frontend session heartbeat is active")
         return
     student_id = str(snapshot["student_id"])
     token = str(config.token)

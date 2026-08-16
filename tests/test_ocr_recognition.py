@@ -63,6 +63,15 @@ def test_segment_columns_merges_close_gaps():
     assert left == 3 and right == 8
 
 
+def test_sanitize_candidate_boxes_discards_noise_and_duplicate_boxes():
+    boxes = logic._sanitize_candidate_boxes(
+        [[-2, 2, 24, 32], [0, 2, 24, 32], [40, 10, 70, 40], [60, 10, 71, 40], [90, 1, 95, 20]],
+        (80, 250, 3),
+    )
+
+    assert boxes == [[0, 2, 24, 32], [40, 10, 70, 40], [60, 10, 71, 40]]
+
+
 def test_all_distinct_rejects_duplicate_points():
     assert logic._all_distinct([[1, 2], [3, 4], [5, 6], [7, 8]]) is True
     assert logic._all_distinct([[1, 2], [1, 2], [5, 6], [7, 8]]) is False
@@ -114,8 +123,14 @@ def test_recognize_returns_empty_when_targets_not_covered(monkeypatch, tmp_path)
         return "吧"
 
     def fake_candidate_boxes(image):
-        return [[5, 36, 30, 62], [42, 36, 65, 62], [80, 36, 110, 62],
-                [125, 36, 150, 62], [160, 36, 190, 62], [200, 36, 225, 62]]
+        return [
+            [5, 36, 30, 62],
+            [42, 36, 65, 62],
+            [80, 36, 110, 62],
+            [125, 36, 150, 62],
+            [160, 36, 190, 62],
+            [200, 36, 225, 62],
+        ]
 
     def fake_recognize_candidates(ocr, image, boxes):
         return ["宙", "莲", "蓄", "史", "蓝", "蓬"]
@@ -138,8 +153,14 @@ def test_recognize_returns_four_points_when_all_targets_match(monkeypatch, tmp_p
 
     cv2.imwrite(str(tmp_path / "image.jpg"), _make_captcha_like())
 
-    boxes = [[5, 36, 30, 62], [42, 36, 65, 62], [80, 36, 110, 62],
-             [125, 36, 150, 62], [160, 36, 190, 62], [200, 36, 225, 62]]
+    boxes = [
+        [5, 36, 30, 62],
+        [42, 36, 65, 62],
+        [80, 36, 110, 62],
+        [125, 36, 150, 62],
+        [160, 36, 190, 62],
+        [200, 36, 225, 62],
+    ]
 
     target_order = ["甲", "乙", "丙", "丁"]
     target_counter = {"i": 0}
@@ -170,7 +191,5 @@ def test_recognize_returns_four_points_when_all_targets_match(monkeypatch, tmp_p
     assert len(points) == 4
     assert logic.serialize_captcha_coordinates(points)
     # each returned coordinate is the center of a distinct candidate box
-    centers = {
-        (x1 + x2) // 2 for x1, y1, x2, y2 in boxes
-    }
+    centers = {(x1 + x2) // 2 for x1, y1, x2, y2 in boxes}
     assert {point[0] for point in points} <= centers
