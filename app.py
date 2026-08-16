@@ -40,6 +40,7 @@ from services.auth_service import (
     get_session_snapshot,
     perform_school_login,
     refresh_elective_batch,
+    restore_login_state,
     save_login_state,
     validate_login_params,
 )
@@ -169,6 +170,32 @@ class EnrollmentStartRequest(BaseModel):
 
 
 static_dir = resource_path("static_dist")
+_runtime_start_lock = threading.Lock()
+_runtime_started = False
+
+
+def _start_runtime_services() -> None:
+    """Restore persisted state and start process-local background services once."""
+    global _runtime_started
+    with _runtime_start_lock:
+        if _runtime_started:
+            return
+        restored = restore_login_state()
+        if restored:
+            logger.info("Restored persisted school session for student ending in %s", restored[-4:])
+        keep_alive = threading.Thread(
+            target=_keep_alive_loop,
+            name="session-keep-alive",
+            daemon=True,
+        )
+        keep_alive.start()
+        logger.info("Session keep-alive started (every %ds)", KEEP_ALIVE_INTERVAL_SECONDS)
+        _runtime_started = True
+
+
+@app.on_event("startup")
+async def startup_runtime_services() -> None:
+    _start_runtime_services()
 
 
 def configure_runtime_prefill(student_id: str, card_key: str) -> None:
@@ -1018,10 +1045,16 @@ def start_server() -> None:
         timer = threading.Timer(1.2, open_browser)
         timer.daemon = True
         timer.start()
-    keep_alive = threading.Thread(target=_keep_alive_loop, name="session-keep-alive", daemon=True)
-    keep_alive.start()
-    logger.info("Session keep-alive started (every %ds)", KEEP_ALIVE_INTERVAL_SECONDS)
-    uvicorn.run(app, host=SERVER_HOST, port=SERVER_PORT)
+    reload_enabled = os.getenv("COURSE_SELECT_DEV", "").strip() == "1"
+    if reload_enabled:
+        logger.info("Backend development reload enabled")
+    uvicorn.run(
+        "app:app" if reload_enabled else app,
+        host=SERVER_HOST,
+        port=SERVER_PORT,
+        reload=reload_enabled,
+        reload_dirs=[str(Path(__file__).resolve().parent)] if reload_enabled else None,
+    )
 
 
 if __name__ == "__main__":

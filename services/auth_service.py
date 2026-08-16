@@ -10,6 +10,10 @@ from typing import Any
 import config
 import logic
 from school_password import encrypt_school_password
+from services.session_store import SessionStoreError
+from services.session_store import clear as clear_persisted_session
+from services.session_store import load as load_persisted_session
+from services.session_store import save as save_persisted_session
 
 logger = logging.getLogger(__name__)
 LOGIN_ERROR_MSG = "登录失败，请检查学号、密码、卡密或验证码是否正确"
@@ -76,6 +80,29 @@ def _advance_session_generation() -> None:
     _session_generation += 1
 
 
+def _persist_current_session() -> None:
+    """Best-effort persistence; session operation must not fail on disk errors."""
+    if not config.token or not config.combined_cookie or not config.student_id:
+        try:
+            clear_persisted_session()
+        except OSError as exc:
+            logger.warning("Unable to clear persisted school session: %s", exc)
+        return
+    try:
+        save_persisted_session(
+            {
+                "student_id": str(config.student_id or ""),
+                "password": str(config.password or ""),
+                "token": str(config.token or ""),
+                "combined_cookie": str(config.combined_cookie or ""),
+                "batch_code": str(config.elective_batch_code or ""),
+                "batch_name": str(config.elective_batch_name or ""),
+            }
+        )
+    except SessionStoreError as exc:
+        logger.warning("Unable to persist local school session: %s", exc)
+
+
 def save_login_state(
     login_cookie: str,
     captcha_cookie: str,
@@ -94,6 +121,7 @@ def save_login_state(
         config.elective_batch_code = ""
         config.elective_batch_name = ""
         _advance_session_generation()
+        _persist_current_session()
 
 
 def clear_login_state() -> None:
@@ -106,6 +134,10 @@ def clear_login_state() -> None:
         config.elective_batch_code = ""
         config.elective_batch_name = ""
         _advance_session_generation()
+        try:
+            clear_persisted_session()
+        except OSError as exc:
+            logger.warning("Unable to clear persisted school session: %s", exc)
 
 
 def invalidate_school_session() -> None:
@@ -116,6 +148,7 @@ def invalidate_school_session() -> None:
         config.elective_batch_code = ""
         config.elective_batch_name = ""
         _advance_session_generation()
+        _persist_current_session()
 
 
 def clear_elective_batch() -> None:
@@ -193,10 +226,13 @@ def merge_session_cookies(cookie_header: str) -> bool:
         if not config.combined_cookie:
             return False
         config.combined_cookie = _combine_cookie_header(config.combined_cookie, merged)
+        _persist_current_session()
     return True
 
 
-def _iter_set_cookie_pairs(cookie_header: str, names: tuple[str, ...] = ("route", "insert_cookie", "JSESSIONID", "_WEU")):
+def _iter_set_cookie_pairs(
+    cookie_header: str, names: tuple[str, ...] = ("route", "insert_cookie", "JSESSIONID", "_WEU")
+):
     """Yield ``(name, value)`` pairs from a raw ``Set-Cookie`` header string.
 
     The school returns cookies mixed with path/expires directives (and commas
@@ -258,7 +294,36 @@ def refresh_elective_batch(student_id: str, token: str) -> str:
             raise RuntimeError("登录状态已变化，已丢弃过期批次结果")
         config.elective_batch_code = batch_code
         config.elective_batch_name = batch_name
+        _persist_current_session()
     return batch_name
+
+
+def restore_login_state() -> str:
+    """Restore a persisted school session into the current process."""
+    with _state_lock:
+        if config.token and config.combined_cookie and config.student_id:
+            return str(config.student_id)
+    try:
+        payload = load_persisted_session()
+    except SessionStoreError as exc:
+        logger.warning("Unable to restore local school session: %s", exc)
+        clear_persisted_session()
+        return ""
+    if not isinstance(payload, dict):
+        return ""
+    required = ("student_id", "password", "token", "combined_cookie")
+    if any(not str(payload.get(key, "")).strip() for key in required):
+        clear_persisted_session()
+        return ""
+    with _state_lock:
+        config.student_id = str(payload["student_id"])
+        config.password = str(payload["password"])
+        config.token = str(payload["token"])
+        config.combined_cookie = str(payload["combined_cookie"])
+        config.elective_batch_code = str(payload.get("batch_code", ""))
+        config.elective_batch_name = str(payload.get("batch_name", ""))
+        _advance_session_generation()
+    return str(payload["student_id"])
 
 
 def attempt_ocr_relogin(
@@ -338,6 +403,7 @@ __all__ = [
     "merge_session_cookies",
     "perform_school_login",
     "refresh_elective_batch",
+    "restore_login_state",
     "save_login_state",
     "validate_login_params",
 ]

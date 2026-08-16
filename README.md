@@ -261,6 +261,7 @@ python main.py
 | `COURSE_SELECT_KEY_DIR` | 源码目录或可执行文件目录 | Card Key 密钥目录 |
 | `COURSE_SELECT_KEY_PASSPHRASE` | 空 | 加密 Ed25519 私钥 |
 | `COURSE_SELECT_PORT` | `8000` | 本地 WebUI 首选端口 |
+| `COURSE_SELECT_DEV` | `0` | 开发模式后端自动重载；修改 Python/API 后自动重启服务 |
 | `COURSE_SELECT_USE_PADDLE_OCR` | `0` | 启用 PaddleOCR 顶部文字回退 |
 | `COURSE_SELECT_NO_BROWSER` | `0` | 启动时不自动打开浏览器 |
 
@@ -308,6 +309,18 @@ node --check static_dist/course-app.js
 python tests/ui_preview_server.py
 # http://127.0.0.1:8001/
 ```
+
+### 后端开发自动重载
+
+开发 API 时设置 `COURSE_SELECT_DEV=1`：
+
+```powershell
+$env:COURSE_SELECT_DEV = "1"
+$env:COURSE_SELECT_DATA_DIR = "./runtime-data"
+python main.py
+```
+
+Uvicorn 会监视项目 Python 源码；修改后端代码后自动重启服务。登录成功后，程序会把当前学校会话写入 `COURSE_SELECT_DATA_DIR/session_state.bin`，内容使用本机随机密钥加密，重启或 reload 后会自动恢复 token、Cookie、学号、密码和批次，无需再次手动验证码登录。点击“退出登录”或会话恢复失败时会清除该文件。
 
 可以切换预览状态：
 

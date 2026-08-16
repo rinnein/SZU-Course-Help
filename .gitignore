@@ -32,6 +32,8 @@ CourseEnroll/
 *.db-wal
 *.sqlite
 *.sqlite3
+session_state.bin
+session_state.key
 
 *.log
 .server.pid
