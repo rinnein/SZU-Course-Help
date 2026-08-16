@@ -345,3 +345,43 @@ def test_batch_refresh_failure_keeps_restored_school_session(monkeypatch):
     assert snapshot["logged_in"] is True
     assert snapshot["relogin_status"] == "success"
     assert "批次暂未刷新" in snapshot["relogin_message"]
+
+
+def test_login_state_persists_and_restores_across_process_state(monkeypatch, tmp_path):
+    monkeypatch.setenv("COURSE_SELECT_DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(config, "student_id", "2024110122")
+    monkeypatch.setattr(config, "password", "secret")
+    monkeypatch.setattr(config, "token", "token")
+    monkeypatch.setattr(config, "combined_cookie", "cookie")
+    monkeypatch.setattr(config, "elective_batch_code", "batch")
+    monkeypatch.setattr(config, "elective_batch_name", "复选阶段")
+
+    auth_service._persist_current_session()
+    persisted = (tmp_path / "session_state.bin").read_bytes()
+    assert b"secret" not in persisted
+    assert b"token" not in persisted
+    config.student_id = ""
+    config.password = ""
+    config.token = ""
+    config.combined_cookie = ""
+    config.elective_batch_code = ""
+    config.elective_batch_name = ""
+
+    assert auth_service.restore_login_state() == "2024110122"
+    assert config.password == "secret"
+    assert config.token == "token"
+    assert config.combined_cookie == "cookie"
+    assert config.elective_batch_name == "复选阶段"
+
+
+def test_clear_login_state_removes_persisted_session(monkeypatch, tmp_path):
+    monkeypatch.setenv("COURSE_SELECT_DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(config, "student_id", "2024110122")
+    monkeypatch.setattr(config, "password", "secret")
+    monkeypatch.setattr(config, "token", "token")
+    monkeypatch.setattr(config, "combined_cookie", "cookie")
+    auth_service._persist_current_session()
+
+    auth_service.clear_login_state()
+
+    assert not (tmp_path / "session_state.bin").exists()
