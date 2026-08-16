@@ -42,11 +42,14 @@ from services.auth_service import (
     attempt_automatic_relogin,
     clear_elective_batch,
     clear_login_state,
+    consume_restored_session_validation,
     encrypt_password,
     get_session_snapshot,
+    invalidate_school_session,
     perform_school_login,
     refresh_elective_batch,
     restore_login_state,
+    restored_session_validation_pending,
     save_login_state,
     set_current_campus,
     update_backend_preference,
@@ -615,6 +618,27 @@ async def api_captcha_solve(payload: dict):
 @app.get("/api/session")
 async def api_session():
     payload = _session_payload()
+    if payload["logged_in"] and consume_restored_session_validation():
+        try:
+            await asyncio.to_thread(
+                refresh_elective_batch,
+                str(payload["student_id"]),
+                config.token,
+            )
+            payload = _session_payload()
+        except logic.SchoolBatchSessionExpiredError:
+            invalidate_school_session()
+            return _not_logged_in_response(
+                "保存的登录会话已失效，请重新登录",
+                "SESSION_RESTORE_EXPIRED",
+            )
+        except logic.ElectiveBatchUnavailableError as exc:
+            clear_elective_batch()
+            logger.info("Restored session is valid but no batch is available: %s", exc)
+        except (requests.Timeout, requests.RequestException) as exc:
+            logger.info("Restored session validation deferred after network issue: %s", exc)
+        except Exception as exc:
+            logger.warning("Restored session validation failed without expiring session: %s", exc)
     _record_frontend_session_success()
     return JSONResponse(
         content=payload,

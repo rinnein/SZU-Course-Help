@@ -32,6 +32,7 @@ _relogin_state: dict[str, str | int] = {
     "finished_at": "",
     "max_attempts": 0,
 }
+_restored_session_pending_validation = False
 
 
 def _now_iso() -> str:
@@ -185,10 +186,14 @@ def save_login_state(
         _advance_session_generation()
         if not preserve_relogin_state:
             _reset_relogin_state_locked()
+        global _restored_session_pending_validation
+        _restored_session_pending_validation = False
+        _persist_current_session()
 
 
 def clear_login_state() -> None:
     """Clear credentials and all school-session state."""
+    global _restored_session_pending_validation
     with _state_lock:
         config.combined_cookie = ""
         config.token = ""
@@ -200,16 +205,24 @@ def clear_login_state() -> None:
         config.campus_name = DEFAULT_CAMPUS_NAME
         _advance_session_generation()
         _reset_relogin_state_locked()
+        _restored_session_pending_validation = False
+        try:
+            clear_persisted_session()
+        except OSError as exc:
+            logger.warning("Unable to clear persisted school session: %s", exc)
 
 
 def invalidate_school_session() -> None:
     """Drop expired school tokens while retaining credentials for recovery."""
+    global _restored_session_pending_validation
     with _state_lock:
         config.combined_cookie = ""
         config.token = ""
         config.elective_batch_code = ""
         config.elective_batch_name = ""
         _advance_session_generation()
+        _restored_session_pending_validation = False
+        _persist_current_session()
 
 
 def clear_elective_batch() -> None:
@@ -393,6 +406,51 @@ def set_current_campus(campus_code: str) -> dict[str, str | bool | int]:
         return get_session_snapshot()
 
 
+def restore_login_state() -> str:
+    """Restore a persisted school session into the current process."""
+    global _restored_session_pending_validation
+    with _state_lock:
+        if config.token and config.combined_cookie and config.student_id:
+            return str(config.student_id)
+    try:
+        payload = load_persisted_session()
+    except SessionStoreError as exc:
+        logger.warning("Unable to restore local school session: %s", exc)
+        clear_persisted_session()
+        return ""
+    if not isinstance(payload, dict):
+        return ""
+    required = ("student_id", "password", "token", "combined_cookie")
+    if any(not str(payload.get(key, "")).strip() for key in required):
+        clear_persisted_session()
+        return ""
+    with _state_lock:
+        config.student_id = str(payload["student_id"])
+        config.password = str(payload["password"])
+        config.token = str(payload["token"])
+        config.combined_cookie = str(payload["combined_cookie"])
+        config.elective_batch_code = str(payload.get("batch_code", ""))
+        config.elective_batch_name = str(payload.get("batch_name", ""))
+        _advance_session_generation()
+        _restored_session_pending_validation = True
+    return str(payload["student_id"])
+
+
+def consume_restored_session_validation() -> bool:
+    """Claim the one-time validation required for a session restored from disk."""
+    global _restored_session_pending_validation
+    with _state_lock:
+        if not _restored_session_pending_validation:
+            return False
+        _restored_session_pending_validation = False
+        return True
+
+
+def restored_session_validation_pending() -> bool:
+    with _state_lock:
+        return _restored_session_pending_validation
+
+
 def attempt_ocr_relogin(
     max_attempts: int = config.ocr_relogin_max_attempts,
 ) -> tuple[str, str, str, str]:
@@ -498,6 +556,7 @@ __all__ = [
     "attempt_ocr_relogin",
     "clear_elective_batch",
     "clear_login_state",
+    "consume_restored_session_validation",
     "encrypt_password",
     "get_shared_session",
     "get_shared_browser_session",
@@ -507,6 +566,8 @@ __all__ = [
     "merge_backend_cookies",
     "perform_school_login",
     "refresh_elective_batch",
+    "restore_login_state",
+    "restored_session_validation_pending",
     "save_login_state",
     "set_current_campus",
     "validate_login_params",
