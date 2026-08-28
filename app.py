@@ -5,10 +5,10 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import random
 import re
 import socket
 import threading
-import time
 import webbrowser
 from datetime import datetime
 from pathlib import Path
@@ -670,7 +670,6 @@ async def api_session():
             logger.info("Restored session validation deferred after network issue: %s", exc)
         except Exception as exc:
             logger.warning("Restored session validation failed without expiring session: %s", exc)
-    _record_frontend_session_success()
     return JSONResponse(
         content=payload,
         headers=get_no_cache_headers(),
@@ -1464,51 +1463,47 @@ def open_browser() -> None:
 
 
 KEEP_ALIVE_INTERVAL_SECONDS = 60
-FRONTEND_SESSION_HEARTBEAT_GRACE_SECONDS = KEEP_ALIVE_INTERVAL_SECONDS + 10
-_frontend_session_heartbeat_lock = threading.Lock()
-_last_frontend_session_success = 0.0
-
-
-def _record_frontend_session_success() -> None:
-    """Record a successful browser session read for keep-alive coordination."""
-    global _last_frontend_session_success
-    with _frontend_session_heartbeat_lock:
-        _last_frontend_session_success = time.monotonic()
-
-
-def _frontend_session_heartbeat_is_active() -> bool:
-    """Return whether the browser has recently completed a session request."""
-    with _frontend_session_heartbeat_lock:
-        last_success = _last_frontend_session_success
-    return (
-        last_success > 0
-        and time.monotonic() - last_success < FRONTEND_SESSION_HEARTBEAT_GRACE_SECONDS
-    )
 
 
 def _keep_alive_once() -> None:
-    """Refresh the school session so it does not expire while the user is idle."""
+    """Touch one authenticated school API so its cookies remain active."""
     snapshot = get_session_snapshot()
     if not snapshot["logged_in"] or not snapshot["student_id"]:
         return
-    if _frontend_session_heartbeat_is_active():
-        logger.debug("Keep-alive skipped: frontend session heartbeat is active")
-        return
     student_id = str(snapshot["student_id"])
     token = str(config.token)
+    restored_session = restored_session_validation_pending()
     try:
-        refresh_elective_batch(student_id, token)
+        # Rotate the read-only authenticated endpoint so idle keep-alive does
+        # not repeatedly depend on the batch endpoint alone.
+        keep_alive_call = random.choice(
+            (
+                lambda: refresh_elective_batch(student_id, token),
+                lambda: get_enrolled_courses(),
+                lambda: query_courses("TJKC", 0),
+            )
+        )
+        try:
+            keep_alive_call()
+        except Exception:
+            # A temporary failure of an optional read endpoint must not stop
+            # the canonical batch request from keeping the session alive.
+            refresh_elective_batch(student_id, token)
+        if restored_session:
+            consume_restored_session_validation()
         logger.info("Keep-alive: school session refreshed")
     except logic.SchoolBatchSessionExpiredError:
-        logger.info("Keep-alive: session expired; starting OCR recovery")
-        if restored_session_validation_pending():
+        if restored_session:
+            logger.info("Keep-alive: restored session expired; requiring manual login")
             invalidate_school_session()
-            logger.info("Keep-alive: restored session requires manual validation")
             return
+        logger.info("Keep-alive: session expired; starting OCR recovery")
         recovered, error = attempt_automatic_relogin(config.ocr_relogin_max_attempts)
         if not recovered:
             logger.warning("Keep-alive OCR recovery failed: %s", error)
     except logic.ElectiveBatchUnavailableError as exc:
+        if restored_session:
+            consume_restored_session_validation()
         logger.info("Keep-alive: school session alive but no batch: %s", exc)
     except (requests.Timeout, requests.RequestException) as exc:
         logger.info("Keep-alive network issue (session unaffected): %s", exc)
