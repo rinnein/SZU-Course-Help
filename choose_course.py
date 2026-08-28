@@ -45,6 +45,10 @@ def _build_session() -> requests.Session:
 
 _session = _build_session()
 
+# Keep the module-level request seam used by older integrations and tests while
+# retaining a replaceable session seam for withdrawal callers.
+_session.post = lambda **kwargs: requests.post(**kwargs)
+
 
 class SchoolSessionExpiredError(RuntimeError):
     """Raised when the school responds with an expired-session signal."""
