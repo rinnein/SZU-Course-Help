@@ -375,9 +375,21 @@ def _ddddocr_engines():
         except (ImportError, AttributeError):
             from ddddocr import DdddOcr
 
-            detector = DdddOcr(det=True, ocr=False, show_ad=False)
-            recognizer = DdddOcr(ocr=True, det=False, beta=True, show_ad=False)
-            return detector, recognizer
+            class _DetectorAdapter:
+                def __init__(self):
+                    self._engine = DdddOcr(det=True, ocr=False, show_ad=False)
+
+                def predict(self, image):
+                    return self._engine.detection(image)
+
+            class _RecognizerAdapter:
+                def __init__(self):
+                    self._engine = DdddOcr(ocr=True, det=False, beta=True, show_ad=False)
+
+                def predict(self, image):
+                    return self._engine.classification(image)
+
+            return _DetectorAdapter(), _RecognizerAdapter()
 
     return DetectionEngine(), OCREngine(beta=True)
 

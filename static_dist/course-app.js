@@ -2026,7 +2026,7 @@ appElements.phaseConfirmation.addEventListener("change", () => {
 });
 appElements.startEnroll.addEventListener("click", startEnrollment);
 appElements.taskControlButton.addEventListener("click", toggleEnrollmentPause);
-appElements.openSchoolRaw.addEventListener("click", () => {
+appElements.openSchoolRaw?.addEventListener("click", () => {
   openSchoolRawPage();
 });
 appElements.logout.addEventListener("click", async () => {

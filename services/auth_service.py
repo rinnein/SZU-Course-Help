@@ -17,6 +17,7 @@ from campus import (
     get_campus,
 )
 from school_password import encrypt_school_password
+from services import backend_service
 
 logger = logging.getLogger(__name__)
 LOGIN_ERROR_MSG = "登录失败，请检查学号、密码、卡密或验证码是否正确"
@@ -151,6 +152,12 @@ def perform_school_login(
 def _advance_session_generation() -> None:
     global _session_generation
     _session_generation += 1
+
+
+def update_backend_preference(preference: str) -> str:
+    """Set the preferred school backend without changing login state."""
+    with _state_lock:
+        return backend_service.set_preference(preference)
 
 
 def save_login_state(
@@ -289,6 +296,14 @@ def merge_session_cookies(cookie_header: str) -> bool:
             return False
         config.combined_cookie = _combine_cookie_header(config.combined_cookie, merged)
     return True
+
+
+def merge_backend_cookies(header_values: list[str], host: str) -> bool:
+    """Merge cookies issued by WebVPN/CAS into the matching backend jar."""
+    if not header_values:
+        return False
+    with _state_lock:
+        return backend_service.merge_set_cookie(header_values, host)
 
 
 def _iter_set_cookie_pairs(cookie_header: str, names: tuple[str, ...] = ("route", "insert_cookie", "JSESSIONID", "_WEU")):
@@ -489,6 +504,7 @@ __all__ = [
     "get_session_snapshot",
     "invalidate_school_session",
     "merge_session_cookies",
+    "merge_backend_cookies",
     "perform_school_login",
     "refresh_elective_batch",
     "save_login_state",
