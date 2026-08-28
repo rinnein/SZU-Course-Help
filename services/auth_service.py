@@ -18,6 +18,10 @@ from campus import (
 )
 from school_password import encrypt_school_password
 from services import backend_service
+from services.session_store import SessionStoreError
+from services.session_store import clear as clear_persisted_session
+from services.session_store import load as load_persisted_session
+from services.session_store import save as save_persisted_session
 
 logger = logging.getLogger(__name__)
 LOGIN_ERROR_MSG = "登录失败，请检查学号、密码、卡密或验证码是否正确"
@@ -33,6 +37,33 @@ _relogin_state: dict[str, str | int] = {
     "max_attempts": 0,
 }
 _restored_session_pending_validation = False
+
+
+def _persist_current_session() -> None:
+    """Persist recoverable session state without breaking active requests."""
+    if not config.token or not config.combined_cookie or not config.student_id:
+        try:
+            clear_persisted_session()
+        except OSError as exc:
+            logger.warning("Unable to clear persisted school session: %s", exc)
+        return
+    try:
+        save_persisted_session(
+            {
+                "student_id": str(config.student_id or ""),
+                "password": str(config.password or ""),
+                "token": str(config.token or ""),
+                "combined_cookie": str(config.combined_cookie or ""),
+                "webvpn_cookie": str(config.webvpn_cookie or ""),
+                "authserver_cookie": str(config.authserver_cookie or ""),
+                "backend_preference": backend_service.get_preference(),
+                "active_backend": str(config.active_backend or config.BACKEND_PRIMARY),
+                "batch_code": str(config.elective_batch_code or ""),
+                "batch_name": str(config.elective_batch_name or ""),
+            }
+        )
+    except SessionStoreError as exc:
+        logger.warning("Unable to persist local school session: %s", exc)
 
 
 def _now_iso() -> str:
@@ -155,12 +186,6 @@ def _advance_session_generation() -> None:
     _session_generation += 1
 
 
-def update_backend_preference(preference: str) -> str:
-    """Set the preferred school backend without changing login state."""
-    with _state_lock:
-        return backend_service.set_preference(preference)
-
-
 def save_login_state(
     login_cookie: str,
     captcha_cookie: str,
@@ -196,6 +221,10 @@ def clear_login_state() -> None:
     global _restored_session_pending_validation
     with _state_lock:
         config.combined_cookie = ""
+        config.webvpn_cookie = ""
+        config.authserver_cookie = ""
+        config.backend_preference = config.BACKEND_AUTO
+        config.active_backend = config.BACKEND_PRIMARY
         config.token = ""
         config.student_id = ""
         config.password = ""
@@ -230,6 +259,14 @@ def clear_elective_batch() -> None:
     with _state_lock:
         config.elective_batch_code = ""
         config.elective_batch_name = ""
+
+
+def update_backend_preference(preference: str) -> str:
+    """Set and persist the user's preferred school backend."""
+    with _state_lock:
+        selected = backend_service.set_preference(preference)
+        _persist_current_session()
+        return selected
 
 
 def get_session_snapshot() -> dict[str, str | bool | int]:
@@ -308,6 +345,7 @@ def merge_session_cookies(cookie_header: str) -> bool:
         if not config.combined_cookie:
             return False
         config.combined_cookie = _combine_cookie_header(config.combined_cookie, merged)
+        _persist_current_session()
     return True
 
 
@@ -316,7 +354,10 @@ def merge_backend_cookies(header_values: list[str], host: str) -> bool:
     if not header_values:
         return False
     with _state_lock:
-        return backend_service.merge_set_cookie(header_values, host)
+        changed = backend_service.merge_set_cookie(header_values, host)
+        if changed:
+            _persist_current_session()
+        return changed
 
 
 def _iter_set_cookie_pairs(cookie_header: str, names: tuple[str, ...] = ("route", "insert_cookie", "JSESSIONID", "_WEU")):
@@ -429,6 +470,12 @@ def restore_login_state() -> str:
         config.password = str(payload["password"])
         config.token = str(payload["token"])
         config.combined_cookie = str(payload["combined_cookie"])
+        config.webvpn_cookie = str(payload.get("webvpn_cookie", ""))
+        config.authserver_cookie = str(payload.get("authserver_cookie", ""))
+        config.backend_preference = backend_service.normalize_preference(
+            payload.get("backend_preference", config.BACKEND_AUTO)
+        )
+        config.active_backend = str(payload.get("active_backend", config.BACKEND_PRIMARY))
         config.elective_batch_code = str(payload.get("batch_code", ""))
         config.elective_batch_name = str(payload.get("batch_name", ""))
         _advance_session_generation()

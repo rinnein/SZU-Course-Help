@@ -302,7 +302,7 @@ def _api_error(
     )
 
 
-def _not_logged_in_response():
+def _not_logged_in_response(message: str | None = None, error_code: str | None = None):
     snapshot = get_session_snapshot()
     task_state = get_enroll_task_state()
     if snapshot["relogin_in_progress"] or (
@@ -318,8 +318,8 @@ def _not_logged_in_response():
         )
     return _api_error(
         401,
-        "登录状态无效，请重新登录",
-        "NOT_LOGGED_IN",
+        message or "登录状态无效，请重新登录",
+        error_code or "NOT_LOGGED_IN",
         retryable=False,
         requires_manual_login=True,
     )
@@ -1340,6 +1340,10 @@ def _keep_alive_once() -> None:
         logger.info("Keep-alive: school session refreshed")
     except logic.SchoolBatchSessionExpiredError:
         logger.info("Keep-alive: session expired; starting OCR recovery")
+        if restored_session_validation_pending():
+            invalidate_school_session()
+            logger.info("Keep-alive: restored session requires manual validation")
+            return
         recovered, error = attempt_automatic_relogin(config.ocr_relogin_max_attempts)
         if not recovered:
             logger.warning("Keep-alive OCR recovery failed: %s", error)
