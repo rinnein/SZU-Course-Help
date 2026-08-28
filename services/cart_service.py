@@ -93,6 +93,11 @@ def get_all_sorted() -> list[dict]:
     return db.get_all_courses_sorted_by_time()
 
 
+def get_active_courses() -> list[dict]:
+    """获取仍需抢课（PENDING/ENROLLING）的课程，供抢课循环使用。"""
+    return db.get_active_courses()
+
+
 def update_status(course_id: str, status: str) -> bool:
     """更新课程状态"""
     return db.update_course_status(course_id, status)

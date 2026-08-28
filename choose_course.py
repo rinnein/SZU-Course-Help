@@ -2,18 +2,52 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import time
 from typing import Any
 
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 import config
 from campus import DEFAULT_CAMPUS_CODE, normalize_campus_code
 from school_session import is_session_expired_response
+from services import backend_service
 
 REQUEST_TIMEOUT = (5, 20)
 logger = logging.getLogger(__name__)
+
+
+def _build_session() -> requests.Session:
+    """Create a session with connection pooling and transport-layer retries.
+
+    Only connection-level and transient HTTP failures are retried here; the
+    school's business payload (success / capacity full / terminal) is still
+    classified by the caller in ``services.enroll_service``.
+    """
+    session = requests.Session()
+    retry = Retry(
+        total=2,
+        connect=2,
+        read=2,
+        backoff_factor=0.3,
+        status_forcelist=(502, 503, 504),
+        allowed_methods=frozenset(("GET", "POST")),
+        raise_on_status=False,
+    )
+    adapter = HTTPAdapter(pool_connections=4, pool_maxsize=8, max_retries=retry)
+    session.mount("http://", adapter)
+    session.mount("https://", adapter)
+    return session
+
+
+_session = _build_session()
+
+# Keep the module-level request seam used by older integrations and tests while
+# retaining a replaceable session seam for withdrawal callers.
+_session.post = lambda **kwargs: requests.post(**kwargs)
 
 
 class SchoolSessionExpiredError(RuntimeError):
@@ -21,22 +55,21 @@ class SchoolSessionExpiredError(RuntimeError):
 
 
 def _request_headers(combined_cookie: str, token: str) -> dict[str, str]:
-    return {
-        "Accept": "*/*",
-        "Accept-Encoding": "gzip, deflate",
-        "Accept-Language": ("zh-CN,zh;q=0.9,en;q=0.8,en-GB;q=0.7,en-US;q=0.6,zh-TW;q=0.5"),
-        "Cookie": combined_cookie,
-        "Host": "bkxk.szu.edu.cn",
-        "Origin": "http://bkxk.szu.edu.cn",
-        "Referer": ("http://bkxk.szu.edu.cn/xsxkapp/sys/xsxkapp/*default/index.do"),
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 "
-            "Safari/537.36 Edg/139.0.0.0"
-        ),
-        "token": token,
-        "X-Requested-With": "XMLHttpRequest",
-    }
+    return backend_service.build_headers(
+        backend_service.active_profile(), token=token, cookie=combined_cookie
+    )
+
+
+def _school_request(path: str, *, data=None, params=None, token: str = "", cookie: str | None = None, request_sender=None):
+    def sender(**kwargs):
+        kwargs.pop("method", None)
+        kwargs.pop("json", None)
+        return (request_sender or _session.post)(**kwargs)
+
+    return backend_service.request_with_failover(
+        "POST", path, sender=sender, data=data, params=params,
+        token=token, cookie=cookie, timeout=REQUEST_TIMEOUT,
+    )
 
 
 def query_enrolled_courses(
@@ -45,13 +78,9 @@ def query_enrolled_courses(
 ) -> list[dict[str, Any]]:
     """Return the current student's selected courses from the school system."""
     timestamp = int(time.time() * 1000)
-    response = requests.post(
-        url=(
-            f"{config.SCHOOL_BASE_URL}elective/courseResult.do"
-            f"?timestamp={timestamp}&studentCode={config.student_id}"
-        ),
-        headers=_request_headers(combined_cookie, token),
-        timeout=REQUEST_TIMEOUT,
+    response = _school_request(
+        f"elective/courseResult.do?timestamp={timestamp}&studentCode={config.student_id}",
+        token=token, cookie=combined_cookie,
     )
 
     if is_session_expired_response(
@@ -91,7 +120,6 @@ def submit_course_selection(
 ):
     """Submit one course-selection request using the school's legacy payload."""
     normalized_campus = normalize_campus_code(campus_code)
-    headers = _request_headers(config.combined_cookie, config.token)
     form_data = {
         "addParam": (
             r"""{"data":{"operationType":"1","studentCode":%s,"electiveBatchCode":%s,"teachingClassId":%s,"isMajor":"1","campus":"%s","teachingClassType":%s,"chooseVolunteer":"1"}}"""  # noqa: UP031 - exact legacy wire template
@@ -110,11 +138,37 @@ def submit_course_selection(
         teaching_class_type,
         normalized_campus,
     )
-    return requests.post(
-        url=config.SCHOOL_BASE_URL + "elective/volunteer.do",
+    return _school_request(
+        "elective/volunteer.do",
         data=form_data,
-        headers=headers,
-        timeout=REQUEST_TIMEOUT,
+        token=config.token,
+        cookie=backend_service.cookie_header(backend_service.active_profile()),
+    )
+
+
+def delete_course_selection(class_id: str):
+    """Withdraw one selected volunteer using the confirmed school contract."""
+    form_data = {
+        "deleteParam": json.dumps(
+            {
+                "data": {
+                    "operationType": "2",
+                    "studentCode": str(config.student_id),
+                    "electiveBatchCode": str(config.elective_batch_code),
+                    "teachingClassId": str(class_id),
+                    "isMajor": "1",
+                }
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+    }
+    return _school_request(
+        "elective/deleteVolunteer.do",
+        data=form_data,
+        token=config.token,
+        cookie=backend_service.cookie_header(backend_service.active_profile()),
+        request_sender=_session.post,
     )
 
 
@@ -123,4 +177,5 @@ __all__ = [
     "SchoolSessionExpiredError",
     "query_enrolled_courses",
     "submit_course_selection",
+    "delete_course_selection",
 ]

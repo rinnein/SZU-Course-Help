@@ -4,7 +4,7 @@ import threading
 import time
 
 import requests
-from fastapi.testclient import TestClient
+from starlette.testclient import TestClient
 
 import app
 import config
@@ -15,6 +15,11 @@ from security import key_manager
 from services import cart_service, enroll_service
 
 client = TestClient(app.app)
+
+
+def test_runtime_uses_lifespan_context():
+    assert app.app.router.lifespan_context is app.app_lifespan
+    assert app.app.router.on_startup == []
 
 
 def set_logged_session(monkeypatch, *, batch_code="batch", batch_name="预选阶段"):
@@ -30,11 +35,44 @@ def test_health_and_static_login_page():
     assert app.get_login_url().endswith(f"/login?ui={app.UI_CACHE_TOKEN}")
     response = client.get(f"/login?ui={app.UI_CACHE_TOKEN}")
     assert response.status_code == 200
-    assert "Card Key V3" in response.text
+    assert "进入抢课工作台" in response.text
 
     bootstrap = client.get("/api/bootstrap").json()
     assert bootstrap["ui_cache_token"] == app.UI_CACHE_TOKEN
     assert bootstrap["ui_asset_build"] == app.UI_ASSET_BUILD
+
+
+def test_school_proxy_route_separates_host_from_school_path(monkeypatch):
+    async def fake_proxy(request, school_path):
+        return {"school_path": school_path}
+
+    monkeypatch.setattr(app, "proxy_request", fake_proxy)
+
+    response = client.get("/proxy/bkxk.szu.edu.cn/xsxkapp/sys/xsxkapp/%2Adefault/index.do")
+    assert response.status_code == 200
+    assert response.json()["school_path"] == "xsxkapp/sys/xsxkapp/*default/index.do"
+
+    unsupported = client.get("/proxy/evil.example/x")
+    assert unsupported.status_code == 404
+
+
+def test_card_key_endpoint_issues_verifiable_key(tmp_path, monkeypatch):
+    monkeypatch.setenv("COURSE_SELECT_KEY_DIR", str(tmp_path / "keys"))
+
+    response = client.post("/api/card_key", json={"student_id": "2024110122"})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["student_id"] == "2024110122"
+    assert body["card_key"].startswith("SZU3.")
+    assert key_manager.verify_card_key("2024110122", body["card_key"]) is True
+
+
+def test_card_key_endpoint_rejects_invalid_student_id(tmp_path, monkeypatch):
+    monkeypatch.setenv("COURSE_SELECT_KEY_DIR", str(tmp_path / "keys"))
+
+    response = client.post("/api/card_key", json={"student_id": "abc"})
+    assert response.status_code == 422
 
 
 def test_captcha_api_reports_closed_window_without_generic_502(monkeypatch):
@@ -145,6 +183,25 @@ def test_session_uses_backend_phase_classification(monkeypatch):
     body = client.get("/api/session").json()
     assert body["phase"] == config.PHASE_CLOSED
     assert body["automatic_enroll_allowed"] is False
+
+
+def test_expired_restored_session_requires_manual_login(monkeypatch):
+    set_logged_session(monkeypatch)
+    monkeypatch.setattr(app, "consume_restored_session_validation", lambda: True)
+    monkeypatch.setattr(
+        app,
+        "refresh_elective_batch",
+        lambda *_args: (_ for _ in ()).throw(logic.SchoolBatchSessionExpiredError("expired")),
+    )
+
+    response = client.get("/api/session")
+
+    assert response.status_code == 401
+    assert response.json()["error_code"] == "SESSION_RESTORE_EXPIRED"
+    assert response.json()["requires_manual_login"] is True
+    assert "保存的登录会话已失效" in response.json()["message"]
+    assert config.token == ""
+    assert config.combined_cookie == ""
 
 
 def test_course_api_converts_ui_pages_to_school_zero_based_pages(monkeypatch):
@@ -598,3 +655,130 @@ def test_delete_api_waits_for_safe_pause_boundary(tmp_path, monkeypatch):
         enroll_service._set_progress_finished()
         if waiter is not None:
             waiter.join(timeout=2)
+
+
+def test_keep_alive_skips_when_not_logged_in(monkeypatch):
+    monkeypatch.setattr(config, "token", "")
+    monkeypatch.setattr(config, "combined_cookie", "")
+    called = []
+    monkeypatch.setattr(app, "refresh_elective_batch", lambda *args: called.append(args))
+
+    app._keep_alive_once()
+
+    assert called == []
+
+
+def test_keep_alive_refreshes_session_when_logged_in(monkeypatch):
+    monkeypatch.setattr(app, "_last_frontend_session_success", 0.0)
+    monkeypatch.setattr(config, "token", "active-token")
+    monkeypatch.setattr(config, "combined_cookie", "cookie")
+    monkeypatch.setattr(config, "student_id", "2024110122")
+    called = []
+    monkeypatch.setattr(app, "refresh_elective_batch", lambda *args: called.append(args))
+
+    app._keep_alive_once()
+
+    assert len(called) == 1
+    assert called[0][0] == "2024110122"
+
+
+def test_keep_alive_triggers_ocr_recovery_on_expiry(monkeypatch):
+    monkeypatch.setattr(app, "_last_frontend_session_success", 0.0)
+    monkeypatch.setattr(config, "token", "expired-token")
+    monkeypatch.setattr(config, "combined_cookie", "cookie")
+    monkeypatch.setattr(config, "student_id", "2024110122")
+    monkeypatch.setattr(
+        app,
+        "refresh_elective_batch",
+        lambda *args: (_ for _ in ()).throw(logic.SchoolBatchSessionExpiredError("expired")),
+    )
+    relogin_called = []
+    monkeypatch.setattr(
+        app,
+        "attempt_automatic_relogin",
+        lambda *args, **kwargs: relogin_called.append(args) or (True, ""),
+    )
+
+    app._keep_alive_once()
+
+    assert len(relogin_called) == 1
+
+
+def test_keep_alive_requires_manual_login_for_unvalidated_restored_session(monkeypatch):
+    monkeypatch.setattr(app, "_last_frontend_session_success", 0.0)
+    monkeypatch.setattr(config, "token", "expired-token")
+    monkeypatch.setattr(config, "combined_cookie", "cookie")
+    monkeypatch.setattr(config, "student_id", "2024110122")
+    monkeypatch.setattr(app, "restored_session_validation_pending", lambda: True)
+    monkeypatch.setattr(
+        app,
+        "refresh_elective_batch",
+        lambda *args: (_ for _ in ()).throw(logic.SchoolBatchSessionExpiredError("expired")),
+    )
+    monkeypatch.setattr(
+        app,
+        "attempt_automatic_relogin",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("must require manual login")),
+    )
+
+    app._keep_alive_once()
+
+    assert config.token == ""
+    assert config.combined_cookie == ""
+
+
+def test_keep_alive_skips_when_frontend_session_heartbeat_is_active(monkeypatch):
+    monkeypatch.setattr(config, "token", "active-token")
+    monkeypatch.setattr(config, "combined_cookie", "cookie")
+    monkeypatch.setattr(config, "student_id", "2024110122")
+    called = []
+    monkeypatch.setattr(app, "refresh_elective_batch", lambda *args: called.append(args))
+
+    assert client.get("/api/session").status_code == 200
+    app._keep_alive_once()
+
+    assert called == []
+
+
+def test_captcha_solve_rejects_missing_image():
+    response = client.post("/api/captcha/solve", json={})
+    assert response.status_code == 400
+    assert response.json()["is_error"] is True
+
+
+def test_captcha_solve_returns_points_when_ocr_succeeds(monkeypatch, tmp_path):
+    import base64
+
+    monkeypatch.setattr(logic, "_captcha_image_path", lambda: tmp_path / "image.jpg")
+    monkeypatch.setattr(
+        logic,
+        "recognize_captcha_centers",
+        lambda: [[10, 30], [40, 40], [80, 50], [120, 60]],
+    )
+
+    tiny_jpeg = b"\xff\xd8\xff\xe0" + b"\x00" * 20
+    image_url = f"data:image/jpeg;base64,{base64.b64encode(tiny_jpeg).decode()}"
+
+    response = client.post("/api/captcha/solve", json={"imageUrl": image_url})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert len(body["points"]) == 4
+    assert body["points"][0] == [10, 30]
+
+
+def test_captcha_solve_returns_empty_when_ocr_fails(monkeypatch, tmp_path):
+    import base64
+
+    monkeypatch.setattr(logic, "_captcha_image_path", lambda: tmp_path / "image.jpg")
+    monkeypatch.setattr(logic, "recognize_captcha_centers", lambda: [])
+
+    tiny_jpeg = b"\xff\xd8\xff\xe0" + b"\x00" * 20
+    image_url = f"data:image/jpeg;base64,{base64.b64encode(tiny_jpeg).decode()}"
+
+    response = client.post("/api/captcha/solve", json={"imageUrl": image_url})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["points"] == []
+    assert "OCR" in body["message"]

@@ -7,6 +7,7 @@ const MAX_CATALOG_PAGES = 1000;
 const CATALOG_PAGE_DELAY_MS = 150;
 const SEARCH_DEBOUNCE_MS = 250;
 const TIMETABLE_MIN_ROW_HEIGHT = 64;
+const SESSION_POLL_INTERVAL_MS = 5000;
 
 const categoryNames = {
   TJKC: "本班推荐",
@@ -46,6 +47,7 @@ const appState = {
   courseDataKey: "",
   catalogBlockedCode: "",
   loadingSession: false,
+  sessionTimer: null,
   refreshingPhase: false,
   preselection: false,
   closedPhase: false,
@@ -106,6 +108,7 @@ const appElements = {
   sessionLoginLink: document.querySelector("#sessionDialog a[href^='/login']"),
   brandLink: document.querySelector(".topbar .brand-lockup"),
   logout: document.querySelector("#logoutButton"),
+  openSchoolRaw: document.querySelector("#openSchoolRaw"),
   toastRegion: document.querySelector("#toastRegion"),
   openMyCourses: document.querySelector("#openMyCourses"),
   myCoursesDialog: document.querySelector("#myCoursesDialog"),
@@ -1887,6 +1890,20 @@ function stopProgressPolling() {
   }
 }
 
+function startSessionPolling() {
+  if (appState.sessionTimer) return;
+  appState.sessionTimer = window.setInterval(() => {
+    if (!appState.refreshingPhase) loadSession(false);
+  }, SESSION_POLL_INTERVAL_MS);
+}
+
+function stopSessionPolling() {
+  if (appState.sessionTimer) {
+    window.clearInterval(appState.sessionTimer);
+    appState.sessionTimer = null;
+  }
+}
+
 async function startEnrollment() {
   if (!appElements.phaseConfirmation.checked || !appState.grabPhase) return;
   appElements.startEnroll.disabled = true;
@@ -2009,16 +2026,31 @@ appElements.phaseConfirmation.addEventListener("change", () => {
 });
 appElements.startEnroll.addEventListener("click", startEnrollment);
 appElements.taskControlButton.addEventListener("click", toggleEnrollmentPause);
+appElements.openSchoolRaw?.addEventListener("click", () => {
+  openSchoolRawPage();
+});
 appElements.logout.addEventListener("click", async () => {
   try {
     const result = await api("/api/logout", { method: "POST" });
     if (result.is_error) throw new Error(result.message);
     stopProgressPolling();
+    stopSessionPolling();
     window.location.assign(versionedPage("/login"));
   } catch (error) {
     if (!(error instanceof SessionExpiredError)) showToast(error.message, true);
   }
 });
+
+function openSchoolRawPage() {
+  if (!appState.session?.logged_in) {
+    showToast("请先登录，再打开学校原始页面", true);
+    return;
+  }
+  // Same-origin path via the local reverse proxy; reuses the shared school
+  // session, so no second login (which would kick the API session out).
+  const target = `${window.location.origin}/proxy/bkxk.szu.edu.cn/xsxkapp/sys/xsxkapp/*default/index.do`;
+  window.open(target, "_blank", "noopener,noreferrer");
+}
 
 for (const closeButton of document.querySelectorAll("[data-close-dialog]")) {
   closeButton.addEventListener("click", () => {
@@ -2028,14 +2060,12 @@ for (const closeButton of document.querySelectorAll("[data-close-dialog]")) {
 
 async function initializeApp() {
   await loadSession(true);
+  startSessionPolling();
   appElements.brandLink.href = versionedPage("/");
   appElements.sessionLoginLink.href = versionedPage("/login");
   await loadCart();
   if (appState.session?.logged_in) await loadCourses();
   else renderState("尚未登录", "返回登录页完成学号、密码、卡密和验证码校验。");
-  window.setInterval(() => {
-    if (!appState.refreshingPhase && !appState.switchingCampus) loadSession(false);
-  }, 5000);
 }
 
 initializeApp();

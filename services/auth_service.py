@@ -17,6 +17,11 @@ from campus import (
     get_campus,
 )
 from school_password import encrypt_school_password
+from services import backend_service
+from services.session_store import SessionStoreError
+from services.session_store import clear as clear_persisted_session
+from services.session_store import load as load_persisted_session
+from services.session_store import save as save_persisted_session
 
 logger = logging.getLogger(__name__)
 LOGIN_ERROR_MSG = "登录失败，请检查学号、密码、卡密或验证码是否正确"
@@ -31,6 +36,34 @@ _relogin_state: dict[str, str | int] = {
     "finished_at": "",
     "max_attempts": 0,
 }
+_restored_session_pending_validation = False
+
+
+def _persist_current_session() -> None:
+    """Persist recoverable session state without breaking active requests."""
+    if not config.token or not config.combined_cookie or not config.student_id:
+        try:
+            clear_persisted_session()
+        except OSError as exc:
+            logger.warning("Unable to clear persisted school session: %s", exc)
+        return
+    try:
+        save_persisted_session(
+            {
+                "student_id": str(config.student_id or ""),
+                "password": str(config.password or ""),
+                "token": str(config.token or ""),
+                "combined_cookie": str(config.combined_cookie or ""),
+                "webvpn_cookie": str(config.webvpn_cookie or ""),
+                "authserver_cookie": str(config.authserver_cookie or ""),
+                "backend_preference": backend_service.get_preference(),
+                "active_backend": str(config.active_backend or config.BACKEND_PRIMARY),
+                "batch_code": str(config.elective_batch_code or ""),
+                "batch_name": str(config.elective_batch_name or ""),
+            }
+        )
+    except SessionStoreError as exc:
+        logger.warning("Unable to persist local school session: %s", exc)
 
 
 def _now_iso() -> str:
@@ -178,12 +211,20 @@ def save_login_state(
         _advance_session_generation()
         if not preserve_relogin_state:
             _reset_relogin_state_locked()
+        global _restored_session_pending_validation
+        _restored_session_pending_validation = False
+        _persist_current_session()
 
 
 def clear_login_state() -> None:
     """Clear credentials and all school-session state."""
+    global _restored_session_pending_validation
     with _state_lock:
         config.combined_cookie = ""
+        config.webvpn_cookie = ""
+        config.authserver_cookie = ""
+        config.backend_preference = config.BACKEND_AUTO
+        config.active_backend = config.BACKEND_PRIMARY
         config.token = ""
         config.student_id = ""
         config.password = ""
@@ -193,16 +234,24 @@ def clear_login_state() -> None:
         config.campus_name = DEFAULT_CAMPUS_NAME
         _advance_session_generation()
         _reset_relogin_state_locked()
+        _restored_session_pending_validation = False
+        try:
+            clear_persisted_session()
+        except OSError as exc:
+            logger.warning("Unable to clear persisted school session: %s", exc)
 
 
 def invalidate_school_session() -> None:
     """Drop expired school tokens while retaining credentials for recovery."""
+    global _restored_session_pending_validation
     with _state_lock:
         config.combined_cookie = ""
         config.token = ""
         config.elective_batch_code = ""
         config.elective_batch_name = ""
         _advance_session_generation()
+        _restored_session_pending_validation = False
+        _persist_current_session()
 
 
 def clear_elective_batch() -> None:
@@ -210,6 +259,14 @@ def clear_elective_batch() -> None:
     with _state_lock:
         config.elective_batch_code = ""
         config.elective_batch_name = ""
+
+
+def update_backend_preference(preference: str) -> str:
+    """Set and persist the user's preferred school backend."""
+    with _state_lock:
+        selected = backend_service.set_preference(preference)
+        _persist_current_session()
+        return selected
 
 
 def get_session_snapshot() -> dict[str, str | bool | int]:
@@ -229,6 +286,115 @@ def get_session_snapshot() -> dict[str, str | bool | int]:
             "relogin_finished_at": str(_relogin_state["finished_at"]),
             "relogin_max_attempts": int(_relogin_state["max_attempts"]),
         }
+
+
+def get_shared_session() -> tuple[bool, str, str]:
+    """Return one immutable copy of the shared school session for the proxy.
+
+    Reads ``config.combined_cookie`` and ``config.token`` atomically so the
+    reverse proxy always injects the *current* server-side session on every
+    request.  After an OCR automatic re-login the returned values change on
+    the next call; the caller never holds a cached copy across requests.
+
+    Returns ``(logged_in, combined_cookie, token)``.
+    """
+    with _state_lock:
+        combined_cookie = str(config.combined_cookie or "")
+        token = str(config.token or "")
+    logged_in = bool(combined_cookie and token)
+    return logged_in, combined_cookie, token
+
+
+def get_shared_browser_session() -> tuple[bool, str, str, str]:
+    """Return the shared session plus student id for the proxied school UI.
+
+    The original school page checks ``sessionStorage`` before it makes its
+    first API request.  The proxy uses this atomic snapshot to bootstrap that
+    browser-side check from the same server-side session used by API mode.
+    """
+    with _state_lock:
+        combined_cookie = str(config.combined_cookie or "")
+        token = str(config.token or "")
+        student_id = str(config.student_id or "")
+    logged_in = bool(combined_cookie and token and student_id)
+    return logged_in, combined_cookie, token, student_id
+
+
+def merge_session_cookies(cookie_header: str) -> bool:
+    """Fold school ``Set-Cookie`` values back into the shared session cookie.
+
+    The reverse proxy must not leak ``Set-Cookie`` to the browser (the browser
+    holds no meaningful school cookie and preserving a mismatched jar would
+    promote session drift).  Instead the proxy hands every school ``Set-Cookie``
+    here so cookies the school rotates in-flight (e.g. a fresh ``JSESSIONID``
+    or ``_WEU``) stay merged into ``config.combined_cookie`` and the API mode
+    keeps using the very same session.
+
+    ``token``/``student_id``/batch state are intentionally left untouched, and
+    when no valid in-memory session exists the merge is a safe no-op.
+    """
+    if not cookie_header or not str(cookie_header).strip():
+        return False
+    updates = []
+    for name, value in _iter_set_cookie_pairs(str(cookie_header)):
+        updates.append(f"{name}={value}")
+    if not updates:
+        return False
+    merged = "; ".join(updates)
+    with _state_lock:
+        if not config.combined_cookie:
+            return False
+        config.combined_cookie = _combine_cookie_header(config.combined_cookie, merged)
+        _persist_current_session()
+    return True
+
+
+def merge_backend_cookies(header_values: list[str], host: str) -> bool:
+    """Merge cookies issued by WebVPN/CAS into the matching backend jar."""
+    if not header_values:
+        return False
+    with _state_lock:
+        changed = backend_service.merge_set_cookie(header_values, host)
+        if changed:
+            _persist_current_session()
+        return changed
+
+
+def _iter_set_cookie_pairs(
+    cookie_header: str, names: tuple[str, ...] = ("route", "insert_cookie", "JSESSIONID", "_WEU")
+):
+    """Yield ``(name, value)`` pairs from a raw ``Set-Cookie`` header string.
+
+    The school returns cookies mixed with path/expires directives (and commas
+    inside ``Expires``), so they are matched piecemeal via the same regex
+    approach that ``logic.parse_cookie`` already uses.
+    """
+    if not cookie_header:
+        return
+    name_pattern = "|".join(re.escape(name) for name in names)
+    for match in re.finditer(rf"(?:^|[,;]\s*)({name_pattern})=([^;,]+)", cookie_header):
+        yield match.group(1), match.group(2).strip()
+
+
+def _combine_cookie_header(existing: str, additions: str) -> str:
+    """Overlay ``additions`` onto ``existing`` without duplicating names.
+
+    ``existing`` is the current ``config.combined_cookie`` (``name=value; ...``);
+    ``additions`` is a ``; ``-joined string of fresh ``name=value`` pairs.
+    Later values win (school rotation is authoritative).
+    """
+    values: dict[str, str] = {}
+    for segment in str(existing).split(";"):
+        segment = segment.strip()
+        if "=" in segment:
+            name, _, value = segment.partition("=")
+            values[name.strip()] = value.strip()
+    for segment in str(additions).split(";"):
+        segment = segment.strip()
+        if "=" in segment:
+            name, _, value = segment.partition("=")
+            values[name.strip()] = value.strip()
+    return "; ".join(f"{name}={values[name]}" for name in values)
 
 
 def refresh_elective_batch(
@@ -281,6 +447,57 @@ def set_current_campus(campus_code: str) -> dict[str, str | bool | int]:
         config.campus_code = selected.code
         config.campus_name = selected.name
         return get_session_snapshot()
+
+
+def restore_login_state() -> str:
+    """Restore a persisted school session into the current process."""
+    global _restored_session_pending_validation
+    with _state_lock:
+        if config.token and config.combined_cookie and config.student_id:
+            return str(config.student_id)
+    try:
+        payload = load_persisted_session()
+    except SessionStoreError as exc:
+        logger.warning("Unable to restore local school session: %s", exc)
+        clear_persisted_session()
+        return ""
+    if not isinstance(payload, dict):
+        return ""
+    required = ("student_id", "password", "token", "combined_cookie")
+    if any(not str(payload.get(key, "")).strip() for key in required):
+        clear_persisted_session()
+        return ""
+    with _state_lock:
+        config.student_id = str(payload["student_id"])
+        config.password = str(payload["password"])
+        config.token = str(payload["token"])
+        config.combined_cookie = str(payload["combined_cookie"])
+        config.webvpn_cookie = str(payload.get("webvpn_cookie", ""))
+        config.authserver_cookie = str(payload.get("authserver_cookie", ""))
+        config.backend_preference = backend_service.normalize_preference(
+            payload.get("backend_preference", config.BACKEND_AUTO)
+        )
+        config.active_backend = str(payload.get("active_backend", config.BACKEND_PRIMARY))
+        config.elective_batch_code = str(payload.get("batch_code", ""))
+        config.elective_batch_name = str(payload.get("batch_name", ""))
+        _advance_session_generation()
+        _restored_session_pending_validation = True
+    return str(payload["student_id"])
+
+
+def consume_restored_session_validation() -> bool:
+    """Claim the one-time validation required for a session restored from disk."""
+    global _restored_session_pending_validation
+    with _state_lock:
+        if not _restored_session_pending_validation:
+            return False
+        _restored_session_pending_validation = False
+        return True
+
+
+def restored_session_validation_pending() -> bool:
+    with _state_lock:
+        return _restored_session_pending_validation
 
 
 def attempt_ocr_relogin(
@@ -388,11 +605,18 @@ __all__ = [
     "attempt_ocr_relogin",
     "clear_elective_batch",
     "clear_login_state",
+    "consume_restored_session_validation",
     "encrypt_password",
+    "get_shared_session",
+    "get_shared_browser_session",
     "get_session_snapshot",
     "invalidate_school_session",
+    "merge_session_cookies",
+    "merge_backend_cookies",
     "perform_school_login",
     "refresh_elective_batch",
+    "restore_login_state",
+    "restored_session_validation_pending",
     "save_login_state",
     "set_current_campus",
     "validate_login_params",

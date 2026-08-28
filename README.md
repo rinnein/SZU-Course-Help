@@ -23,6 +23,8 @@
 
 ## 无需 Python：直接下载 Release
 
+若您使用Linux，建议直接 [源码运行](#源码运行) 以取得更好的使用体验(部分Linux发行版可能无法正常运行打包程序)。  
+
 不熟悉 Python、Conda 或命令行的用户，请直接前往 **[Releases 下载页面](https://github.com/Weeye-hua/SZU-Course-Help/releases/latest)**，下载与系统匹配的压缩包。发布包已经包含程序、OCR 依赖、Markdown/PDF 使用手册和平台启动脚本，完整解压后即可运行。
 
 - Windows 10/11 x64：双击 `启动抢课助手.bat` 或 `SZU-Course-Help.exe`。
@@ -30,7 +32,7 @@
 - macOS Intel：下载 `macos-x64`，双击 `启动抢课助手.command`。
 - Linux x64：运行 `启动抢课助手.sh`。
 
-首次运行时，终端会要求输入学号、生成本机 Card Key，并询问是否进入系统。输入 `Y` 后会自动启动本地服务并打开浏览器登录页。详细步骤见 [Markdown 使用手册](docs/USER_GUIDE.md) 和 [PDF 使用手册](output/pdf/SZU-Course-Help-User-Guide.pdf)。
+启动时终端会自动启动本地服务并打开浏览器登录页。首次登录只需在登录页填写学号和密码，系统会在登录过程中自动为本机签发并校验学号绑定 Card Key V3，全程无需手动处理卡密。详细步骤见 [Markdown 使用手册](docs/USER_GUIDE.md) 和 [PDF 使用手册](output/pdf/SZU-Course-Help-User-Guide.pdf)。
 
 ### v3.4.0 更新
 
@@ -53,7 +55,7 @@
 | 能力 | 说明 |
 | --- | --- |
 | 本地 WebUI | FastAPI 仅监听 `127.0.0.1`，提供登录页、课程目录、清单和进度界面 |
-| 手动首次登录 | 输入学号、学校密码、Card Key，并按提示点击四字验证码 |
+| 手动首次登录 | 输入学号和密码并按提示点击四字验证码，登录过程中自动签发并校验本机 Card Key |
 | OCR 自动重登 | 会话过期后自动获取新验证码、识别坐标并恢复 token、Cookie 与批次 |
 | 可见会话恢复 | 工作台显示自动重登录进行中、成功或失败；成功后自动继续原任务 |
 | 多校区目录 | 支持粤海、丽湖、深大附属医院、技术大学、香港和深理光明校区；清单逐门保存校区 |
@@ -79,6 +81,18 @@ cd SZU-Course-Help
 
 ### 2. 准备环境
 
+您可以自行选择您的python环境管理工具。  
+更建议使用轻量化的[uv(点击前往安装页面)](https://uv.doczh.com/getting-started/installation/)作为python管理工具，其会在运行时自动安装合适项目的python版本。  
+当前项目已为uv配置依赖镜像源为 [MirrorZ 校园网联合镜像站](https://help.mirrors.cernet.edu.cn/) 加速下载。  
+
+#### UV
+
+```sh
+uv sync
+```
+
+#### Conda
+
 项目要求 Python 3.13。使用现有 Conda 环境：
 
 ```powershell
@@ -96,17 +110,23 @@ python -m pip install -r requirements.txt
 
 ### 3. 启动
 
+#### UV
+
+```sh
+uv run main.py
+```
+
+#### Conda / 其他 Python 环境
+
 ```powershell
 python main.py
 ```
 
 启动流程：
 
-1. 在终端输入 6 至 12 位数字学号。
-2. 首次运行在本机生成 Ed25519 签名身份，并为该学号签发 Card Key V3。
-3. 选择是否进入选课系统。
-4. 浏览器打开终端给出的本地地址，例如 `http://127.0.0.1:8000/login?ui=...`。
-5. 输入学校密码，按验证码顶部提示依次点击四个汉字，完成首次登录。
+1. 终端启动本地服务，浏览器自动打开登录页，例如 `http://127.0.0.1:8000/login?ui=...`。
+2. 在登录页输入 6 至 12 位数字学号和学校密码，按验证码顶部提示依次点击四个汉字。
+3. 提交登录时，系统自动在本机生成 Ed25519 签名身份、签发并校验学号绑定 Card Key V3，全程对用户透明。
 
 服务默认使用 8000 端口。端口被占用时，程序会在后续端口中选择可用项。每次启动生成新的 UI 缓存令牌，避免浏览器复用旧页面。
 
@@ -114,8 +134,8 @@ python main.py
 
 ```mermaid
 flowchart TD
-    A[终端启动] --> B[生成或读取本机 Ed25519 身份]
-    B --> C[签发学号绑定 Card Key V3]
+    A[终端启动本地服务] --> B[登录页填写学号]
+    B --> C[自动签发学号绑定 Card Key V3]
     C --> D[手动点击验证码并登录]
     D --> E[保存会话到当前进程内存]
     E --> F[读取学校选课批次]
@@ -261,6 +281,7 @@ python main.py
 | `COURSE_SELECT_KEY_DIR` | 源码目录或可执行文件目录 | Card Key 密钥目录 |
 | `COURSE_SELECT_KEY_PASSPHRASE` | 空 | 加密 Ed25519 私钥 |
 | `COURSE_SELECT_PORT` | `8000` | 本地 WebUI 首选端口 |
+| `COURSE_SELECT_DEV` | `0` | 开发模式后端自动重载；修改 Python/API 后自动重启服务 |
 | `COURSE_SELECT_USE_PADDLE_OCR` | `0` | 启用 PaddleOCR 顶部文字回退 |
 | `COURSE_SELECT_NO_BROWSER` | `0` | 启动时不自动打开浏览器 |
 
@@ -309,6 +330,18 @@ node --check static_dist/course-app.js
 python tests/ui_preview_server.py
 # http://127.0.0.1:8001/
 ```
+
+### 后端开发自动重载
+
+开发 API 时设置 `COURSE_SELECT_DEV=1`：
+
+```powershell
+$env:COURSE_SELECT_DEV = "1"
+$env:COURSE_SELECT_DATA_DIR = "./runtime-data"
+python main.py
+```
+
+Uvicorn 会监视项目 Python 源码；修改后端代码后自动重启服务。登录成功后，程序会把当前学校会话写入 `COURSE_SELECT_DATA_DIR/session_state.bin`，内容使用本机随机密钥加密，重启或 reload 后会自动恢复 token、Cookie、学号、密码和批次，无需再次手动验证码登录。点击“退出登录”或会话恢复失败时会清除该文件。
 
 可以切换预览状态：
 
