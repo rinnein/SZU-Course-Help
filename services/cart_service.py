@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from typing import Any
 
+import database
 from database import DatabaseManager
 
 # 全局数据库实例
@@ -90,3 +91,21 @@ def get_all_sorted() -> list[dict]:
 def update_status(course_id: str, status: str) -> bool:
     """更新课程状态"""
     return db.update_course_status(course_id, status)
+
+
+def retry_failed_course(course_id: str) -> dict[str, bool | str]:
+    """Return one explicitly failed course to the pending queue."""
+    normalized_id = str(course_id or "").strip()
+    if not normalized_id:
+        return {"success": False, "message": "课程 ID 不能为空"}
+    row = next(
+        (item for item in db.get_courses_by_status("") if item.get("id") == normalized_id),
+        None,
+    )
+    if row is None:
+        return {"success": False, "message": "课程不在本地清单中"}
+    if row.get("status") != database.STATUS_FAILED:
+        return {"success": False, "message": "只有已停止的课程可以重新排队"}
+    if db.update_course_status(normalized_id, database.STATUS_NOT_STARTED):
+        return {"success": True, "message": "课程已重新加入待抢队列"}
+    return {"success": False, "message": "重新排队失败，请稍后重试"}

@@ -54,9 +54,7 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: release-${{ matrix.platform }}
-          path: |
-            release/*.zip
-            release/*.zip.sha256
+          path: release/*.zip
           if-no-files-found: error
           retention-days: 7
 
@@ -81,9 +79,7 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: release-source
-          path: |
-            release/*.zip
-            release/*.zip.sha256
+          path: release/*.zip
           if-no-files-found: error
           retention-days: 7
 
@@ -104,12 +100,6 @@ jobs:
           path: release-assets
           merge-multiple: true
 
-      - name: Create aggregate checksums
-        shell: bash
-        run: |
-          cd release-assets
-          sha256sum -- *.zip > SHA256SUMS.txt
-
       - name: Create or update GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -119,27 +109,26 @@ jobs:
             gh release edit "${GITHUB_REF_NAME}" \
               --title "SZU Course Help ${GITHUB_REF_NAME}" \
               --notes-file docs/RELEASE_NOTES.md
+            for asset in $(gh release view "${GITHUB_REF_NAME}" --json assets --jq '.assets[].name | select(. == "SHA256SUMS.txt" or endswith(".sha256"))'); do
+              gh release delete-asset "${GITHUB_REF_NAME}" "${asset}" --yes
+            done
             gh release upload "${GITHUB_REF_NAME}" \
               release-assets/*.zip \
-              release-assets/*.zip.sha256 \
-              release-assets/SHA256SUMS.txt \
               --clobber
           else
             gh release create "${GITHUB_REF_NAME}" \
               release-assets/*.zip \
-              release-assets/*.zip.sha256 \
-              release-assets/SHA256SUMS.txt \
               --verify-tag \
               --title "SZU Course Help ${GITHUB_REF_NAME}" \
               --notes-file docs/RELEASE_NOTES.md
           fi
 
-      - name: Remove superseded v3.2.0 release
-        if: github.ref_name == 'v3.2.1'
+      - name: Remove superseded v3.2.1 release
+        if: github.ref_name == 'v3.3.0'
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
-          if gh release view "v3.2.0" >/dev/null 2>&1; then
-            gh release delete "v3.2.0" --yes
+          if gh release view "v3.2.1" >/dev/null 2>&1; then
+            gh release delete "v3.2.1" --yes
           fi

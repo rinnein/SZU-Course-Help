@@ -13,7 +13,7 @@ from datetime import datetime
 from pathlib import Path
 
 import requests
-from fastapi import BackgroundTasks, FastAPI, HTTPException, Query, status
+from fastapi import FastAPI, HTTPException, Query, status
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, ConfigDict, Field
 from starlette.responses import FileResponse, JSONResponse
@@ -49,14 +49,17 @@ from services.course_service import (
 )
 from services.enroll_service import (
     get_enroll_progress,
+    get_enroll_task_state,
     is_enroll_task_running,
-    reserve_enroll_task,
-    run_enroll_task,
+    pause_enroll_task,
+    remove_cart_course,
+    resume_enroll_task,
+    start_enroll_worker,
 )
 
 SERVER_HOST = "127.0.0.1"
 DEFAULT_SERVER_PORT = 8000
-UI_ASSET_BUILD = "20260717.1"
+UI_ASSET_BUILD = "20260828.2"
 UI_CACHE_TOKEN = secrets.token_urlsafe(8)
 logger = logging.getLogger(__name__)
 
@@ -208,6 +211,19 @@ def _api_error(
 
 
 def _not_logged_in_response():
+    snapshot = get_session_snapshot()
+    task_state = get_enroll_task_state()
+    if snapshot["relogin_in_progress"] or (
+        task_state["running"]
+        and not task_state["paused"]
+        and snapshot["relogin_status"] == "failed"
+    ):
+        return _api_error(
+            409,
+            "学校会话正在自动恢复，请稍候；课程和抢课任务不会丢失",
+            "SESSION_RECOVERY_IN_PROGRESS",
+            retryable=True,
+        )
     return _api_error(
         401,
         "登录状态无效，请重新登录",
@@ -219,13 +235,21 @@ def _not_logged_in_response():
 
 def _session_payload() -> dict:
     snapshot = get_session_snapshot()
+    task_state = get_enroll_task_state()
     batch_name = str(snapshot["batch_name"])
     phase = config.classify_elective_phase(batch_name)
     return {
         **snapshot,
         "phase": phase,
         "automatic_enroll_allowed": phase == config.PHASE_AUTOMATIC,
-        "task_running": is_enroll_task_running(),
+        "task_running": task_state["running"],
+        "task_paused": task_state["paused"],
+        "task_pause_acknowledged": task_state["pause_acknowledged"],
+        "task_pause_reason": task_state["pause_reason"],
+        "task_pause_source": task_state["pause_source"],
+        "task_paused_at": task_state["paused_at"],
+        "task_stopping": task_state["stopping"],
+        "task_stopping_reason": task_state["stopping_reason"],
         "ui_cache_token": UI_CACHE_TOKEN,
     }
 
@@ -661,12 +685,38 @@ async def api_cart_add(cart: CartCourse):
 async def api_cart_delete(
     course_id: str = Query(alias="id", min_length=1, max_length=128),
 ):
+    result = remove_cart_course(course_id)
+    if not result["success"] and str(result.get("error_code", "")).startswith("ENROLL_TASK_"):
+        return _api_error(
+            409,
+            str(result["message"]),
+            str(result["error_code"]),
+            retryable=result.get("error_code") == "ENROLL_TASK_PAUSE_PENDING",
+        )
+    if not result["success"]:
+        return ApiMessage(message=str(result["message"]), is_error=True)
+    return JSONResponse(
+        content={
+            "message": result["message"],
+            "is_error": False,
+            "task_stopping": bool(result.get("task_stopping")),
+            "progress": get_enroll_progress(),
+        },
+        headers=get_no_cache_headers(),
+    )
+
+
+@app.post("/api/courses/retry")
+async def api_cart_retry(
+    course_id: str = Query(alias="id", min_length=1, max_length=128),
+):
+    """Return an explicitly failed item to PENDING without duplicating it."""
     if is_enroll_task_running():
         return JSONResponse(
             status_code=409,
-            content={"message": "抢课任务运行中，暂不能修改清单", "is_error": True},
+            content={"message": "抢课任务运行中，暂不能重新排队", "is_error": True},
         )
-    result = cart_service.delete_course(course_id)
+    result = cart_service.retry_failed_course(course_id)
     return ApiMessage(message=result["message"], is_error=not result["success"])
 
 
@@ -686,7 +736,6 @@ async def api_cart_sorted() -> list[CartCourse]:
 @app.post("/api/enroll/courses")
 async def api_start_enroll(
     request: EnrollmentStartRequest,
-    background_tasks: BackgroundTasks,
 ):
     """Start one guarded background worker without changing school request fields."""
     snapshot = get_session_snapshot()
@@ -738,21 +787,167 @@ async def api_start_enroll(
             status_code=400,
             content={"message": "购物车中没有待抢课程", "is_error": True},
         )
-    if not reserve_enroll_task():
+    try:
+        worker_started = start_enroll_worker()
+    except Exception as exc:
+        logger.exception("Could not start enrollment worker: %s", exc)
+        return _api_error(
+            500,
+            "后台抢课任务启动失败，清单已保留，请稍后重试",
+            "ENROLL_WORKER_START_FAILED",
+            retryable=True,
+        )
+    if not worker_started:
         return JSONResponse(
             status_code=409,
             content={"message": "已有抢课任务正在运行", "is_error": True},
         )
 
-    background_tasks.add_task(run_enroll_task, True)
     return ApiMessage(message="抢课任务已在后台启动", is_error=False)
 
 
 @app.get("/api/enroll/status")
 async def api_enroll_status():
-    progress = get_enroll_progress()
     return JSONResponse(
-        content={"running": is_enroll_task_running(), **progress},
+        content=get_enroll_progress(),
+        headers=get_no_cache_headers(),
+    )
+
+
+@app.post("/api/enroll/pause")
+async def api_pause_enroll():
+    success, message = pause_enroll_task()
+    if not success:
+        task_state = get_enroll_task_state()
+        error_code = "ENROLL_TASK_STOPPING" if task_state["stopping"] else "ENROLL_TASK_NOT_RUNNING"
+        return _api_error(
+            409,
+            message,
+            error_code,
+            retryable=False,
+        )
+    progress = get_enroll_progress()
+    if progress["paused"] and not progress["pause_acknowledged"]:
+        message = "暂停请求已提交，正在等待当前学校请求结束"
+    return JSONResponse(
+        content={"message": message, "is_error": False, "progress": progress},
+        headers=get_no_cache_headers(),
+    )
+
+
+@app.post("/api/enroll/resume")
+async def api_resume_enroll():
+    task_state = get_enroll_task_state()
+    if not task_state["running"]:
+        return _api_error(
+            409,
+            "当前没有可继续的抢课任务",
+            "ENROLL_TASK_NOT_RUNNING",
+            retryable=False,
+        )
+    if task_state["stopping"]:
+        return _api_error(
+            409,
+            task_state["stopping_reason"] or "抢课任务正在结束，请稍候",
+            "ENROLL_TASK_STOPPING",
+            retryable=True,
+        )
+
+    snapshot = get_session_snapshot()
+    if snapshot["relogin_in_progress"]:
+        return _api_error(
+            409,
+            "正在自动重新登录，请等待恢复完成后再继续任务",
+            "SESSION_RECOVERY_IN_PROGRESS",
+            retryable=True,
+        )
+    if not snapshot["logged_in"]:
+        return _api_error(
+            409,
+            "学校登录尚未恢复，请先完成手动登录，再返回清单继续任务",
+            "LOGIN_REQUIRED_FOR_RESUME",
+            retryable=False,
+            requires_manual_login=True,
+        )
+
+    try:
+        await asyncio.to_thread(
+            refresh_elective_batch,
+            str(snapshot["student_id"]),
+            config.token,
+        )
+    except logic.SchoolBatchSessionExpiredError:
+        recovered, error = await asyncio.to_thread(
+            attempt_automatic_relogin,
+            config.ocr_relogin_max_attempts,
+        )
+        if not recovered:
+            logger.warning("OCR session recovery failed before task resume: %s", error)
+            return _api_error(
+                409,
+                "学校登录已过期且自动恢复失败，任务仍保持暂停；请先手动登录",
+                "LOGIN_REQUIRED_FOR_RESUME",
+                retryable=False,
+                requires_manual_login=True,
+            )
+    except logic.ElectiveBatchUnavailableError:
+        clear_elective_batch()
+        return _api_error(
+            409,
+            "学校当前未返回可用选课批次，任务仍保持暂停",
+            "BATCH_UNAVAILABLE",
+            retryable=True,
+        )
+    except requests.Timeout:
+        return _api_error(
+            504,
+            "确认当前选课批次超时，任务仍保持暂停，请稍后再试",
+            "SCHOOL_TIMEOUT",
+            retryable=True,
+        )
+    except requests.RequestException:
+        return _api_error(
+            503,
+            "暂时无法连接学校系统确认选课批次，任务仍保持暂停",
+            "SCHOOL_NETWORK_ERROR",
+            retryable=True,
+        )
+    except Exception as exc:
+        logger.exception("Could not verify enrollment phase before task resume: %s", exc)
+        return _api_error(
+            503,
+            "无法确认当前选课批次，任务仍保持暂停，请稍后再试",
+            "PHASE_CHECK_FAILED",
+            retryable=True,
+        )
+
+    refreshed = get_session_snapshot()
+    if not refreshed["batch_code"]:
+        return _api_error(
+            409,
+            "学校未返回有效选课批次，任务仍保持暂停",
+            "BATCH_UNAVAILABLE",
+            retryable=True,
+        )
+    block_reason = config.automatic_enroll_block_reason(str(refreshed["batch_name"]))
+    if block_reason:
+        return _api_error(
+            409,
+            f"{block_reason}；原任务仍保持暂停",
+            "PHASE_NOT_ALLOWED",
+            retryable=True,
+        )
+
+    success, message = resume_enroll_task()
+    if not success:
+        return _api_error(
+            409,
+            message,
+            "ENROLL_TASK_NOT_RUNNING",
+            retryable=False,
+        )
+    return JSONResponse(
+        content={"message": message, "is_error": False, "progress": get_enroll_progress()},
         headers=get_no_cache_headers(),
     )
 

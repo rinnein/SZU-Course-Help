@@ -45,6 +45,10 @@ const appState = {
   loadingProgress: false,
   knownSuccessIds: new Set(),
   wasTaskRunning: false,
+  taskControlPending: false,
+  recoveryHideTimer: null,
+  recoveryDismissedAt: "",
+  lastReloginStatus: "idle",
 };
 
 const appElements = {
@@ -56,6 +60,10 @@ const appElements = {
   refreshPhase: document.querySelector("#refreshPhase"),
   studentLabel: document.querySelector("#studentLabel"),
   taskIndicator: document.querySelector("#taskIndicator"),
+  sessionRecoveryBanner: document.querySelector("#sessionRecoveryBanner"),
+  recoveryTitle: document.querySelector("#recoveryTitle"),
+  recoveryDetail: document.querySelector("#recoveryDetail"),
+  recoveryLoginLink: document.querySelector("#recoveryLoginLink"),
   courseTypeCode: document.querySelector("#courseTypeCode"),
   courseTitle: document.querySelector("#courseTitle"),
   courseSummary: document.querySelector("#courseSummary"),
@@ -90,6 +98,9 @@ const appElements = {
   progressCounts: document.querySelector("#progressCounts"),
   progressBarFill: document.querySelector("#progressBarFill"),
   progressRows: document.querySelector("#progressRows"),
+  progressState: document.querySelector("#progressState"),
+  progressNotice: document.querySelector("#progressNotice"),
+  taskControlButton: document.querySelector("#taskControlButton"),
 };
 
 class ApiError extends Error {
@@ -221,6 +232,82 @@ function showSessionDialog(message) {
   if (!appElements.sessionDialog.open) appElements.sessionDialog.showModal();
 }
 
+function hideSessionDialog() {
+  if (appElements.sessionDialog.open) appElements.sessionDialog.close();
+}
+
+function hideRecoveryBanner() {
+  appElements.sessionRecoveryBanner.hidden = true;
+  appElements.sessionRecoveryBanner.setAttribute("aria-busy", "false");
+}
+
+function renderSessionRecovery(session, previousStatus = "idle") {
+  const status = String(session?.relogin_status || "idle");
+  const taskPaused = Boolean(session?.task_paused);
+  const taskRunning = Boolean(session?.task_running);
+  const finishedAt = String(session?.relogin_finished_at || "success");
+  appElements.recoveryLoginLink.href = versionedPage("/login");
+
+  if (status === "idle") {
+    hideRecoveryBanner();
+    return;
+  }
+
+  if (status === "running") {
+    if (appState.recoveryHideTimer) {
+      window.clearTimeout(appState.recoveryHideTimer);
+      appState.recoveryHideTimer = null;
+    }
+    appElements.sessionRecoveryBanner.hidden = false;
+    appElements.sessionRecoveryBanner.className = "session-recovery-banner is-running";
+    appElements.sessionRecoveryBanner.setAttribute("aria-busy", "true");
+    appElements.recoveryTitle.textContent = "正在自动重新登录";
+    appElements.recoveryDetail.textContent = session.relogin_message
+      || `学校会话已过期，OCR 最多尝试 ${session.relogin_max_attempts || 50} 张验证码；任务和清单会保留。`;
+    appElements.recoveryLoginLink.hidden = true;
+    return;
+  }
+
+  appElements.sessionRecoveryBanner.setAttribute("aria-busy", "false");
+  if (status === "success") {
+    hideSessionDialog();
+    if (appState.recoveryDismissedAt === finishedAt) {
+      hideRecoveryBanner();
+      return;
+    }
+    appElements.sessionRecoveryBanner.hidden = false;
+    appElements.sessionRecoveryBanner.className = "session-recovery-banner is-success";
+    appElements.recoveryTitle.textContent = "自动重新登录成功";
+    appElements.recoveryDetail.textContent = "学校会话已经恢复，页面数据与抢课任务会自动继续。";
+    appElements.recoveryLoginLink.hidden = true;
+    if (previousStatus === "running") {
+      showToast("自动重新登录成功，已恢复学校会话", false, true);
+    }
+    if (!appState.recoveryHideTimer) {
+      appState.recoveryHideTimer = window.setTimeout(() => {
+        appState.recoveryDismissedAt = finishedAt;
+        appState.recoveryHideTimer = null;
+        hideRecoveryBanner();
+      }, 6000);
+    }
+    return;
+  }
+
+  if (appState.recoveryHideTimer) {
+    window.clearTimeout(appState.recoveryHideTimer);
+    appState.recoveryHideTimer = null;
+  }
+  appElements.sessionRecoveryBanner.hidden = false;
+  appElements.sessionRecoveryBanner.className = "session-recovery-banner is-error";
+  appElements.recoveryTitle.textContent = taskRunning && !taskPaused
+    ? "自动重新登录暂未成功"
+    : "自动重新登录失败";
+  appElements.recoveryDetail.textContent = taskRunning && !taskPaused
+    ? `${session.relogin_message || "OCR 暂未识别成功"}；后台仍会按策略继续尝试。`
+    : `${session.relogin_message || "无法恢复学校会话"}；请手动登录后返回清单继续任务。`;
+  appElements.recoveryLoginLink.hidden = taskRunning && !taskPaused;
+}
+
 function renderLoading() {
   const wrapper = element("div", "loading-list");
   for (let index = 0; index < 4; index += 1) {
@@ -297,6 +384,10 @@ function renderCourseAvailabilityState(message = "") {
 function setPhasePresentation() {
   const batch = (appState.session?.batch_name || "").trim();
   const catalogReportedClosed = appState.catalogBlockedCode === "COURSE_WINDOW_CLOSED";
+  const taskWindowPaused = Boolean(
+    appState.session?.task_paused && appState.session?.task_pause_source === "school_window",
+  );
+  const taskPauseAcknowledged = Boolean(appState.session?.task_pause_acknowledged);
   appState.preselection = appState.session?.phase === "preselection" && !catalogReportedClosed;
   appState.closedPhase = appState.session?.phase === "closed" || catalogReportedClosed;
   appState.grabPhase = Boolean(appState.session?.automatic_enroll_allowed);
@@ -315,6 +406,13 @@ function setPhasePresentation() {
     appElements.phaseDescription.textContent = "学校批次显示为未开放、暂停或已结束；本地清单会保留。";
     appElements.phaseBadge.textContent = batch || "未开放";
     appElements.phaseBadge.className = "status-pill status-warning";
+  } else if (taskWindowPaused) {
+    appElements.phaseBanner.classList.add("is-warning");
+    appElements.phaseTitle.textContent = `批次为${batch || "可抢阶段"}，但当前时段未开放`;
+    appElements.phaseDescription.textContent = appState.session?.task_pause_reason
+      || "学校拒绝了本次提交，任务已暂停；开放后可在清单中继续。";
+    appElements.phaseBadge.textContent = taskPauseAcknowledged ? "任务已暂停" : "正在暂停";
+    appElements.phaseBadge.className = "status-pill status-warning";
   } else if (appState.grabPhase) {
     appElements.phaseTitle.textContent = `当前批次：${batch}`;
     appElements.phaseDescription.textContent = "启动前仍需在清单中再次确认阶段。抢到的课程会实时加入你的课程。";
@@ -331,19 +429,71 @@ function setPhasePresentation() {
 }
 
 function applySessionData(session) {
+  const previousReloginStatus = appState.lastReloginStatus;
   appState.session = session;
-  appElements.studentLabel.textContent = session.logged_in
-    ? `学号 ${session.student_id}`
-    : "未登录";
+  appState.lastReloginStatus = String(session.relogin_status || "idle");
+  appElements.studentLabel.textContent = session.relogin_in_progress
+    ? "正在恢复登录"
+    : session.logged_in
+      ? `学号 ${session.student_id}`
+      : "未登录";
+  renderSessionRecovery(session, previousReloginStatus);
+  if (session.logged_in && !session.relogin_in_progress) hideSessionDialog();
   updateTaskIndicator();
   setPhasePresentation();
   if (session.task_running) startProgressPolling();
 }
 
+function cartEditStateKey() {
+  const session = appState.session;
+  return [
+    Boolean(session?.task_running),
+    Boolean(session?.task_paused),
+    Boolean(session?.task_pause_acknowledged),
+    Boolean(session?.task_stopping),
+  ].join(":");
+}
+
+function applyProgressTaskState(data) {
+  const previousCartEditState = cartEditStateKey();
+  appState.progress = data;
+  if (appState.session && data) {
+    appState.session.task_running = Boolean(data.running);
+    appState.session.task_paused = Boolean(data.paused);
+    appState.session.task_pause_acknowledged = Boolean(data.pause_acknowledged);
+    appState.session.task_pause_reason = data.pause_reason || "";
+    appState.session.task_pause_source = data.pause_source || "";
+    appState.session.task_stopping = Boolean(data.stopping);
+    appState.session.task_stopping_reason = data.stopping_reason || "";
+  }
+  return previousCartEditState !== cartEditStateKey();
+}
+
 function updateTaskIndicator() {
-  const running = Boolean(appState.session?.task_running);
+  const running = Boolean(appState.progress?.running ?? appState.session?.task_running);
+  const paused = Boolean(appState.progress?.paused ?? appState.session?.task_paused);
+  const pauseAcknowledged = Boolean(
+    appState.progress?.pause_acknowledged ?? appState.session?.task_pause_acknowledged,
+  );
+  const stopping = Boolean(appState.progress?.stopping ?? appState.session?.task_stopping);
+  const relogin = Boolean(appState.session?.relogin_in_progress);
   appElements.taskIndicator.hidden = !running;
   if (!running) return;
+  appElements.taskIndicator.classList.toggle("is-paused", paused);
+  appElements.taskIndicator.classList.toggle("is-relogin", relogin);
+  appElements.taskIndicator.classList.toggle("is-stopping", stopping);
+  if (stopping) {
+    appElements.taskIndicator.textContent = "任务正在结束";
+    return;
+  }
+  if (relogin) {
+    appElements.taskIndicator.textContent = "正在重新登录";
+    return;
+  }
+  if (paused) {
+    appElements.taskIndicator.textContent = pauseAcknowledged ? "任务已暂停" : "正在暂停";
+    return;
+  }
   const counts = appState.progress?.counts;
   appElements.taskIndicator.textContent = counts
     ? `抢课中 ${counts.success}/${counts.total}`
@@ -357,7 +507,12 @@ async function loadSession(showDialog = true) {
   try {
     const session = await api("/api/session");
     applySessionData(session);
-    if (!appState.session.logged_in && showDialog) {
+    if (
+      !appState.session.logged_in
+      && !appState.session.relogin_in_progress
+      && appState.session.relogin_status !== "failed"
+      && showDialog
+    ) {
       showSessionDialog("当前没有有效登录状态，请返回登录页完成登录。");
     }
     if (previousTaskState !== Boolean(appState.session.task_running)) {
@@ -652,9 +807,20 @@ async function refreshCurrentView() {
 
 function syncEnrollControls() {
   const running = Boolean(appState.session?.task_running);
+  const paused = Boolean(appState.session?.task_paused);
+  const pauseAcknowledged = Boolean(appState.session?.task_pause_acknowledged);
+  const stopping = Boolean(appState.session?.task_stopping);
   const hasPending = appState.cart.some((item) => (item.status || "PENDING") === "PENDING");
   appElements.openEnrollConfirm.disabled = !appState.grabPhase || running || !hasPending;
-  if (running) {
+  if (running && stopping) {
+    appElements.cartHint.textContent = appState.session?.task_stopping_reason
+      || "待处理课程已清空，后台任务正在结束。";
+  } else if (running && paused && !pauseAcknowledged) {
+    appElements.cartHint.textContent = "正在完成当前学校请求；安全暂停后即可移除清单中的课程。";
+  } else if (running && paused) {
+    appElements.cartHint.textContent = appState.session?.task_pause_reason
+      || "抢课任务已暂停，可以移除不再需要的课程，继续后会保留其余进度。";
+  } else if (running) {
     appElements.cartHint.textContent = "后台抢课任务正在运行，清单已锁定，抢到的课程会自动进入我的课程。";
   } else if (appState.preselection) {
     appElements.cartHint.textContent = "预选阶段由系统抽签，无需抢课；可先整理好清单，等复选或补选再启动。";
@@ -689,15 +855,54 @@ function renderCart() {
     const actions = element("div", "cart-item-actions");
     const statusClass = item.status === "SUCCESS" ? "status-success" : item.status === "FAILED" ? "status-danger" : item.status === "ENROLLING" ? "status-warning" : "status-neutral";
     actions.append(element("span", `status-pill ${statusClass}`, statusNames[item.status] || "待启动"));
+    if (item.status === "FAILED" && !appState.session?.task_running) {
+      const retry = element("button", "button button-secondary", "重新排队");
+      retry.type = "button";
+      retry.addEventListener("click", async () => {
+        retry.disabled = true;
+        try {
+          const result = await api(`/api/courses/retry?id=${encodeURIComponent(item.id)}`, {
+            method: "POST",
+          });
+          if (result.is_error) throw new Error(result.message);
+          showToast(result.message || "课程已重新排队", false, true);
+          await loadCart();
+        } catch (error) {
+          if (!(error instanceof SessionExpiredError)) showToast(error.message, true);
+          retry.disabled = false;
+        }
+      });
+      actions.append(retry);
+    }
     const remove = element("button", "button button-quiet", "移除");
     remove.type = "button";
-    remove.disabled = Boolean(appState.session?.task_running) || item.status === "ENROLLING";
+    const taskRunning = Boolean(appState.session?.task_running);
+    const taskStopping = Boolean(appState.session?.task_stopping);
+    const canEditPausedTask = taskRunning
+      && Boolean(appState.session?.task_paused)
+      && Boolean(appState.session?.task_pause_acknowledged)
+      && !taskStopping;
+    const terminalCourse = ["SUCCESS", "FAILED"].includes(item.status);
+    remove.disabled = taskRunning && (taskStopping || (!terminalCourse && !canEditPausedTask));
+    if (remove.disabled) {
+      remove.title = taskStopping
+        ? "抢课任务正在结束"
+        : appState.session?.task_paused
+          ? "正在完成当前请求，请等待安全暂停"
+          : "请先暂停抢课任务";
+    }
     remove.addEventListener("click", async () => {
       remove.disabled = true;
       try {
         const result = await api(`/api/courses/delete?id=${encodeURIComponent(item.id)}`, { method: "POST" });
         if (result.is_error) throw new Error(result.message);
         showToast(result.message || "已移除");
+        if (result.progress) {
+          const cartControlsChanged = applyProgressTaskState(result.progress);
+          renderProgress(result.progress);
+          updateTaskIndicator();
+          if (cartControlsChanged) renderCart();
+        }
         await loadCart();
       } catch (error) {
         if (!(error instanceof SessionExpiredError)) showToast(error.message, true);
@@ -809,13 +1014,65 @@ function renderProgress(data) {
   const courses = (data && data.courses) || [];
   const hasProgress = courses.length > 0;
   appElements.enrollProgress.hidden = !hasProgress;
-  if (!hasProgress) return;
+  if (!hasProgress) {
+    appElements.taskControlButton.hidden = true;
+    return;
+  }
 
   const counts = data.counts || { total: 0, success: 0, failed: 0, active: 0 };
-  appElements.progressCounts.textContent = `${counts.success} 抢到 · ${counts.failed} 失败 · ${counts.active} 进行中`;
+  const paused = Boolean(data.paused);
+  const pauseAcknowledged = Boolean(data.pause_acknowledged);
+  const stopping = Boolean(data.stopping);
+  const recovering = Boolean(appState.session?.relogin_in_progress);
+  appElements.progressCounts.textContent = `${counts.success} 抢到 · ${counts.failed} 失败 · ${counts.active} 待处理`;
   const completed = counts.success + counts.failed;
   const pct = counts.total ? Math.round((completed / counts.total) * 100) : 0;
   appElements.progressBarFill.style.width = `${pct}%`;
+
+  appElements.progressState.className = "status-pill status-neutral";
+  if (!data.running) {
+    appElements.progressState.textContent = "任务已结束";
+  } else if (stopping) {
+    appElements.progressState.textContent = "正在结束";
+    appElements.progressState.className = "status-pill status-warning";
+  } else if (recovering) {
+    appElements.progressState.textContent = "正在重新登录";
+    appElements.progressState.className = "status-pill status-warning";
+  } else if (paused) {
+    appElements.progressState.textContent = pauseAcknowledged ? "已暂停" : "正在暂停";
+    appElements.progressState.className = "status-pill status-warning";
+  } else {
+    appElements.progressState.textContent = "抢课中";
+    appElements.progressState.className = "status-pill status-success";
+  }
+
+  appElements.taskControlButton.hidden = !data.running || stopping;
+  appElements.taskControlButton.textContent = paused
+    ? pauseAcknowledged ? "继续任务" : "正在暂停"
+    : "暂停任务";
+  appElements.taskControlButton.className = paused
+    ? "button button-primary"
+    : "button button-secondary";
+  appElements.taskControlButton.disabled = appState.taskControlPending
+    || stopping
+    || (paused && (!pauseAcknowledged || recovering));
+  if (stopping) {
+    appElements.progressNotice.textContent = data.stopping_reason
+      || "待处理课程已清空，后台任务正在结束。";
+  } else if (recovering) {
+    appElements.progressNotice.textContent = "学校会话已过期，正在自动重新登录；课程和当前进度均已保留。";
+  } else if (paused && !pauseAcknowledged) {
+    appElements.progressNotice.textContent = "正在等待当前学校请求结束；安全暂停后即可移除课程。";
+  } else if (paused) {
+    appElements.progressNotice.textContent = data.pause_reason
+      || "任务已暂停；点击继续后从现有清单和尝试次数接着运行。";
+  } else if (data.running) {
+    appElements.progressNotice.textContent = "任务运行中；点击暂停后，会在当前学校请求结束后停止发送新请求。";
+  } else {
+    appElements.progressNotice.textContent = counts.active
+      ? "仍有待处理课程，可重新启动任务。"
+      : "本轮任务已经结束。";
+  }
 
   const fragment = document.createDocumentFragment();
   for (const course of courses) {
@@ -825,12 +1082,48 @@ function renderProgress(data) {
     info.append(element("span", "p-msg", course.message || ""));
     const side = element("div", "cart-item-actions");
     const statusClass = course.status === "SUCCESS" ? "status-success" : course.status === "FAILED" ? "status-danger" : "status-warning";
-    side.append(element("span", `status-pill ${statusClass}`, statusNames[course.status] || course.status));
+    const statusLabel = stopping && course.status === "ENROLLING"
+      ? "正在结束"
+      : paused && course.status === "ENROLLING"
+        ? pauseAcknowledged ? "已暂停" : "正在暂停"
+      : statusNames[course.status] || course.status;
+    side.append(element("span", `status-pill ${statusClass}`, statusLabel));
     side.append(element("span", "p-attempts", `${course.attempts || 0} 次`));
     row.append(info, side);
     fragment.append(row);
   }
   appElements.progressRows.replaceChildren(fragment);
+}
+
+async function toggleEnrollmentPause() {
+  if (appState.taskControlPending || !appState.progress?.running) return;
+  const paused = Boolean(appState.progress.paused);
+  appState.taskControlPending = true;
+  renderProgress(appState.progress);
+  try {
+    const result = await api(paused ? "/api/enroll/resume" : "/api/enroll/pause", {
+      method: "POST",
+      timeoutMs: SESSION_RECOVERY_TIMEOUT_MS,
+    });
+    if (result.progress) {
+      const cartControlsChanged = applyProgressTaskState(result.progress);
+      if (cartControlsChanged) renderCart();
+    }
+    showToast(result.message || (paused ? "抢课任务已继续" : "抢课任务已暂停"), false, true);
+    renderProgress(appState.progress);
+    updateTaskIndicator();
+    setPhasePresentation();
+    syncEnrollControls();
+  } catch (error) {
+    if (error.requiresManualLogin) showSessionDialog(error.message);
+    else if (!(error instanceof SessionExpiredError)) showToast(error.message, true);
+    if (["PHASE_NOT_ALLOWED", "BATCH_UNAVAILABLE"].includes(error.code)) {
+      await loadSession(false);
+    }
+  } finally {
+    appState.taskControlPending = false;
+    if (appState.progress) renderProgress(appState.progress);
+  }
 }
 
 async function loadEnrollProgress() {
@@ -845,9 +1138,12 @@ async function loadEnrollProgress() {
   } finally {
     appState.loadingProgress = false;
   }
-  appState.progress = data;
+  const cartControlsChanged = applyProgressTaskState(data);
   renderProgress(data);
   updateTaskIndicator();
+  setPhasePresentation();
+  syncEnrollControls();
+  if (cartControlsChanged) renderCart();
 
   for (const course of data.courses || []) {
     if (course.status === "SUCCESS" && !appState.knownSuccessIds.has(course.id)) {
@@ -862,7 +1158,10 @@ async function loadEnrollProgress() {
     appState.wasTaskRunning = false;
     stopProgressPolling();
     const counts = data.counts || { success: 0, failed: 0 };
-    showToast(`抢课任务结束：成功 ${counts.success} 门，失败 ${counts.failed} 门`, counts.failed > 0 && counts.success === 0);
+    showToast(
+      `抢课任务结束：成功 ${counts.success} 门，失败 ${counts.failed} 门，保留 ${counts.active || 0} 门`,
+      counts.failed > 0 && counts.success === 0,
+    );
     await loadCart();
     await loadMyCourses(true);
     await loadSession(false);
@@ -951,6 +1250,7 @@ appElements.phaseConfirmation.addEventListener("change", () => {
   appElements.startEnroll.disabled = !appElements.phaseConfirmation.checked;
 });
 appElements.startEnroll.addEventListener("click", startEnrollment);
+appElements.taskControlButton.addEventListener("click", toggleEnrollmentPause);
 appElements.logout.addEventListener("click", async () => {
   try {
     const result = await api("/api/logout", { method: "POST" });

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import html
 import re
+import tomllib
 from pathlib import Path
 
 from reportlab.lib import colors
@@ -29,6 +30,8 @@ ROOT = Path(__file__).resolve().parent.parent
 SOURCE = ROOT / "docs" / "USER_GUIDE.md"
 SCREENSHOT = ROOT / "docs" / "images" / "workbench.png"
 OUTPUT = ROOT / "output" / "pdf" / "SZU-Course-Help-User-Guide.pdf"
+with (ROOT / "pyproject.toml").open("rb") as _project_file:
+    VERSION = str(tomllib.load(_project_file)["project"]["version"])
 
 PAGE_WIDTH, PAGE_HEIGHT = A4
 BRAND = colors.HexColor("#1D55D0")
@@ -196,14 +199,14 @@ def draw_page(canvas, doc) -> None:
         canvas.line(18 * mm, PAGE_HEIGHT - 15 * mm, PAGE_WIDTH - 18 * mm, PAGE_HEIGHT - 15 * mm)
         canvas.setFont("GuideSans", 8.5)
         canvas.setFillColor(MUTED)
-        canvas.drawString(18 * mm, PAGE_HEIGHT - 11.5 * mm, "深大抢课助手 3.2.1 使用手册")
+        canvas.drawString(18 * mm, PAGE_HEIGHT - 11.5 * mm, f"深大抢课助手 {VERSION} 使用手册")
         canvas.drawRightString(PAGE_WIDTH - 18 * mm, 10 * mm, f"第 {doc.page} 页")
     canvas.restoreState()
 
 
 def add_cover(story: list, styles: dict[str, ParagraphStyle]) -> None:
     story.append(Spacer(1, 14 * mm))
-    story.append(Paragraph("深大抢课助手 3.2.1", styles["cover_title"]))
+    story.append(Paragraph(f"深大抢课助手 {VERSION}", styles["cover_title"]))
     story.append(Spacer(1, 3 * mm))
     story.append(Paragraph("跨平台 Release 使用手册", styles["cover_subtitle"]))
     story.append(Paragraph("无需 Python · 完整解压 · 双击平台启动脚本", styles["cover_subtitle"]))
@@ -240,7 +243,9 @@ def add_cover(story: list, styles: dict[str, ParagraphStyle]) -> None:
     )
     story.append(note)
     story.append(Spacer(1, 7 * mm))
-    story.append(Paragraph("版本 3.2.1 · MIT License · Weeye · Misakait", styles["cover_meta"]))
+    story.append(
+        Paragraph(f"版本 {VERSION} · MIT License · Weeye · Misakait", styles["cover_meta"])
+    )
     story.append(Paragraph("github.com/Weeye-hua/SZU-Course-Help", styles["cover_meta"]))
     story.append(PageBreak())
 
@@ -392,7 +397,7 @@ def main() -> None:
         leftMargin=18 * mm,
         topMargin=19 * mm,
         bottomMargin=17 * mm,
-        title="深大抢课助手 3.2.1 使用手册",
+        title=f"深大抢课助手 {VERSION} 使用手册",
         author="Weeye · Misakait",
         subject="SZU Course Help cross-platform release user guide",
     )

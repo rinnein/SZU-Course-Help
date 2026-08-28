@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import os
 import platform
 import shutil
@@ -125,24 +124,6 @@ def write_launcher(stage_dir: Path, platform_id: str, executable_name: str) -> N
     launcher.chmod(launcher.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
 
 
-def sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for block in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(block)
-    return digest.hexdigest()
-
-
-def write_package_manifest(stage_dir: Path) -> None:
-    manifest = stage_dir / "SHA256SUMS.txt"
-    lines = []
-    for path in sorted(stage_dir.rglob("*")):
-        if path.is_file() and path != manifest:
-            relative = path.relative_to(stage_dir).as_posix()
-            lines.append(f"{sha256(path)}  {relative}")
-    manifest.write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
-
-
 def add_zip_file(archive: zipfile.ZipFile, path: Path, arcname: str) -> None:
     info = zipfile.ZipInfo.from_file(path, arcname=arcname)
     info.compress_type = zipfile.ZIP_DEFLATED
@@ -159,12 +140,6 @@ def create_archive(stage_dir: Path, release_dir: Path) -> Path:
             if path.is_file():
                 arcname = (Path(stage_dir.name) / path.relative_to(stage_dir)).as_posix()
                 add_zip_file(archive, path, arcname)
-    checksum_path = archive_path.with_suffix(".zip.sha256")
-    checksum_path.write_text(
-        f"{sha256(archive_path)}  {archive_path.name}\n",
-        encoding="ascii",
-        newline="\n",
-    )
     return archive_path
 
 
@@ -200,7 +175,6 @@ def package_distribution(
         executable.chmod(executable.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
 
     write_launcher(stage_dir, platform_id, executable_name)
-    write_package_manifest(stage_dir)
     return create_archive(stage_dir, release_dir)
 
 
@@ -234,7 +208,6 @@ def main() -> None:
         executable_name,
     )
     print(f"Release archive: {archive}")
-    print(f"SHA256: {sha256(archive)}")
 
 
 if __name__ == "__main__":

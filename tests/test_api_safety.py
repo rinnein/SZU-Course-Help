@@ -1,14 +1,18 @@
 from __future__ import annotations
 
+import threading
+import time
+
 import requests
 from fastapi.testclient import TestClient
 
 import app
 import config
+import database
 import logic
 from database import DatabaseManager
 from security import key_manager
-from services import cart_service
+from services import cart_service, enroll_service
 
 client = TestClient(app.app)
 
@@ -95,6 +99,30 @@ def test_courses_require_login(monkeypatch):
     monkeypatch.setattr(config, "combined_cookie", "")
     response = client.get("/api/school/courses?type=TJKC&page=1")
     assert response.status_code == 401
+
+
+def test_courses_report_background_session_recovery_without_manual_login_prompt(monkeypatch):
+    monkeypatch.setattr(config, "token", "")
+    monkeypatch.setattr(config, "combined_cookie", "")
+    monkeypatch.setattr(
+        app,
+        "get_session_snapshot",
+        lambda: {
+            "relogin_in_progress": True,
+            "relogin_status": "running",
+        },
+    )
+    monkeypatch.setattr(
+        app,
+        "get_enroll_task_state",
+        lambda: {"running": True, "paused": False},
+    )
+
+    response = client.get("/api/school/courses?type=TJKC&page=1")
+
+    assert response.status_code == 409
+    assert response.json()["error_code"] == "SESSION_RECOVERY_IN_PROGRESS"
+    assert response.json()["requires_manual_login"] is False
 
 
 def test_session_uses_backend_phase_classification(monkeypatch):
@@ -317,7 +345,7 @@ def test_preselection_cannot_start_enrollment(tmp_path, monkeypatch):
     monkeypatch.setattr(app, "refresh_elective_batch", refresh_to_preselection)
     monkeypatch.setattr(
         app,
-        "reserve_enroll_task",
+        "start_enroll_worker",
         lambda: (_ for _ in ()).throw(AssertionError("must not reserve")),
     )
 
@@ -344,7 +372,7 @@ def test_enrollment_does_not_start_when_phase_cannot_be_verified(tmp_path, monke
     )
     monkeypatch.setattr(
         app,
-        "reserve_enroll_task",
+        "start_enroll_worker",
         lambda: (_ for _ in ()).throw(AssertionError("must not reserve")),
     )
 
@@ -371,7 +399,7 @@ def test_closed_batch_name_cannot_start_enrollment(tmp_path, monkeypatch):
     monkeypatch.setattr(app, "refresh_elective_batch", refresh_to_closed_phase)
     monkeypatch.setattr(
         app,
-        "reserve_enroll_task",
+        "start_enroll_worker",
         lambda: (_ for _ in ()).throw(AssertionError("must not reserve")),
     )
 
@@ -379,3 +407,194 @@ def test_closed_batch_name_cannot_start_enrollment(tmp_path, monkeypatch):
 
     assert response.status_code == 409
     assert "未开放或已结束" in response.json()["message"]
+
+
+def test_automatic_phase_starts_detached_enrollment_worker(tmp_path, monkeypatch):
+    monkeypatch.setattr(cart_service, "db", DatabaseManager(str(tmp_path / "start-worker.db")))
+    cart_service.add_course(type("Course", (), {"id": "c1", "type": "FANKC", "name": "课程"})())
+    monkeypatch.setattr(config, "token", "token")
+    monkeypatch.setattr(config, "combined_cookie", "cookie")
+    monkeypatch.setattr(config, "student_id", "2024110122")
+
+    def refresh_to_automatic(*_args):
+        config.elective_batch_code = "fresh-batch"
+        config.elective_batch_name = "正选"
+        return config.elective_batch_name
+
+    starts = []
+    monkeypatch.setattr(app, "refresh_elective_batch", refresh_to_automatic)
+    monkeypatch.setattr(app, "start_enroll_worker", lambda: starts.append(1) or True)
+
+    response = client.post("/api/enroll/courses", json={"confirmed_phase": True})
+
+    assert response.status_code == 200
+    assert response.json()["is_error"] is False
+    assert starts == [1]
+
+
+def test_worker_start_failure_preserves_pending_cart(tmp_path, monkeypatch):
+    db = DatabaseManager(str(tmp_path / "worker-start-error.db"))
+    monkeypatch.setattr(cart_service, "db", db)
+    cart_service.add_course(type("Course", (), {"id": "c1", "type": "FANKC", "name": "课程"})())
+    monkeypatch.setattr(config, "token", "token")
+    monkeypatch.setattr(config, "combined_cookie", "cookie")
+    monkeypatch.setattr(config, "student_id", "2024110122")
+
+    def refresh_to_automatic(*_args):
+        config.elective_batch_code = "fresh-batch"
+        config.elective_batch_name = "正选"
+        return config.elective_batch_name
+
+    monkeypatch.setattr(app, "refresh_elective_batch", refresh_to_automatic)
+    monkeypatch.setattr(
+        app,
+        "start_enroll_worker",
+        lambda: (_ for _ in ()).throw(RuntimeError("thread unavailable")),
+    )
+
+    response = client.post("/api/enroll/courses", json={"confirmed_phase": True})
+
+    assert response.status_code == 500
+    assert response.json()["error_code"] == "ENROLL_WORKER_START_FAILED"
+    assert db.get_courses_by_status(database.STATUS_NOT_STARTED)[0]["id"] == "c1"
+
+
+def test_pause_and_resume_enrollment_api(monkeypatch):
+    monkeypatch.setattr(config, "token", "token")
+    monkeypatch.setattr(config, "combined_cookie", "cookie")
+    monkeypatch.setattr(config, "student_id", "2024110122")
+    monkeypatch.setattr(config, "elective_batch_code", "batch")
+    monkeypatch.setattr(config, "elective_batch_name", "正选")
+    monkeypatch.setattr(app, "refresh_elective_batch", lambda *_args: "正选")
+
+    assert enroll_service.reserve_enroll_task()
+    try:
+        paused = client.post("/api/enroll/pause")
+        assert paused.status_code == 200
+        assert paused.json()["progress"]["paused"] is True
+
+        resumed = client.post("/api/enroll/resume")
+        assert resumed.status_code == 200
+        assert resumed.json()["progress"]["paused"] is False
+    finally:
+        enroll_service._release_enroll_task()
+
+
+def test_resume_keeps_task_paused_when_school_phase_is_no_longer_automatic(monkeypatch):
+    monkeypatch.setattr(config, "token", "token")
+    monkeypatch.setattr(config, "combined_cookie", "cookie")
+    monkeypatch.setattr(config, "student_id", "2024110122")
+    monkeypatch.setattr(config, "elective_batch_code", "batch")
+    monkeypatch.setattr(config, "elective_batch_name", "正选")
+
+    def refresh_to_preselection(*_args):
+        config.elective_batch_code = "new-batch"
+        config.elective_batch_name = "预选阶段"
+        return config.elective_batch_name
+
+    monkeypatch.setattr(app, "refresh_elective_batch", refresh_to_preselection)
+
+    assert enroll_service.reserve_enroll_task()
+    try:
+        assert client.post("/api/enroll/pause").status_code == 200
+        response = client.post("/api/enroll/resume")
+
+        assert response.status_code == 409
+        assert response.json()["error_code"] == "PHASE_NOT_ALLOWED"
+        assert enroll_service.get_enroll_task_state()["paused"] is True
+    finally:
+        enroll_service._release_enroll_task()
+
+
+def test_resume_requires_restored_school_login(monkeypatch):
+    monkeypatch.setattr(config, "token", "")
+    monkeypatch.setattr(config, "combined_cookie", "")
+    monkeypatch.setattr(config, "student_id", "2024110122")
+
+    assert enroll_service.reserve_enroll_task()
+    try:
+        assert client.post("/api/enroll/pause").status_code == 200
+        response = client.post("/api/enroll/resume")
+        assert response.status_code == 409
+        assert response.json()["error_code"] == "LOGIN_REQUIRED_FOR_RESUME"
+    finally:
+        enroll_service._release_enroll_task()
+
+
+def test_failed_cart_course_can_be_requeued(tmp_path, monkeypatch):
+    db = DatabaseManager(str(tmp_path / "retry-course.db"))
+    monkeypatch.setattr(cart_service, "db", db)
+    course = type("Course", (), {"id": "retry-1", "type": "FANKC", "name": "重试课程"})()
+    assert cart_service.add_course(course)["success"]
+    assert cart_service.update_status(course.id, database.STATUS_FAILED)
+
+    response = client.post("/api/courses/retry?id=retry-1")
+
+    assert response.status_code == 200
+    assert response.json()["is_error"] is False
+    assert db.get_courses_by_status(database.STATUS_NOT_STARTED)[0]["id"] == "retry-1"
+
+
+def test_failed_cart_course_can_be_removed_after_task_finishes(tmp_path, monkeypatch):
+    db = DatabaseManager(str(tmp_path / "remove-failed.db"))
+    monkeypatch.setattr(cart_service, "db", db)
+    course = type(
+        "Course",
+        (),
+        {"id": "failed-1", "type": "FANKC", "name": "已停止课程"},
+    )()
+    assert cart_service.add_course(course)["success"]
+    assert cart_service.update_status(course.id, database.STATUS_FAILED)
+    enroll_service._reset_progress([course])
+    enroll_service._update_course_progress(course.id, status=database.STATUS_FAILED)
+
+    try:
+        response = client.post("/api/courses/delete?id=failed-1")
+
+        assert response.status_code == 200
+        assert response.json()["is_error"] is False
+        assert response.json()["progress"]["courses"] == []
+        assert db.get_courses_by_status("") == []
+    finally:
+        enroll_service._set_progress_finished()
+
+
+def test_delete_api_waits_for_safe_pause_boundary(tmp_path, monkeypatch):
+    db = DatabaseManager(str(tmp_path / "remove-paused-api.db"))
+    monkeypatch.setattr(cart_service, "db", db)
+    course = type(
+        "Course",
+        (),
+        {"id": "paused-1", "type": "FANKC", "name": "暂停课程"},
+    )()
+    assert cart_service.add_course(course)["success"]
+    assert cart_service.update_status(course.id, database.STATUS_IN_PROGRESS)
+    enroll_service._reset_progress([course])
+
+    assert enroll_service.reserve_enroll_task()
+    waiter = None
+    try:
+        assert enroll_service.pause_enroll_task()[0]
+        blocked = client.post("/api/courses/delete?id=paused-1")
+        assert blocked.status_code == 409
+        assert blocked.json()["error_code"] == "ENROLL_TASK_PAUSE_PENDING"
+
+        waiter = threading.Thread(target=enroll_service._wait_until_resumed)
+        waiter.start()
+        deadline = time.monotonic() + 2
+        while (
+            not enroll_service.get_enroll_task_state()["pause_acknowledged"]
+            and time.monotonic() < deadline
+        ):
+            time.sleep(0.01)
+
+        removed = client.post("/api/courses/delete?id=paused-1")
+        assert removed.status_code == 200
+        assert removed.json()["task_stopping"] is True
+        assert removed.json()["progress"]["courses"] == []
+        assert db.get_courses_by_status("") == []
+    finally:
+        enroll_service._release_enroll_task()
+        enroll_service._set_progress_finished()
+        if waiter is not None:
+            waiter.join(timeout=2)

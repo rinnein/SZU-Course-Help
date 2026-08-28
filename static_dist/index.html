@@ -6,7 +6,7 @@
   <meta name="color-scheme" content="light">
   <title>抢课工作台 | 深大抢课助手</title>
   <link rel="icon" href="/favicon.ico">
-  <link rel="stylesheet" href="/styles.css?build=20260717.1">
+  <link rel="stylesheet" href="/styles.css?build=20260828.2">
 </head>
 <body class="app-page">
   <header class="topbar">
@@ -60,6 +60,17 @@
         </div>
       </section>
 
+      <section id="sessionRecoveryBanner" class="session-recovery-banner" hidden aria-live="assertive" aria-busy="false">
+        <div class="recovery-copy">
+          <span class="recovery-spinner" aria-hidden="true"></span>
+          <div>
+            <strong id="recoveryTitle">正在自动重新登录</strong>
+            <p id="recoveryDetail">学校会话已过期，正在使用 OCR 获取并识别新验证码。</p>
+          </div>
+        </div>
+        <a id="recoveryLoginLink" class="button button-secondary" href="/login" hidden>前往手动登录</a>
+      </section>
+
       <header class="course-toolbar">
         <div>
           <p id="courseTypeCode" class="eyebrow">TJKC</p>
@@ -96,11 +107,18 @@
     <div id="cartList" class="cart-list"></div>
     <section id="enrollProgress" class="enroll-progress" hidden>
       <div class="progress-head">
-        <strong>实时抢课进度</strong>
+        <div class="progress-title">
+          <strong>实时抢课进度</strong>
+          <span id="progressState" class="status-pill status-neutral">等待启动</span>
+        </div>
         <span id="progressCounts" class="progress-counts">0 / 0</span>
       </div>
       <div class="progress-bar"><i id="progressBarFill"></i></div>
       <div id="progressRows" class="progress-rows"></div>
+      <div class="progress-controls">
+        <p id="progressNotice">任务运行时可随时暂停，继续后会保留当前课程和尝试次数。</p>
+        <button id="taskControlButton" class="button button-secondary" type="button" hidden>暂停任务</button>
+      </div>
     </section>
     <div class="dialog-footer">
       <p id="cartHint">满员课程可以加入清单；冲突课程不能加入。</p>
@@ -163,6 +181,6 @@
   </dialog>
 
   <div id="toastRegion" class="toast-region" aria-live="polite" aria-atomic="true"></div>
-  <script src="/course-app.js?build=20260717.1" defer></script>
+  <script src="/course-app.js?build=20260828.2" defer></script>
 </body>
 </html>

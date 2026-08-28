@@ -17,9 +17,11 @@ PREVIEW_PORT = int(os.getenv("COURSE_SELECT_PREVIEW_PORT", "8001"))
 PREVIEW_LOGGED_OUT = os.getenv("COURSE_SELECT_PREVIEW_LOGGED_OUT", "").strip() == "1"
 PREVIEW_PHASE = os.getenv("COURSE_SELECT_PREVIEW_PHASE", "preselection").strip().lower()
 PREVIEW_CAPTCHA = os.getenv("COURSE_SELECT_PREVIEW_CAPTCHA", "ready").strip().lower()
+PREVIEW_TASK = os.getenv("COURSE_SELECT_PREVIEW_TASK", "none").strip().lower()
 
 import app  # noqa: E402
 import config  # noqa: E402
+import database  # noqa: E402
 
 if PREVIEW_LOGGED_OUT:
     config.student_id = ""
@@ -213,6 +215,128 @@ def fake_get_enrolled_courses():
 
 
 app.get_enrolled_courses = fake_get_enrolled_courses
+
+
+_preview_task_state = {
+    "running": PREVIEW_TASK in {"running", "paused", "relogin"},
+    "paused": PREVIEW_TASK == "paused",
+    "pause_acknowledged": PREVIEW_TASK == "paused",
+    "pause_reason": (
+        "学校提示“当前时间不在选课开放时间范围内”，任务已自动暂停；开放后可点击继续"
+        if PREVIEW_TASK == "paused"
+        else ""
+    ),
+    "pause_source": "school_window" if PREVIEW_TASK == "paused" else "",
+    "paused_at": "2026-08-28T14:28:25+08:00" if PREVIEW_TASK == "paused" else "",
+    "stopping": False,
+    "stopping_reason": "",
+}
+_original_get_session_snapshot = app.get_session_snapshot
+
+
+def fake_get_session_snapshot():
+    snapshot = _original_get_session_snapshot()
+    if PREVIEW_TASK == "relogin":
+        snapshot.update(
+            {
+                "relogin_in_progress": True,
+                "relogin_status": "running",
+                "relogin_message": "正在使用 OCR 自动重新登录，最多识别 50 张验证码",
+                "relogin_started_at": "2026-08-28T14:31:08+08:00",
+                "relogin_finished_at": "",
+                "relogin_max_attempts": 50,
+            }
+        )
+    return snapshot
+
+
+def fake_get_enroll_task_state():
+    return dict(_preview_task_state)
+
+
+def fake_get_enroll_progress():
+    running = bool(_preview_task_state["running"])
+    paused = bool(_preview_task_state["paused"])
+    message = (
+        "等待学校恢复会话，课程和进度均已保留"
+        if PREVIEW_TASK == "relogin"
+        else "课容量已满，继续尝试"
+    )
+    if paused:
+        message = str(_preview_task_state["pause_reason"])
+    return {
+        **_preview_task_state,
+        "started_at": "2026-08-28T14:28:24+08:00",
+        "finished_at": None if running else "2026-08-28T14:29:00+08:00",
+        "courses": [
+            {
+                "id": "PREVIEW-TASK-01",
+                "name": "计算机安全导论（林老师）",
+                "type": "FANKC",
+                "status": "ENROLLING" if running else "PENDING",
+                "attempts": 37,
+                "message": message,
+            }
+        ],
+        "events": [
+            {
+                "ts": "2026-08-28T14:31:08+08:00",
+                "level": "warn" if PREVIEW_TASK in {"paused", "relogin"} else "info",
+                "message": message,
+            }
+        ],
+        "counts": {
+            "total": 1,
+            "success": 0,
+            "failed": 0,
+            "active": 1,
+        },
+    }
+
+
+def fake_pause_enroll_task(*_args, **_kwargs):
+    if not _preview_task_state["running"]:
+        return False, "当前没有正在运行的抢课任务"
+    _preview_task_state.update(
+        {
+            "paused": True,
+            "pause_acknowledged": True,
+            "pause_reason": "用户已暂停抢课任务",
+            "pause_source": "user",
+            "paused_at": "2026-08-28T14:32:00+08:00",
+        }
+    )
+    return True, "用户已暂停抢课任务"
+
+
+def fake_resume_enroll_task():
+    if not _preview_task_state["running"]:
+        return False, "当前没有可继续的抢课任务"
+    _preview_task_state.update(
+        {
+            "paused": False,
+            "pause_acknowledged": False,
+            "pause_reason": "",
+            "pause_source": "",
+            "paused_at": "",
+        }
+    )
+    return True, "抢课任务已继续"
+
+
+if PREVIEW_TASK != "none":
+    preview_course = app.CartCourse(
+        id="PREVIEW-TASK-01",
+        type="FANKC",
+        name="计算机安全导论（林老师）",
+    )
+    app.cart_service.add_course(preview_course)
+    app.cart_service.update_status(preview_course.id, database.STATUS_IN_PROGRESS)
+    app.get_session_snapshot = fake_get_session_snapshot
+    app.get_enroll_task_state = fake_get_enroll_task_state
+    app.get_enroll_progress = fake_get_enroll_progress
+    app.pause_enroll_task = fake_pause_enroll_task
+    app.resume_enroll_task = fake_resume_enroll_task
 
 
 if __name__ == "__main__":

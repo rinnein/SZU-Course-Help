@@ -216,6 +216,11 @@ def test_automatic_relogin_updates_runtime_state(monkeypatch):
     success, error = auth_service.attempt_automatic_relogin(max_attempts=1)
     assert success and error == ""
     assert config.combined_cookie == "JSESSIONID=s; route=a"
+    snapshot = auth_service.get_session_snapshot()
+    assert snapshot["relogin_status"] == "success"
+    assert snapshot["relogin_in_progress"] is False
+    assert snapshot["relogin_max_attempts"] == 1
+    assert "password" not in snapshot
 
 
 def test_failed_automatic_relogin_invalidates_school_session(monkeypatch):
@@ -237,3 +242,106 @@ def test_failed_automatic_relogin_invalidates_school_session(monkeypatch):
     assert config.combined_cookie == ""
     assert config.student_id == "2024110122"
     assert config.password == "secret"
+    snapshot = auth_service.get_session_snapshot()
+    assert snapshot["relogin_status"] == "failed"
+    assert snapshot["relogin_in_progress"] is False
+    assert "ocr failed" in snapshot["relogin_message"]
+
+
+def test_automatic_relogin_exposes_running_state(monkeypatch):
+    monkeypatch.setattr(config, "student_id", "2024110122")
+    monkeypatch.setattr(config, "password", "secret")
+    observed = []
+
+    def inspect_running_state(max_attempts=config.ocr_relogin_max_attempts):
+        observed.append(auth_service.get_session_snapshot())
+        raise RuntimeError("simulated OCR failure")
+
+    monkeypatch.setattr(auth_service, "attempt_ocr_relogin", inspect_running_state)
+
+    success, _ = auth_service.attempt_automatic_relogin(max_attempts=7)
+
+    assert success is False
+    assert observed[0]["relogin_in_progress"] is True
+    assert observed[0]["relogin_status"] == "running"
+    assert observed[0]["relogin_max_attempts"] == 7
+
+
+def test_manual_login_wins_over_in_flight_automatic_relogin(monkeypatch):
+    monkeypatch.setattr(config, "student_id", "2024110122")
+    monkeypatch.setattr(config, "password", "old-secret")
+    monkeypatch.setattr(config, "token", "expired-token")
+    monkeypatch.setattr(config, "combined_cookie", "expired-cookie")
+    monkeypatch.setattr(
+        auth_service,
+        "attempt_ocr_relogin",
+        lambda max_attempts=config.ocr_relogin_max_attempts: (
+            "vtoken",
+            "route=automatic",
+            "encrypted",
+            "1-2,3-4,5-6,7-8",
+        ),
+    )
+
+    def finish_manual_login(*_args):
+        auth_service.save_login_state(
+            "JSESSIONID=manual",
+            "route=manual",
+            "2024110122",
+            "new-secret",
+            "manual-token",
+        )
+        return {
+            "success": True,
+            "cookie": "JSESSIONID=automatic",
+            "token": "automatic-token",
+        }
+
+    monkeypatch.setattr(auth_service, "perform_school_login", finish_manual_login)
+
+    success, error = auth_service.attempt_automatic_relogin(max_attempts=1)
+
+    assert success and error == ""
+    assert config.token == "manual-token"
+    assert config.combined_cookie == "JSESSIONID=manual; route=manual"
+    assert config.password == "new-secret"
+    assert auth_service.get_session_snapshot()["relogin_status"] == "success"
+
+
+def test_batch_refresh_failure_keeps_restored_school_session(monkeypatch):
+    monkeypatch.setattr(config, "student_id", "2024110122")
+    monkeypatch.setattr(config, "password", "secret")
+    monkeypatch.setattr(
+        auth_service,
+        "attempt_ocr_relogin",
+        lambda max_attempts=config.ocr_relogin_max_attempts: (
+            "vtoken",
+            "route=a",
+            "encrypted",
+            "1-2,3-4,5-6,7-8",
+        ),
+    )
+    monkeypatch.setattr(
+        auth_service,
+        "perform_school_login",
+        lambda *_args: {
+            "success": True,
+            "cookie": "JSESSIONID=restored",
+            "token": "restored-token",
+        },
+    )
+    monkeypatch.setattr(
+        auth_service,
+        "refresh_elective_batch",
+        lambda *_args: (_ for _ in ()).throw(requests.Timeout("batch timeout")),
+    )
+
+    success, error = auth_service.attempt_automatic_relogin(max_attempts=1)
+
+    assert success and error == ""
+    assert config.token == "restored-token"
+    assert config.combined_cookie == "JSESSIONID=restored; route=a"
+    snapshot = auth_service.get_session_snapshot()
+    assert snapshot["logged_in"] is True
+    assert snapshot["relogin_status"] == "success"
+    assert "批次暂未刷新" in snapshot["relogin_message"]

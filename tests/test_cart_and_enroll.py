@@ -65,6 +65,6 @@ def test_grab_courses_uses_existing_request_function_and_marks_success(tmp_path,
     monkeypatch.setattr(config, "count", 1)
     monkeypatch.setattr(config, "delay", 0)
 
-    assert enroll_service.grab_courses([course])
+    assert enroll_service.grab_courses([course]) == enroll_service.GrabOutcome.COMPLETED
     assert calls == [("class-1", "FANKC")]
     assert db.get_courses_by_status(database.STATUS_SUCCESS)[0]["id"] == "class-1"

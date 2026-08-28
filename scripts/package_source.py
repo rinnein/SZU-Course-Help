@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import subprocess
 import tomllib
 import zipfile
@@ -16,14 +15,6 @@ DEFAULT_RELEASE_DIR = ROOT / "release"
 def project_version() -> str:
     with (ROOT / "pyproject.toml").open("rb") as handle:
         return str(tomllib.load(handle)["project"]["version"])
-
-
-def sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for block in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(block)
-    return digest.hexdigest()
 
 
 def source_files() -> list[Path]:
@@ -61,15 +52,8 @@ def main() -> None:
         for path in files:
             archive.write(path, (Path(root_name) / path.relative_to(ROOT)).as_posix())
 
-    checksum = sha256(archive_path)
-    archive_path.with_suffix(".zip.sha256").write_text(
-        f"{checksum}  {archive_path.name}\n",
-        encoding="ascii",
-        newline="\n",
-    )
     print(f"Source archive: {archive_path}")
     print(f"Files: {len(files)}")
-    print(f"SHA256: {checksum}")
 
 
 if __name__ == "__main__":
