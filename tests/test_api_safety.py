@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import threading
 import time
 
@@ -17,9 +18,31 @@ from services import cart_service, enroll_service
 client = TestClient(app.app)
 
 
-def test_runtime_uses_lifespan_context():
-    assert app.app.router.lifespan_context is app.app_lifespan
-    assert app.app.router.on_startup == []
+def test_runtime_registers_startup_and_shutdown_hooks():
+    assert any(
+        handler.__name__ == "startup_runtime_services"
+        for handler in app.app.router.on_startup
+    )
+    assert any(
+        handler.__name__ == "shutdown_runtime_services"
+        for handler in app.app.router.on_shutdown
+    )
+
+
+def test_startup_hook_restores_persisted_session(monkeypatch):
+    restored = []
+    monkeypatch.setattr(app, "_runtime_started", False)
+    monkeypatch.setattr(
+        app,
+        "restore_login_state",
+        lambda: restored.append("restore") or "2024110122",
+    )
+    monkeypatch.setattr(app, "_keep_alive_loop", lambda: None)
+
+    asyncio.run(app.startup_runtime_services())
+
+    assert restored == ["restore"]
+    assert app._runtime_started is True
 
 
 def set_logged_session(monkeypatch, *, batch_code="batch", batch_name="预选阶段"):
@@ -32,13 +55,13 @@ def set_logged_session(monkeypatch, *, batch_code="batch", batch_name="预选阶
 
 def test_health_and_static_login_page():
     assert client.get("/api/health").status_code == 200
-    assert app.get_login_url().endswith(f"/login?ui={app.UI_CACHE_TOKEN}")
-    response = client.get(f"/login?ui={app.UI_CACHE_TOKEN}")
+    assert app.get_login_url() == f"{app.get_server_url()}/login"
+    response = client.get("/login")
     assert response.status_code == 200
     assert "进入抢课工作台" in response.text
 
     bootstrap = client.get("/api/bootstrap").json()
-    assert bootstrap["ui_cache_token"] == app.UI_CACHE_TOKEN
+    assert "ui_cache_token" not in bootstrap
     assert bootstrap["ui_asset_build"] == app.UI_ASSET_BUILD
 
 

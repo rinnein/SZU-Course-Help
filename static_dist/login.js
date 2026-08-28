@@ -124,7 +124,6 @@ const loginState = {
   loadingCaptcha: false,
   solvingCaptcha: false,
   submitting: false,
-  uiCacheToken: "",
   backend: "auto",
   webvpnAuthTimer: 0,
   webvpnAuthRequested: false,
@@ -288,13 +287,23 @@ async function solveCaptcha() {
   }
 }
 
-function versionedPage(path) {
-  const queryToken = new URLSearchParams(window.location.search).get("ui") || "";
-  const token = loginState.uiCacheToken || queryToken;
-  if (!token) return path;
+function cleanPagePath(path) {
   const url = new URL(path, window.location.origin);
-  url.searchParams.set("ui", token);
-  return `${url.pathname}${url.search}`;
+  url.searchParams.delete("ui");
+  return `${url.pathname}${url.search}${url.hash}`;
+}
+
+function stripUiQuery() {
+  if (!window.history?.replaceState || !window.location?.href) return;
+  const url = new URL(window.location.href);
+  if (!url.searchParams.has("ui")) return;
+  url.searchParams.delete("ui");
+  const search = url.searchParams.toString();
+  window.history.replaceState(
+    null,
+    "",
+    `${url.pathname}${search ? `?${search}` : ""}${url.hash}`,
+  );
 }
 
 async function readJson(response) {
@@ -645,7 +654,7 @@ async function submitLogin(event) {
       clearSavedCredentials();
     }
     setLoginMessage(result.message || "登录成功", true);
-    window.location.assign(versionedPage("/"));
+    window.location.assign(cleanPagePath("/"));
   } catch (error) {
     const failureMessage = error instanceof Error ? error.message : "登录失败";
     const refreshed = await loadCaptcha();
@@ -663,18 +672,18 @@ async function submitLogin(event) {
 }
 
 async function initializeLogin() {
+  stripUiQuery();
   setCaptchaStatus("idle");
   try {
     const [bootstrap, session] = await Promise.all([
       requestJson("/api/bootstrap"),
       requestJson("/api/session"),
     ]);
-    loginState.uiCacheToken = bootstrap.ui_cache_token || "";
     setBackendPresentation(bootstrap);
     const radio = document.querySelector(`input[name='backend'][value='${bootstrap.preference || "auto"}']`);
     if (radio) radio.checked = true;
     if (session.logged_in) {
-      window.location.replace(versionedPage("/"));
+      window.location.replace(cleanPagePath("/"));
       return;
     }
     loginElements.studentId.value = bootstrap.student_id || "";

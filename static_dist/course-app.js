@@ -153,13 +153,23 @@ class SessionExpiredError extends ApiError {
   }
 }
 
-function versionedPage(path) {
-  const queryToken = new URLSearchParams(window.location.search).get("ui") || "";
-  const token = queryToken || appState.session?.ui_cache_token || "";
-  if (!token) return path;
+function cleanPagePath(path) {
   const url = new URL(path, window.location.origin);
-  url.searchParams.set("ui", token);
-  return `${url.pathname}${url.search}`;
+  url.searchParams.delete("ui");
+  return `${url.pathname}${url.search}${url.hash}`;
+}
+
+function stripUiQuery() {
+  if (!window.history?.replaceState || !window.location?.href) return;
+  const url = new URL(window.location.href);
+  if (!url.searchParams.has("ui")) return;
+  url.searchParams.delete("ui");
+  const search = url.searchParams.toString();
+  window.history.replaceState(
+    null,
+    "",
+    `${url.pathname}${search ? `?${search}` : ""}${url.hash}`,
+  );
 }
 
 function isAbortError(error) {
@@ -404,7 +414,7 @@ function showToast(message, error = false, success = false) {
 
 function showSessionDialog(message) {
   appElements.sessionMessage.textContent = message;
-  appElements.sessionLoginLink.href = versionedPage("/login");
+  appElements.sessionLoginLink.href = cleanPagePath("/login");
   if (!appElements.sessionDialog.open) appElements.sessionDialog.showModal();
 }
 
@@ -422,7 +432,7 @@ function renderSessionRecovery(session, previousStatus = "idle") {
   const taskPaused = Boolean(session?.task_paused);
   const taskRunning = Boolean(session?.task_running);
   const finishedAt = String(session?.relogin_finished_at || "success");
-  appElements.recoveryLoginLink.href = versionedPage("/login");
+  appElements.recoveryLoginLink.href = cleanPagePath("/login");
 
   if (status === "idle") {
     hideRecoveryBanner();
@@ -2267,7 +2277,7 @@ appElements.logout.addEventListener("click", async () => {
     if (result.is_error) throw new Error(result.message);
     stopProgressPolling();
     stopSessionPolling();
-    window.location.assign(versionedPage("/login"));
+    window.location.assign(cleanPagePath("/login"));
   } catch (error) {
     if (!(error instanceof SessionExpiredError)) showToast(error.message, true);
   }
@@ -2291,10 +2301,11 @@ for (const closeButton of document.querySelectorAll("[data-close-dialog]")) {
 }
 
 async function initializeApp() {
+  stripUiQuery();
   await loadSession(true);
   startSessionPolling();
-  appElements.brandLink.href = versionedPage("/");
-  appElements.sessionLoginLink.href = versionedPage("/login");
+  appElements.brandLink.href = cleanPagePath("/");
+  appElements.sessionLoginLink.href = cleanPagePath("/login");
   await loadCart();
   if (appState.session?.logged_in) await loadCourses();
   else renderState("尚未登录", "返回登录页完成学号、密码、卡密和验证码校验。");
