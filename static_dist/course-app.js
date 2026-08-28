@@ -6,8 +6,8 @@ const FILTER_PAGE_SIZE = 10;
 const MAX_CATALOG_PAGES = 1000;
 const CATALOG_PAGE_DELAY_MS = 150;
 const SEARCH_DEBOUNCE_MS = 250;
-const TIMETABLE_MIN_ROW_HEIGHT = 64;
 const SESSION_POLL_INTERVAL_MS = 5000;
+const FILTER_PREFERENCES_KEY = "szu-course-help.course-filters.v1";
 
 const categoryNames = {
   TJKC: "本班推荐",
@@ -39,6 +39,10 @@ const appState = {
   catalogLoadingType: "",
   catalogRequestController: null,
   catalogRequestId: 0,
+  filters: {
+    hideConflict: false,
+    hideFull: false,
+  },
   cart: [],
   session: null,
   loadingCourses: false,
@@ -57,9 +61,7 @@ const appState = {
   loadingMyCourses: false,
   myCoursesView: "grid",
   showCartOnSchedule: true,
-  timetable: null,
-  timetableFitFrame: null,
-  timetableResizeTimer: null,
+  scheduleConflict: null,
   switchingCampus: false,
   progress: null,
   progressTimer: null,
@@ -89,6 +91,8 @@ const appElements = {
   courseTitle: document.querySelector("#courseTitle"),
   courseSummary: document.querySelector("#courseSummary"),
   courseSearch: document.querySelector("#courseSearch"),
+  filterConflictSwitch: document.querySelector("#filterConflictSwitch"),
+  filterFullSwitch: document.querySelector("#filterFullSwitch"),
   refreshCourses: document.querySelector("#refreshCourses"),
   campusSelect: document.querySelector("#campusSelect"),
   courseList: document.querySelector("#courseList"),
@@ -121,12 +125,6 @@ const appElements = {
   scheduleViewGrid: document.querySelector("#scheduleViewGrid"),
   scheduleViewList: document.querySelector("#scheduleViewList"),
   showPendingSwitch: document.querySelector("#showPendingSwitch"),
-  openTimetable: document.querySelector("#openTimetable"),
-  timetableDialog: document.querySelector("#timetableDialog"),
-  timetableContent: document.querySelector("#timetableContent"),
-  timetableSummary: document.querySelector("#timetableSummary"),
-  timetableHint: document.querySelector("#timetableHint"),
-  refreshTimetable: document.querySelector("#refreshTimetable"),
   enrollProgress: document.querySelector("#enrollProgress"),
   progressCounts: document.querySelector("#progressCounts"),
   progressBarFill: document.querySelector("#progressBarFill"),
@@ -183,6 +181,58 @@ function element(tag, className = "", text = "") {
   if (className) node.className = className;
   if (text !== "") node.textContent = text;
   return node;
+}
+
+function numericValue(value, fallback = 0) {
+  const number = Number(String(value ?? "").replace(/,/g, "").trim());
+  return Number.isFinite(number) ? number : fallback;
+}
+
+function classIsFull(classInfo) {
+  if (String(classInfo.is_full || "") === "1") return true;
+  const selected = numericValue(classInfo.number_of_selected, NaN);
+  const capacity = numericValue(classInfo.class_capacity, NaN);
+  return Number.isFinite(selected) && Number.isFinite(capacity) && selected >= capacity;
+}
+
+function classIsSelected(classInfo) {
+  return String(classInfo.is_choose || "") === "1" || classInfo.is_choose === true;
+}
+
+function classHasConflict(classInfo) {
+  return String(classInfo.is_conflict || "") === "1"
+    || classInfo.is_conflict === true
+    || String(classInfo.conflict || "") === "1";
+}
+
+function readFilterPreferences() {
+  try {
+    const saved = JSON.parse(window.localStorage?.getItem(FILTER_PREFERENCES_KEY) || "null");
+    return {
+      hideConflict: saved?.hideConflict === true,
+      hideFull: saved?.hideFull === true,
+    };
+  } catch {
+    return { hideConflict: false, hideFull: false };
+  }
+}
+
+function saveFilterPreferences() {
+  try {
+    window.localStorage?.setItem(FILTER_PREFERENCES_KEY, JSON.stringify(appState.filters));
+  } catch {
+    // Private browsing or a full storage quota should not break filtering.
+  }
+}
+
+function visibleTeachingClasses(course) {
+  const classes = Array.isArray(course.tcList) ? course.tcList : [];
+  return classes.filter((classInfo) => {
+    if (classIsSelected(classInfo)) return true;
+    if (appState.filters.hideConflict && classHasConflict(classInfo)) return false;
+    if (appState.filters.hideFull && classIsFull(classInfo)) return false;
+    return true;
+  });
 }
 
 function campusOptions(session = appState.session) {
@@ -703,9 +753,9 @@ async function loadSession(showDialog = true, refreshOnCatalogChange = true) {
 }
 
 function classTag(classInfo) {
-  if (String(classInfo.is_choose) === "1") return ["已选", "tag-chosen"];
-  if (String(classInfo.is_conflict) === "1") return ["时间冲突", "tag-conflict"];
-  if (String(classInfo.is_full) === "1") return ["已满", "tag-full"];
+  if (classIsSelected(classInfo)) return ["已选", "tag-chosen"];
+  if (classHasConflict(classInfo)) return ["时间冲突", "tag-conflict"];
+  if (classIsFull(classInfo)) return ["已满", "tag-full"];
   return ["可加入", "tag-open"];
 }
 
@@ -727,13 +777,21 @@ function appendClassRow(container, course, classInfo) {
 
   const actions = element("div", "class-actions");
   const [tagText, tagClass] = classTag(classInfo);
-  actions.append(element("span", `class-tag ${tagClass}`, tagText));
+  const statusTag = classHasConflict(classInfo) && !classIsSelected(classInfo)
+    ? element("button", `class-tag ${tagClass} class-tag-button`, tagText)
+    : element("span", `class-tag ${tagClass}`, tagText);
+  if (statusTag.tagName === "BUTTON") {
+    statusTag.type = "button";
+    statusTag.title = "查看冲突课表";
+    statusTag.addEventListener("click", () => openConflictTimetable(course, classInfo));
+  }
+  actions.append(statusTag);
 
-  const blocked = String(classInfo.is_choose) === "1" || String(classInfo.is_conflict) === "1";
+  const blocked = classIsSelected(classInfo) || classHasConflict(classInfo);
   const addButton = element(
     "button",
     "button button-secondary",
-    blocked ? (String(classInfo.is_choose) === "1" ? "已选" : "不可加入") : (String(classInfo.is_full) === "1" ? "加入候补" : "加入清单"),
+    blocked ? (classIsSelected(classInfo) ? "已选" : "不可加入") : (classIsFull(classInfo) ? "加入候补" : "加入清单"),
   );
   addButton.type = "button";
   addButton.disabled = blocked || Boolean(appState.session?.task_running);
@@ -775,7 +833,7 @@ function isFilterActive() {
 }
 
 function courseMatchesKeyword(course, keyword) {
-  const teachingText = (course.tcList || [])
+  const teachingText = visibleTeachingClasses(course)
     .map((item) => `${item.teacher_name || ""} ${item.teaching_place || ""}`)
     .join(" ");
   return `${course.course_name || ""} ${course.course_number || ""} ${course.department_name || ""} ${teachingText}`
@@ -783,10 +841,13 @@ function courseMatchesKeyword(course, keyword) {
     .includes(keyword);
 }
 
+appState.filters = readFilterPreferences();
+
 function renderCourseList(courses) {
   const fragment = document.createDocumentFragment();
   courses.forEach((course, index) => {
-    const details = element("details", "course-group");
+    const selected = (course.tcList || []).some((classInfo) => classIsSelected(classInfo));
+    const details = element("details", `course-group${selected ? " is-selected" : ""}`);
     details.style.animationDelay = `${Math.min(index, 8) * 40}ms`;
     const summary = element("summary");
     const main = element("div", "course-summary-main");
@@ -795,21 +856,30 @@ function renderCourseList(courses) {
       element(
         "span",
         "",
-        [course.course_number, course.department_name, course.campus_name, course.sport_name]
+        [
+          course.course_number,
+          course.course_type_name,
+          course.course_nature_name,
+          course.department_name,
+          course.credit ? `${course.credit} 学分` : "",
+        ]
           .filter(Boolean)
           .join(" · ") || "课程信息待定",
       ),
     );
     const side = element("div", "course-summary-side");
-    side.append(element("span", "", `${(course.tcList || []).length} 个教学班`));
+    const visibleClasses = visibleTeachingClasses(course);
+    side.append(element("span", "", `${visibleClasses.length} / ${(course.tcList || []).length} 个教学班`));
     side.append(element("i", "course-chevron"));
     summary.append(main, side);
 
     const classes = element("div", "class-list");
     if (!(course.tcList || []).length) {
       classes.append(element("div", "empty-state", "暂无教学班"));
+    } else if (!visibleClasses.length) {
+      classes.append(element("div", "filtered-empty", "当前筛选条件下没有符合条件的教学班"));
     } else {
-      for (const classInfo of course.tcList) appendClassRow(classes, course, classInfo);
+      for (const classInfo of visibleClasses) appendClassRow(classes, course, classInfo);
     }
     details.append(summary, classes);
     fragment.append(details);
@@ -1452,7 +1522,7 @@ function buildScheduleColorMap(courses) {
  * and split them into placed (on the standard 14-period grid) and
  * unplaced (go to the right-side non-standard list).
  */
-function collectScheduleEntries(courseLike, color, pending, placedSlots, unplaced) {
+function collectScheduleEntries(courseLike, color, pending, placedSlots, unplaced, state = {}) {
   const slots = parseScheduleSlots(courseLike.teaching_place || "");
   let hasPlaced = false;
   for (const slot of slots) {
@@ -1461,7 +1531,7 @@ function collectScheduleEntries(courseLike, color, pending, placedSlots, unplace
       slot.startPeriod >= 1 && slot.endPeriod <= MAX_PERIOD &&
       slot.startPeriod <= slot.endPeriod;
     if (ok) {
-      placedSlots.push({ course: courseLike, slot, color, pending });
+      placedSlots.push({ course: courseLike, slot, color, pending, ...state });
       hasPlaced = true;
     }
   }
@@ -1470,6 +1540,7 @@ function collectScheduleEntries(courseLike, color, pending, placedSlots, unplace
       course: courseLike,
       color,
       pending,
+      ...state,
       reason: slots.length ? "时间超出标准节次" : "无时间信息",
     });
   }
@@ -1491,7 +1562,13 @@ function formatCourseTooltip(course, slot, pending) {
 }
 
 function buildCourseBlock(placed) {
-  const block = element("div", "schedule-course" + (placed.pending ? " is-pending" : ""));
+  const stateClasses = [
+    placed.pending ? "is-pending" : "",
+    placed.isFocused ? "is-focused" : "",
+    placed.isConflictHighlight ? "is-conflict-highlight" : "",
+    placed.isContextMuted ? "is-context-muted" : "",
+  ].filter(Boolean).join(" ");
+  const block = element("div", `schedule-course${stateClasses ? ` ${stateClasses}` : ""}`);
   block.setAttribute("data-color", String(placed.color));
   block.title = formatCourseTooltip(placed.course, placed.slot, placed.pending);
   const nameEl = element("strong", "", placed.course.course_name || "未命名课程");
@@ -1511,9 +1588,34 @@ function buildCourseBlock(placed) {
   return block;
 }
 
+function scheduleEntriesOverlap(left, right) {
+  return Number(left.dayOfWeek) === Number(right.dayOfWeek)
+    && Number(left.startPeriod) <= Number(right.endPeriod)
+    && Number(right.startPeriod) <= Number(left.endPeriod);
+}
+
+function isConflictFocusCourse(courseLike, conflict) {
+  const focusId = String(conflict?.focusId || "");
+  return Boolean(focusId && String(courseLike.teaching_class_id || courseLike.id || "") === focusId);
+}
+
+function updateMyCoursesHint() {
+  const conflict = appState.scheduleConflict;
+  if (conflict) {
+    appElements.myCoursesHint.textContent = conflict.focusSlots.length
+      ? `冲突查看：${conflict.title}；当前教学班使用蓝色高亮，冲突课程使用红色高亮。`
+      : `冲突查看：${conflict.title}；当前教学班的时间地点格式无法解析，暂时无法定位冲突课程。`;
+    return;
+  }
+  if (appState.myCoursesLoaded) {
+    appElements.myCoursesHint.textContent = `学校系统当前返回 ${appState.myCourses.length} 门已选课程；虚化块为选课清单中的待选课程。`;
+  }
+}
+
 function renderMyCoursesSchedule() {
   const wrap = appElements.myCoursesScheduleWrap;
   const courses = appState.myCourses;
+  const conflict = appState.scheduleConflict;
 
   /* Determine pending (cart) items to show */
   const enrolledIds = new Set(courses.map((c) => String(c.teaching_class_id || "")));
@@ -1523,7 +1625,7 @@ function renderMyCoursesSchedule() {
       )
     : [];
 
-  if (!courses.length && !pendingItems.length) {
+  if (!courses.length && !pendingItems.length && !conflict) {
     const empty = element("div", "empty-state");
     empty.append(element("strong", "", "还没有已选课程"));
     empty.append(element("p", "", "抢到课程后会显示在这里，也可能是学校系统暂未返回数据。"));
@@ -1540,7 +1642,14 @@ function renderMyCoursesSchedule() {
 
   for (const course of courses) {
     const key = (course.course_name || "未命名课程") + "|" + (course.teacher_name || "");
-    collectScheduleEntries(course, colorMap.get(key) || 0, false, placedSlots, unplaced);
+    collectScheduleEntries(
+      course,
+      colorMap.get(key) || 0,
+      false,
+      placedSlots,
+      unplaced,
+      { isFocused: isConflictFocusCourse(course, conflict) },
+    );
   }
 
   for (const item of pendingItems) {
@@ -1552,13 +1661,55 @@ function renderMyCoursesSchedule() {
       pendingColorBase += 1;
     }
     collectScheduleEntries(
-      { course_name: displayName, teacher_name: teacherName, teaching_place: item.teaching_place },
+      {
+        id: item.id,
+        teaching_class_id: item.id,
+        course_name: displayName,
+        teacher_name: teacherName,
+        teaching_place: item.teaching_place,
+      },
       colorMap.get(key),
       true,
       placedSlots,
       unplaced,
+      { isFocused: isConflictFocusCourse(item, conflict) },
     );
   }
+
+  if (conflict && !placedSlots.some((placed) => placed.isFocused)
+      && !unplaced.some((item) => item.isFocused)) {
+    if (conflict.focusSlots.length) {
+      for (const slot of conflict.focusSlots) {
+        placedSlots.push({
+          course: conflict.course,
+          slot,
+          color: 0,
+          pending: false,
+          isFocused: true,
+        });
+      }
+    } else {
+      unplaced.push({
+        course: conflict.course,
+        color: 0,
+        pending: false,
+        isFocused: true,
+        reason: "当前教学班的时间地点格式无法解析",
+      });
+    }
+  }
+
+  if (conflict) {
+    for (const placed of placedSlots) {
+      placed.isConflictHighlight = !placed.isFocused
+        && conflict.focusSlots.some((focusSlot) => scheduleEntriesOverlap(placed.slot, focusSlot));
+      placed.isContextMuted = !placed.isFocused && !placed.isConflictHighlight;
+    }
+    for (const item of unplaced) {
+      item.isContextMuted = !item.isFocused;
+    }
+  }
+  updateMyCoursesHint();
 
   /* ---- Build layout ---- */
   const container = element("div", "schedule-layout");
@@ -1637,7 +1788,16 @@ function renderMyCoursesSchedule() {
 
   if (unplaced.length) {
     for (const item of unplaced) {
-      const nsItem = element("div", "schedule-nonstandard-item" + (item.pending ? " is-pending" : ""));
+      const stateClasses = [
+        item.pending ? "is-pending" : "",
+        item.isFocused ? "is-focused" : "",
+        item.isConflictHighlight ? "is-conflict-highlight" : "",
+        item.isContextMuted ? "is-context-muted" : "",
+      ].filter(Boolean).join(" ");
+      const nsItem = element(
+        "div",
+        `schedule-nonstandard-item${stateClasses ? ` ${stateClasses}` : ""}`,
+      );
       nsItem.setAttribute("data-color", String(item.color));
       const nsTitleParts = [item.course.course_name || "未命名课程"];
       if (item.pending) nsTitleParts.push("（待选）");
@@ -1683,229 +1843,38 @@ function switchMyCoursesView(view) {
   else renderMyCourses();
 }
 
+function conflictScheduleSlots(classInfo) {
+  return (typeof parseScheduleSlots === "function" ? parseScheduleSlots(classInfo.teaching_place || "") : [])
+    .filter((slot) => (
+      slot.dayOfWeek >= 0
+      && slot.dayOfWeek <= 6
+      && slot.startPeriod >= 1
+      && slot.endPeriod <= MAX_PERIOD
+      && slot.startPeriod <= slot.endPeriod
+    ));
+}
 
-function fallbackTimetable(courses) {
-  return {
-    day_names: ["周一", "周二", "周三", "周四", "周五", "周六", "周日"],
-    period_count: 14,
-    entries: [],
-    unscheduled: courses.map((course) => ({
-      ...course,
-      reason: "当前服务尚未返回结构化课表，请重启本地程序后刷新",
-    })),
-    total_count: courses.length,
-    scheduled_count: 0,
-    unscheduled_count: courses.length,
+async function openConflictTimetable(course, classInfo) {
+  const focusId = String(classInfo.teaching_class_id || "");
+  const focusCourse = {
+    ...course,
+    id: focusId,
+    teaching_class_id: focusId,
+    teacher_name: classInfo.teacher_name || course.teacher_name || "",
+    teaching_place: classInfo.teaching_place || course.teaching_place || "",
   };
-}
-
-function timetableEntriesWithLanes(entries) {
-  const laidOut = [];
-  const appendCluster = (cluster) => {
-    if (!cluster.length) return;
-    const laneEnds = [];
-    const assigned = [];
-    for (const entry of cluster) {
-      const start = Number(entry.start_period);
-      let lane = laneEnds.findIndex((end) => end < start);
-      if (lane < 0) lane = laneEnds.length;
-      laneEnds[lane] = Number(entry.end_period);
-      assigned.push({ ...entry, lane });
-    }
-    const lanes = Math.max(1, laneEnds.length);
-    laidOut.push(...assigned.map((entry) => ({ ...entry, lanes })));
+  appState.scheduleConflict = {
+    focusId,
+    focusSlots: conflictScheduleSlots(classInfo),
+    course: focusCourse,
+    title: `${course.course_name || "未命名课程"} · ${classInfo.teacher_name || "教师待定"}`,
   };
-
-  for (let day = 1; day <= 7; day += 1) {
-    const dayEntries = entries
-      .filter((entry) => Number(entry.day) === day)
-      .sort((left, right) => (
-        Number(left.start_period) - Number(right.start_period)
-        || Number(left.end_period) - Number(right.end_period)
-      ));
-    let cluster = [];
-    let clusterEnd = 0;
-    for (const entry of dayEntries) {
-      const start = Number(entry.start_period);
-      const end = Number(entry.end_period);
-      if (cluster.length && start > clusterEnd) {
-        appendCluster(cluster);
-        cluster = [];
-      }
-      cluster.push(entry);
-      clusterEnd = cluster.length === 1 ? end : Math.max(clusterEnd, end);
-    }
-    appendCluster(cluster);
-  }
-  return laidOut;
+  appElements.myCoursesDialog.showModal();
+  switchMyCoursesView("grid");
+  await loadCart();
+  await loadMyCourses();
 }
 
-function fitTimetableRows(grid) {
-  if (!grid?.isConnected || !appElements.timetableDialog.open) return;
-  grid.style.setProperty("--timetable-row-height", `${TIMETABLE_MIN_ROW_HEIGHT}px`);
-  grid.getBoundingClientRect();
-
-  let requiredRowHeight = TIMETABLE_MIN_ROW_HEIGHT;
-  for (const block of grid.querySelectorAll(".timetable-course")) {
-    const periodSpan = Math.max(1, Number(block.dataset.periodSpan || 1));
-    requiredRowHeight = Math.max(
-      requiredRowHeight,
-      Math.ceil((block.scrollHeight + 8) / periodSpan),
-    );
-  }
-  grid.style.setProperty("--timetable-row-height", `${requiredRowHeight}px`);
-}
-
-function scheduleTimetableFit(grid) {
-  if (appState.timetableFitFrame !== null) {
-    window.cancelAnimationFrame(appState.timetableFitFrame);
-  }
-  appState.timetableFitFrame = window.requestAnimationFrame(() => {
-    appState.timetableFitFrame = null;
-    fitTimetableRows(grid);
-  });
-}
-
-function renderTimetable() {
-  const timetable = appState.timetable;
-  if (!timetable) {
-    const empty = element("div", "empty-state");
-    empty.append(element("strong", "", "尚未读取课表"));
-    empty.append(element("p", "", "点击刷新课表，从学校系统读取当前已选课程。"));
-    appElements.timetableContent.replaceChildren(empty);
-    appElements.timetableSummary.textContent = "尚未读取学校课表";
-    return;
-  }
-
-  const entries = Array.isArray(timetable.entries) ? timetable.entries : [];
-  const unscheduled = Array.isArray(timetable.unscheduled) ? timetable.unscheduled : [];
-  const totalCount = Number(timetable.total_count || appState.myCourses.length || 0);
-  const scheduledCount = Number(timetable.scheduled_count || 0);
-  appElements.timetableSummary.textContent = `${appState.session?.batch_name || "当前批次"} · ${totalCount} 门课程 · ${scheduledCount} 门已排入网格`;
-  appElements.timetableHint.textContent = unscheduled.length
-    ? `另有 ${unscheduled.length} 门课程没有可定位的具体星期与节次，已列在课表下方。`
-    : "课表来自学校系统当前已选课程，不会执行选课或退课操作。";
-
-  if (!totalCount) {
-    const empty = element("div", "empty-state");
-    empty.append(element("strong", "", "还没有已选课程"));
-    empty.append(element("p", "", "学校系统当前没有返回可放入课表的课程。"));
-    appElements.timetableContent.replaceChildren(empty);
-    return;
-  }
-
-  const content = document.createDocumentFragment();
-  const scroll = element("div", "timetable-scroll");
-  const grid = element("div", "timetable-grid");
-  grid.setAttribute("role", "grid");
-  grid.setAttribute("aria-label", "周课表，周一至周日，第 1 至 14 节");
-
-  const corner = element("div", "timetable-corner", "节次");
-  corner.style.gridColumn = "1";
-  corner.style.gridRow = "1";
-  grid.append(corner);
-
-  const dayNames = Array.isArray(timetable.day_names) && timetable.day_names.length === 7
-    ? timetable.day_names
-    : ["周一", "周二", "周三", "周四", "周五", "周六", "周日"];
-  dayNames.forEach((dayName, index) => {
-    const header = element("div", "timetable-day-header", dayName);
-    header.style.gridColumn = String(index + 2);
-    header.style.gridRow = "1";
-    grid.append(header);
-  });
-
-  const periodCount = Math.min(14, Math.max(1, Number(timetable.period_count || 14)));
-  for (let period = 1; period <= periodCount; period += 1) {
-    const periodCell = element("div", "timetable-period");
-    const group = period === 1 ? "上午" : period === 6 ? "下午" : period === 11 ? "晚上" : "";
-    if (group) periodCell.append(element("small", "", group));
-    periodCell.append(element("strong", "", String(period)));
-    periodCell.style.gridColumn = "1";
-    periodCell.style.gridRow = String(period + 1);
-    grid.append(periodCell);
-    for (let day = 1; day <= 7; day += 1) {
-      const slot = element(
-        "div",
-        `timetable-slot${day >= 6 ? " is-weekend" : ""}${period === 6 || period === 11 ? " is-section-start" : ""}`,
-      );
-      slot.style.gridColumn = String(day + 1);
-      slot.style.gridRow = String(period + 1);
-      grid.append(slot);
-    }
-  }
-
-  for (const entry of timetableEntriesWithLanes(entries)) {
-    const start = Math.max(1, Math.min(periodCount, Number(entry.start_period || 1)));
-    const end = Math.max(start, Math.min(periodCount, Number(entry.end_period || start)));
-    const block = element("article", "timetable-course");
-    block.style.gridColumn = String(Number(entry.day) + 1);
-    block.style.gridRow = `${start + 1} / span ${end - start + 1}`;
-    block.style.setProperty("--lane", String(entry.lane || 0));
-    block.style.setProperty("--lanes", String(entry.lanes || 1));
-    block.dataset.periodSpan = String(end - start + 1);
-    block.setAttribute(
-      "aria-label",
-      `${entry.course_name || "未命名课程"}，${entry.day_name || ""}第 ${start} 至 ${end} 节`,
-    );
-    block.title = entry.raw_schedule || entry.course_name || "";
-    block.append(element("strong", "", entry.course_name || "未命名课程"));
-    block.append(
-      element(
-        "span",
-        "",
-        [entry.weeks || "周次待定", `${start}-${end} 节`].filter(Boolean).join(" · "),
-      ),
-    );
-    if (entry.location) block.append(element("span", "", entry.location));
-    if (entry.teacher_name) block.append(element("span", "", entry.teacher_name));
-    grid.append(block);
-  }
-  scroll.append(grid);
-  content.append(scroll);
-
-  const unscheduledSection = element("section", "unscheduled-courses");
-  const unscheduledHeader = element("div", "unscheduled-header");
-  unscheduledHeader.append(element("h3", "", "未提供可排入课表的具体时间"));
-  unscheduledHeader.append(element("span", "", `${unscheduled.length} 门`));
-  unscheduledSection.append(unscheduledHeader);
-  if (!unscheduled.length) {
-    unscheduledSection.append(element("p", "unscheduled-empty", "所有课程均已放入课表网格。"));
-  } else {
-    const list = element("div", "unscheduled-list");
-    for (const course of unscheduled) {
-      const row = element("div", "unscheduled-row");
-      const body = element("div");
-      body.append(element("strong", "", course.course_name || "未命名课程"));
-      body.append(
-        element(
-          "span",
-          "",
-          [course.teacher_name, course.teaching_place].filter(Boolean).join(" · ") || "学校暂未提供时间地点",
-        ),
-      );
-      row.append(body, element("span", "unscheduled-reason", course.reason || "未提供具体时间"));
-      list.append(row);
-    }
-    unscheduledSection.append(list);
-  }
-  content.append(unscheduledSection);
-  appElements.timetableContent.replaceChildren(content);
-  scheduleTimetableFit(grid);
-}
-
-function renderTimetableError(message) {
-  const state = element("div", "error-state");
-  state.append(element("strong", "", "课表读取失败"));
-  state.append(element("p", "", message));
-  const actions = element("div", "state-actions");
-  const retry = element("button", "button button-primary", "重新加载课表");
-  retry.type = "button";
-  retry.addEventListener("click", () => loadMyCourses());
-  actions.append(retry);
-  state.append(actions);
-  appElements.timetableContent.replaceChildren(state);
-}
 
 async function loadMyCourses(silent = false) {
   if (appState.loadingMyCourses) return;
@@ -1916,23 +1885,16 @@ async function loadMyCourses(silent = false) {
   appState.loadingMyCourses = true;
   const preserveExisting = appState.myCoursesLoaded;
   const previousLabel = appElements.refreshMyCourses.textContent;
-  const previousTimetableLabel = appElements.refreshTimetable.textContent;
   appElements.refreshMyCourses.disabled = true;
   appElements.refreshMyCourses.textContent = "刷新中...";
-  appElements.refreshTimetable.disabled = true;
-  appElements.refreshTimetable.textContent = "刷新中...";
   if (!silent && !preserveExisting) {
     const loading = element("div", "empty-state");
     loading.append(element("strong", "", "正在读取已选课程"));
     loading.append(element("p", "", "正在向学校系统查询，请稍候。"));
-    appElements.myCoursesList.replaceChildren(loading);
-    if (appElements.timetableDialog.open) {
-      const timetableLoading = element("div", "empty-state");
-      timetableLoading.append(element("strong", "", "正在读取课表"));
-      timetableLoading.append(element("p", "", "正在向学校系统查询当前已选课程。"));
-      appElements.timetableContent.replaceChildren(timetableLoading);
-      appElements.timetableSummary.textContent = "正在读取学校课表";
-    }
+    const target = appState.myCoursesView === "grid"
+      ? appElements.myCoursesScheduleWrap
+      : appElements.myCoursesList;
+    target.replaceChildren(loading);
   } else if (!silent) {
     appElements.myCoursesHint.textContent = "正在刷新，当前仍显示上次成功结果。";
   }
@@ -1941,19 +1903,13 @@ async function loadMyCourses(silent = false) {
       timeoutMs: SESSION_RECOVERY_TIMEOUT_MS,
     });
     appState.myCourses = Array.isArray(data.courses) ? data.courses : [];
-    appState.timetable = data.timetable && typeof data.timetable === "object"
-      ? data.timetable
-      : fallbackTimetable(appState.myCourses);
     appState.myCoursesLoaded = true;
-    appElements.myCoursesHint.textContent = `学校系统当前返回 ${appState.myCourses.length} 门已选课程。`;
     renderMyCourses();
     renderMyCoursesSchedule();
-    renderTimetable();
   } catch (error) {
     if (!(error instanceof SessionExpiredError)) {
       if (preserveExisting) {
         appElements.myCoursesHint.textContent = "刷新失败，仍显示上次成功结果。";
-        appElements.timetableHint.textContent = "刷新失败，仍显示上次成功读取的课表。";
         if (!silent) showToast(`已选课程刷新失败：${error.message}`, true);
       } else if (!silent) {
         const errorState = element("div", "error-state");
@@ -1965,16 +1921,16 @@ async function loadMyCourses(silent = false) {
         retry.addEventListener("click", () => loadMyCourses());
         actions.append(retry);
         errorState.append(actions);
-        appElements.myCoursesList.replaceChildren(errorState);
-        if (appElements.timetableDialog.open) renderTimetableError(error.message);
+        const target = appState.myCoursesView === "grid"
+          ? appElements.myCoursesScheduleWrap
+          : appElements.myCoursesList;
+        target.replaceChildren(errorState);
       }
     }
   } finally {
     appState.loadingMyCourses = false;
     appElements.refreshMyCourses.disabled = false;
     appElements.refreshMyCourses.textContent = previousLabel;
-    appElements.refreshTimetable.disabled = false;
-    appElements.refreshTimetable.textContent = previousTimetableLabel;
   }
 }
 
@@ -2213,12 +2169,28 @@ appElements.categoryList.addEventListener("click", (event) => {
 });
 
 let searchDebounceTimer = null;
+appElements.filterConflictSwitch.checked = appState.filters.hideConflict;
+appElements.filterFullSwitch.checked = appState.filters.hideFull;
 appElements.courseSearch.addEventListener("input", () => {
   if (searchDebounceTimer) window.clearTimeout(searchDebounceTimer);
   searchDebounceTimer = window.setTimeout(() => {
     searchDebounceTimer = null;
     handleSearchInput();
   }, SEARCH_DEBOUNCE_MS);
+});
+appElements.filterConflictSwitch.addEventListener("change", () => {
+  appState.filters.hideConflict = appElements.filterConflictSwitch.checked;
+  saveFilterPreferences();
+  if (isFilterActive()) applyCourseFilter();
+  renderCourses();
+  updatePagination();
+});
+appElements.filterFullSwitch.addEventListener("change", () => {
+  appState.filters.hideFull = appElements.filterFullSwitch.checked;
+  saveFilterPreferences();
+  if (isFilterActive()) applyCourseFilter();
+  renderCourses();
+  updatePagination();
 });
 appElements.campusSelect.addEventListener("change", () => {
   switchCampus(appElements.campusSelect.value);
@@ -2261,36 +2233,19 @@ appElements.openCart.addEventListener("click", async () => {
   appElements.cartDialog.showModal();
 });
 appElements.openMyCourses.addEventListener("click", async () => {
+  appState.scheduleConflict = null;
   appElements.myCoursesDialog.showModal();
   switchMyCoursesView(appState.myCoursesView);
   await loadCart();
   await loadMyCourses();
 });
-appElements.openTimetable.addEventListener("click", async () => {
-  appElements.timetableDialog.showModal();
-  renderTimetable();
-  if (!appState.myCoursesLoaded) await loadMyCourses();
-});
 appElements.refreshMyCourses.addEventListener("click", () => loadMyCourses());
-appElements.refreshTimetable.addEventListener("click", () => loadMyCourses());
 appElements.scheduleViewGrid.addEventListener("click", () => switchMyCoursesView("grid"));
 appElements.scheduleViewList.addEventListener("click", () => switchMyCoursesView("list"));
 appElements.showPendingSwitch.addEventListener("change", () => {
   appState.showCartOnSchedule = appElements.showPendingSwitch.checked;
   renderMyCoursesSchedule();
 });
-if (typeof window.addEventListener === "function") {
-  window.addEventListener("resize", () => {
-    if (appState.timetableResizeTimer !== null) {
-      window.clearTimeout(appState.timetableResizeTimer);
-    }
-    appState.timetableResizeTimer = window.setTimeout(() => {
-      appState.timetableResizeTimer = null;
-      const grid = appElements.timetableContent.querySelector(".timetable-grid");
-      if (grid) scheduleTimetableFit(grid);
-    }, 120);
-  });
-}
 appElements.openEnrollConfirm.addEventListener("click", () => {
   if (!appState.grabPhase) return;
   appElements.phaseConfirmation.checked = false;

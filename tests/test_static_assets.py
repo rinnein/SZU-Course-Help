@@ -42,9 +42,6 @@ def test_login_and_course_pages_expose_required_controls():
         "openEnrollConfirm",
         "openMyCourses",
         "myCoursesDialog",
-        "openTimetable",
-        "timetableDialog",
-        "timetableContent",
         "campusSelect",
         "enrollProgress",
         "progressState",
@@ -61,6 +58,8 @@ def test_login_and_course_pages_expose_required_controls():
     assert f"/styles.css?build={app.UI_ASSET_BUILD}" in course
     assert f"/login.js?build={app.UI_ASSET_BUILD}" in login
     assert f"/course-app.js?build={app.UI_ASSET_BUILD}" in course
+    assert 'id="openTimetable"' not in course
+    assert 'id="timetableDialog"' not in course
 
 
 def test_login_captcha_ui_has_terminal_failure_states():
@@ -87,29 +86,20 @@ def test_course_page_exposes_pause_and_relogin_states():
     assert "taskStopping || (!terminalCourse && !canEditPausedTask)" in script
 
 
-def test_course_groups_start_collapsed_and_timetable_is_read_only():
+def test_course_groups_start_collapsed_and_my_courses_is_single_schedule_entry():
     script = (STATIC / "course-app.js").read_text(encoding="utf-8")
     styles = (STATIC / "styles.css").read_text(encoding="utf-8")
 
     assert "details.open" not in script
     assert '"/api/session/campus"' in script
     assert '"/api/school/enrolled"' in script
-    assert "timetableEntriesWithLanes" in script
-    assert "appendCluster" in script
-    assert "fitTimetableRows" in script
-    assert "block.dataset.periodSpan" in script
-    assert "--timetable-row-height" in styles
-    timetable_card_styles = styles[
-        styles.index(".timetable-course {") : styles.index(".unscheduled-courses {")
-    ]
-    assert "overflow-wrap: anywhere" in timetable_card_styles
-    assert "white-space: nowrap" not in timetable_card_styles
-    assert (
-        "/api/courses/add"
-        not in script[
-            script.index("function renderTimetable") : script.index("function renderTimetableError")
-        ]
-    )
+    assert "renderMyCoursesSchedule" in script
+    assert "myCoursesDialog.showModal()" in script
+    assert "openTimetable" not in script
+    assert "timetableDialog" not in script
+    assert "timetableContent" not in script
+    assert "timetable-grid" not in styles
+    assert "timetable-course" not in styles
 
 
 def test_my_courses_restores_schedule_and_list_views():
@@ -124,9 +114,38 @@ def test_my_courses_restores_schedule_and_list_views():
     assert "switchMyCoursesView" in script
     assert "renderMyCoursesSchedule" in script
     assert "showCartOnSchedule" in script
-    assert '"schedule-course" + (placed.pending ? " is-pending" : "")' in script
+    assert 'const block = element("div", `schedule-course${stateClasses ? ` ${stateClasses}` : ""}`);' in script
     assert "虚化块为选课清单中的待选课程" in script
     assert ".schedule-course.is-pending" in styles
+
+
+def test_course_filters_are_exclusion_filters_and_keep_empty_groups():
+    course = (STATIC / "index.html").read_text(encoding="utf-8")
+    script = (STATIC / "course-app.js").read_text(encoding="utf-8")
+    styles = (STATIC / "styles.css").read_text(encoding="utf-8")
+
+    assert "不显示时间冲突" in course
+    assert "不显示人数已满" in course
+    assert "hideConflict" in script
+    assert "hideFull" in script
+    assert "if (classIsSelected(classInfo)) return true;" in script
+    assert "FILTER_PREFERENCES_KEY" in script
+    assert "saveFilterPreferences" in script
+    assert "当前筛选条件下没有符合条件的教学班" in script
+    assert ".course-group.is-selected" in styles
+
+
+def test_conflict_timetable_context_is_rendered_and_highlighted():
+    script = (STATIC / "course-app.js").read_text(encoding="utf-8")
+    styles = (STATIC / "styles.css").read_text(encoding="utf-8")
+
+    assert "openConflictTimetable" in script
+    assert "scheduleEntriesOverlap" in script
+    assert "is-conflict-highlight" in script
+    assert "is-focused" in script
+    assert "scheduleConflict = null" in script
+    assert ".schedule-course.is-conflict-highlight" in styles
+    assert "switchMyCoursesView(\"grid\")" in script
 
 
 def test_course_search_filters_full_catalog_and_repaginates():

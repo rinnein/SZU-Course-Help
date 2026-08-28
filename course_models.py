@@ -123,6 +123,7 @@ class SchoolCourse:
     course_total_number: str
     type_name: str
     course_type: str
+    course_nature_name: str
     hours: str
 
     @classmethod
@@ -144,6 +145,7 @@ class SchoolCourse:
             course_total_number=_as_string(data.get("courseTotalNumber")),
             type_name=_as_string(data.get("typeName")),
             course_type=_as_string(data.get("type")),
+            course_nature_name=_as_string(data.get("courseNatureName")),
             hours=_as_string(data.get("hours")),
         )
 
@@ -234,6 +236,9 @@ class CourseView:
     sport_name: str
     number: int
     selected: bool
+    credit: str
+    course_type_name: str
+    course_nature_name: str
     campus_name: str = ""
 
     @classmethod
@@ -249,6 +254,9 @@ class CourseView:
             campus_name=course.campus_name,
             number=course.number,
             selected=course.selected,
+            credit=course.credit,
+            course_type_name=course.type_name,
+            course_nature_name=course.course_nature_name,
         )
 
     def to_api_dict(self) -> dict[str, Any]:
@@ -261,6 +269,9 @@ class CourseView:
             "campus_name": self.campus_name,
             "number": self.number,
             "selected": self.selected,
+            "credit": self.credit,
+            "course_type_name": self.course_type_name,
+            "course_nature_name": self.course_nature_name,
         }
 
 

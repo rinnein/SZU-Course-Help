@@ -6,7 +6,7 @@
   <meta name="color-scheme" content="light">
   <title>抢课工作台 | 深大抢课助手</title>
   <link rel="icon" href="/favicon.ico">
-  <link rel="stylesheet" href="/styles.css?build=20260829.1">
+  <link rel="stylesheet" href="/styles.css?build=20260829.2">
 </head>
 <body class="app-page">
   <header class="topbar">
@@ -21,7 +21,6 @@
       <span id="taskIndicator" class="task-indicator" hidden>抢课中</span>
       <span id="backendIndicator" class="backend-indicator">当前后端：主站</span>
       <span id="studentLabel" class="student-label">未登录</span>
-      <button id="openTimetable" class="button button-quiet" type="button">查看课表</button>
       <button id="openMyCourses" class="button button-quiet" type="button">我的课程</button>
       <button id="openCart" class="button button-secondary cart-button" type="button">
         <span class="cart-label-long">选课清单</span><span class="cart-label-short">清单</span>
@@ -48,7 +47,8 @@
         <p class="nav-label">状态说明</p>
         <span><i class="legend-dot legend-ok"></i>可加入</span>
         <span><i class="legend-dot legend-full"></i>已满，可候补</span>
-        <span><i class="legend-dot legend-blocked"></i>冲突或已选</span>
+        <span><i class="legend-dot legend-blocked"></i>时间冲突</span>
+        <span><i class="legend-dot legend-selected"></i>已选</span>
       </div>
     </nav>
 
@@ -95,11 +95,11 @@
           <div class="course-view-options" aria-label="课程列表选项">
             <label class="switch-row compact-switch">
               <input id="filterConflictSwitch" type="checkbox">
-              <span>仅显示时间冲突</span>
+              <span>不显示时间冲突</span>
             </label>
             <label class="switch-row compact-switch">
               <input id="filterFullSwitch" type="checkbox">
-              <span>仅显示人数已满</span>
+              <span>不显示人数已满</span>
             </label>
             <label class="switch-row compact-switch">
               <input id="cacheModeSwitch" type="checkbox">
@@ -198,26 +198,10 @@
     </div>
   </dialog>
 
-  <dialog id="timetableDialog" class="timetable-dialog">
-    <div class="dialog-header">
-      <div>
-        <p class="eyebrow">学校已选课程</p>
-        <h2>我的课表</h2>
-        <p id="timetableSummary" class="dialog-summary">正在读取课表</p>
-      </div>
-      <button class="dialog-close" type="button" data-close-dialog="timetableDialog" aria-label="关闭">×</button>
-    </div>
-    <div id="timetableContent" class="timetable-content"></div>
-    <div class="dialog-footer timetable-footer">
-      <p id="timetableHint">课表来自学校系统当前已选课程，不会执行选课或退课操作。</p>
-      <button id="refreshTimetable" class="button button-secondary" type="button">刷新课表</button>
-    </div>
-  </dialog>
-
   <dialog id="myCoursesDialog" class="drawer-dialog">
     <div class="dialog-header">
       <div>
-        <p class="eyebrow">学校数据</p>
+        <p class="eyebrow">学校数据与课表</p>
         <h2>我的课程</h2>
       </div>
       <button class="dialog-close" type="button" data-close-dialog="myCoursesDialog" aria-label="关闭">×</button>
@@ -235,8 +219,8 @@
     <div id="myCoursesScheduleWrap" class="my-courses-schedule-wrap"></div>
     <div id="myCoursesList" class="my-courses-list" hidden></div>
     <div class="dialog-footer">
-      <p id="myCoursesHint">这里显示学校系统中当前学号已选中的课程。</p>
-      <button id="refreshMyCourses" class="button button-secondary button-block" type="button">刷新已选课程</button>
+      <p id="myCoursesHint">这里显示学校已选课程和选课清单中的待选课程。</p>
+      <button id="refreshMyCourses" class="button button-secondary button-block" type="button">刷新我的课程</button>
     </div>
   </dialog>
 
@@ -280,7 +264,7 @@
   </dialog>
 
   <div id="toastRegion" class="toast-region" aria-live="polite" aria-atomic="true"></div>
-  <script src="/course-app.js?build=20260829.1" defer></script>
-  <script src="/schedule-parser.js?build=20260829.1" defer></script>
+  <script src="/schedule-parser.js?build=20260829.2" defer></script>
+  <script src="/course-app.js?build=20260829.2" defer></script>
 </body>
 </html>

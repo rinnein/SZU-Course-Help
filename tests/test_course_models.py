@@ -21,3 +21,14 @@ def test_captured_school_course_responses_parse_into_frontend_models():
             for course in frontend.courses
             for class_info in course.teaching_classes
         )
+
+
+def test_course_projection_preserves_summary_metadata():
+    response = CoursesResponse.from_json((FIXTURE_DIR / "1.json").read_text(encoding="utf-8"))
+    course = response.to_course_list_response().courses[0].to_api_dict()
+
+    assert course["course_number"] == "9900500002"
+    assert course["course_type_name"] == "公共选修课"
+    assert course["course_nature_name"] == "选修"
+    assert course["department_name"] == "人文学院"
+    assert course["credit"] == "2"
