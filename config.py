@@ -5,6 +5,21 @@
 因此使用模块级全局变量而非类封装。
 """
 
+import os
+
+
+def _positive_env_int(name: str, default: int) -> int:
+    """Read a positive integer setting while keeping startup deterministic."""
+    raw_value = os.getenv(name, "").strip()
+    if not raw_value:
+        return default
+    try:
+        value = int(raw_value)
+    except ValueError:
+        return default
+    return value if value > 0 else default
+
+
 # ====================================================================
 # 选课系统基础 URL（深圳大学本科选课系统）
 # ====================================================================
@@ -40,6 +55,13 @@ relogin_max_retries: int = 5
 
 # 每次自动重登录中，OCR 最多尝试的验证码图片数量。
 ocr_relogin_max_attempts: int = 50
+
+# 单门课程连续收到无法识别的学校返回时，达到该次数后保护性暂停。
+# 任意一次已知响应都会立即清零该课程的连续计数。
+unknown_response_pause_threshold: int = _positive_env_int(
+    "COURSE_SELECT_UNKNOWN_RESPONSE_LIMIT",
+    200,
+)
 
 # ====================================================================
 # 运行时状态（登录后由程序自动设置，不要手动修改）

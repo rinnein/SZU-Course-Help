@@ -283,7 +283,9 @@ def test_closed_school_window_pauses_after_one_request(tmp_path, monkeypatch):
 def test_unknown_response_threshold_pauses_without_failing(tmp_path, monkeypatch):
     course = _course(id="unknown1", name="未知响应课程")
     db = _prime_cart(monkeypatch, tmp_path, [course])
-    monkeypatch.setattr(config, "count", enroll_service.MAX_UNKNOWN_STREAK + 1)
+    unknown_limit = 3
+    monkeypatch.setattr(config, "unknown_response_pause_threshold", unknown_limit)
+    monkeypatch.setattr(config, "count", unknown_limit + 1)
     calls = []
     monkeypatch.setattr(
         enroll_service.choose_course,
@@ -295,7 +297,7 @@ def test_unknown_response_threshold_pauses_without_failing(tmp_path, monkeypatch
     try:
         outcome = enroll_service.grab_courses([course])
         assert outcome == enroll_service.GrabOutcome.PAUSED
-        assert len(calls) == enroll_service.MAX_UNKNOWN_STREAK
+        assert len(calls) == unknown_limit
         assert enroll_service.get_enroll_task_state()["pause_source"] == "unknown_response"
         assert db.get_courses_by_status(database.STATUS_IN_PROGRESS)[0]["id"] == "unknown1"
         assert db.get_courses_by_status(database.STATUS_FAILED) == []

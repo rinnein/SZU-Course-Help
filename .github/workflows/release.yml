@@ -123,12 +123,12 @@ jobs:
               --notes-file docs/RELEASE_NOTES.md
           fi
 
-      - name: Remove superseded v3.2.1 release
-        if: github.ref_name == 'v3.3.0'
+      - name: Remove superseded v3.3.0 release
+        if: github.ref_name == 'v3.3.1'
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
-          if gh release view "v3.2.1" >/dev/null 2>&1; then
-            gh release delete "v3.2.1" --yes
+          if gh release view "v3.3.0" >/dev/null 2>&1; then
+            gh release delete "v3.3.0" --yes
           fi
