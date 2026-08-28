@@ -4,7 +4,13 @@ const REQUEST_TIMEOUT_MS = 30000;
 const SESSION_RECOVERY_TIMEOUT_MS = 180000;
 const FILTER_PAGE_SIZE = 10;
 const MAX_CATALOG_PAGES = 1000;
-const CATALOG_PAGE_DELAY_MS = 150;
+// 学校接口会拒绝连续过快的目录请求：分页间保持基础间隔，被限流时自动加倍并退避重试。
+const catalogTiming = globalThis.__CATALOG_TIMING__ || {};
+const CATALOG_PAGE_DELAY_MS = Number(catalogTiming.pageDelayMs) || 600;
+const CATALOG_PAGE_MAX_DELAY_MS = Number(catalogTiming.pageMaxDelayMs) || 2400;
+const CATALOG_THROTTLE_BACKOFF_MS = Number(catalogTiming.throttleBackoffMs) || 2000;
+const CATALOG_THROTTLE_BACKOFF_MAX_MS = Number(catalogTiming.throttleBackoffMaxMs) || 10000;
+const CATALOG_THROTTLE_MAX_RETRIES = Number(catalogTiming.throttleMaxRetries) || 3;
 const SEARCH_DEBOUNCE_MS = 250;
 const TIMETABLE_MIN_ROW_HEIGHT = 64;
 
@@ -918,8 +924,10 @@ function invalidateCatalogCaches() {
   appState.searchPage = 1;
 }
 
-function waitForCatalogPageDelay(signal) {
-  if (CATALOG_PAGE_DELAY_MS <= 0) return Promise.resolve();
+let catalogPacingDelayMs = CATALOG_PAGE_DELAY_MS;
+
+function waitForCatalogDelay(delayMs, signal) {
+  if (delayMs <= 0) return Promise.resolve();
   return new Promise((resolve, reject) => {
     if (signal?.aborted) {
       reject(new DOMException("Catalog request aborted", "AbortError"));
@@ -932,7 +940,7 @@ function waitForCatalogPageDelay(signal) {
     const timer = window.setTimeout(() => {
       signal?.removeEventListener("abort", onAbort);
       resolve();
-    }, CATALOG_PAGE_DELAY_MS);
+    }, delayMs);
     signal?.addEventListener("abort", onAbort, { once: true });
   });
 }
@@ -960,11 +968,13 @@ async function fetchFullCatalog({ force = false } = {}) {
   };
   appState.catalogCaches[type] = cache;
 
-  const updateProgress = () => {
-    appElements.courseSummary.textContent = cache.totalCount
-      ? `正在加载全部课程 ${cache.courses.length} / ${cache.totalCount} 门`
-      : "正在加载全部课程";
+  const updateProgress = (message = "") => {
+    appElements.courseSummary.textContent = message
+      || (cache.totalCount
+        ? `正在加载全部课程 ${cache.courses.length} / ${cache.totalCount} 门`
+        : "正在加载全部课程");
   };
+  catalogPacingDelayMs = CATALOG_PAGE_DELAY_MS;
   updateProgress();
   renderCourses();
   updatePagination();
@@ -973,14 +983,38 @@ async function fetchFullCatalog({ force = false } = {}) {
     let completed = false;
     let expectedTotalCount = null;
     for (let page = 1; page <= MAX_CATALOG_PAGES; page += 1) {
-      const data = await api(
-        `/api/school/courses?type=${encodeURIComponent(type)}&page=${page}&page_size=${FILTER_PAGE_SIZE}`,
-        { signal: controller.signal, timeoutMs: SESSION_RECOVERY_TIMEOUT_MS },
-      );
-      if (
-        requestId !== appState.catalogRequestId
-        || scopeKey !== catalogScopeKey()
-      ) return false;
+      let data = null;
+      for (let attempt = 0; ; attempt += 1) {
+        try {
+          data = await api(
+            `/api/school/courses?type=${encodeURIComponent(type)}&page=${page}&page_size=${FILTER_PAGE_SIZE}`,
+            { signal: controller.signal, timeoutMs: SESSION_RECOVERY_TIMEOUT_MS },
+          );
+          if (
+            requestId !== appState.catalogRequestId
+            || scopeKey !== catalogScopeKey()
+          ) return false;
+          break;
+        } catch (error) {
+          if (
+            error?.code !== "SCHOOL_COURSE_REJECTED"
+            || attempt >= CATALOG_THROTTLE_MAX_RETRIES
+          ) throw error;
+          const backoffMs = Math.min(
+            CATALOG_THROTTLE_BACKOFF_MS * (attempt + 1),
+            CATALOG_THROTTLE_BACKOFF_MAX_MS,
+          );
+          catalogPacingDelayMs = Math.min(
+            catalogPacingDelayMs * 2,
+            CATALOG_PAGE_MAX_DELAY_MS,
+          );
+          updateProgress(
+            `学校限流，${Math.round(backoffMs / 1000)} 秒后自动重试`
+              + `（第 ${attempt + 1} / ${CATALOG_THROTTLE_MAX_RETRIES} 次）`,
+          );
+          await waitForCatalogDelay(backoffMs, controller.signal);
+        }
+      }
       const items = Array.isArray(data.courses) ? data.courses : [];
       const reportedTotal = Number(data.total_count);
       if (!Number.isInteger(reportedTotal) || reportedTotal < 0) {
@@ -1023,7 +1057,7 @@ async function fetchFullCatalog({ force = false } = {}) {
           retryable: true,
         });
       }
-      await waitForCatalogPageDelay(controller.signal);
+      await waitForCatalogDelay(catalogPacingDelayMs, controller.signal);
     }
     if (requestId !== appState.catalogRequestId) return false;
     if (!completed) {
@@ -1045,6 +1079,9 @@ async function fetchFullCatalog({ force = false } = {}) {
       renderCourseAvailabilityState(error.message);
     } else {
       showToast(`${courseErrorTitle(error)}：${error.message}`, true);
+      // 先复位加载标志再渲染，否则会卡在“正在加载全部课程”的加载态。
+      appState.loadingCatalog = false;
+      appState.catalogLoadingType = "";
       renderCourses();
       updatePagination();
     }

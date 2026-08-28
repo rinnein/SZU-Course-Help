@@ -135,3 +135,25 @@ def test_course_search_filters_full_catalog_and_repaginates():
     assert "CATALOG_PAGE_DELAY_MS" in script
     assert 'code: "CATALOG_PAGE_LIMIT"' in script
     assert "cache.courses.length !== cache.totalCount" in script
+
+
+def test_course_catalog_fetch_paces_and_backs_off_throttling():
+    script = (STATIC / "course-app.js").read_text(encoding="utf-8")
+
+    # 分页间隔与限流退避常量：基础 600ms，被拒后自动加倍并重试
+    assert "const CATALOG_PAGE_DELAY_MS = Number(catalogTiming.pageDelayMs) || 600" in script
+    assert (
+        "const CATALOG_PAGE_MAX_DELAY_MS = Number(catalogTiming.pageMaxDelayMs) || 2400" in script
+    )
+    assert (
+        "const CATALOG_THROTTLE_BACKOFF_MS = Number(catalogTiming.throttleBackoffMs) || 2000"
+        in script
+    )
+    assert (
+        "const CATALOG_THROTTLE_MAX_RETRIES = Number(catalogTiming.throttleMaxRetries) || 3"
+        in script
+    )
+    # 仅针对学校限流错误码退避重试，并给出进度提示
+    assert 'error?.code !== "SCHOOL_COURSE_REJECTED"' in script
+    assert "学校限流" in script
+    assert "waitForCatalogDelay(catalogPacingDelayMs, controller.signal)" in script

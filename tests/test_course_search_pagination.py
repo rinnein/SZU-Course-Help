@@ -118,6 +118,25 @@ globalThis.window = {
 };
 
 const PAGE_SIZE = 10;
+const schoolThrottle = {
+  rejectOncePages: new Set(),
+  rejectedOncePages: new Set(),
+  rejectAlwaysPages: new Set(),
+};
+const schoolTimeline = [];
+function schoolRejectedResponse() {
+  return {
+    ok: false,
+    status: 502,
+    text: async () => JSON.stringify({
+      message: "学校暂时拒绝了课程目录请求，请稍后刷新；本地清单不受影响。",
+      is_error: true,
+      error_code: "SCHOOL_COURSE_REJECTED",
+      retryable: true,
+      requires_manual_login: false,
+    }),
+  };
+}
 const fakeCourses = [];
 for (let i = 0; i < 35; i += 1) {
   const math = i % 3 === 0;
@@ -175,6 +194,17 @@ globalThis.fetch = async (url) => {
   if (parsed.pathname === "/api/school/courses") {
     const type = parsed.searchParams.get("type");
     const page = Number(parsed.searchParams.get("page"));
+    let rejected = false;
+    if (schoolThrottle.rejectOncePages.has(page) && !schoolThrottle.rejectedOncePages.has(page)) {
+      schoolThrottle.rejectedOncePages.add(page);
+      rejected = true;
+    } else if (schoolThrottle.rejectAlwaysPages.has(page)) {
+      rejected = true;
+    }
+    schoolTimeline.push({ type, page, at: Date.now(), rejected });
+    if (rejected) {
+      return schoolRejectedResponse();
+    }
     schoolRequests.push(`${type}:${page}`);
     const start = (page - 1) * PAGE_SIZE;
     return respond({
@@ -193,6 +223,12 @@ globalThis.fetch = async (url) => {
 
 const appSource = fs.readFileSync(process.argv[2], "utf8");
 const scenarioSource = fs.readFileSync(process.argv[3], "utf8");
+globalThis.__CATALOG_TIMING__ = {
+  pageDelayMs: 40,
+  pageMaxDelayMs: 120,
+  throttleBackoffMs: 40,
+  throttleBackoffMaxMs: 120,
+};
 eval(appSource + "\n;\n" + scenarioSource);
 """
 
@@ -212,6 +248,12 @@ const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
       fakeSession = { ...fakeSession, ...updates };
     },
     schoolRequests: () => schoolRequests.slice(),
+    setSchoolThrottle: (config = {}) => {
+      schoolThrottle.rejectOncePages = new Set(config.rejectOncePages || []);
+      schoolThrottle.rejectedOncePages = new Set();
+      schoolThrottle.rejectAlwaysPages = new Set(config.rejectAlwaysPages || []);
+    },
+    schoolTimeline: () => schoolTimeline.slice(),
     nodeById: (id) => nodesById.get(id),
   };
 
@@ -367,6 +409,46 @@ const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
     hasCompleteCache: Boolean(app.appState.catalogCaches.TJKC?.complete),
   };
 
+  // 11) 学校限流拒绝一次：自动退避重试同一页并完成目录；分页间隔随之加倍
+  totalCountByPage = null;
+  app.setSchoolThrottle({ rejectOncePages: [2] });
+  const requestCountBeforeThrottled = app.schoolRequests().length;
+  const timelineBeforeThrottled = app.schoolTimeline().length;
+  app.appState.type = "XGXK";
+  await app.handleSearchInput();
+  const xgxkTimeline = app.schoolTimeline().slice(timelineBeforeThrottled);
+  const xgxkGaps = xgxkTimeline.slice(1).map((item, index) => item.at - xgxkTimeline[index].at);
+  const rejectedIndex = xgxkTimeline.findIndex((item) => item.rejected);
+  const throttledRetryState = {
+    requests: app.schoolRequests().slice(requestCountBeforeThrottled),
+    results: app.appState.searchResults.length,
+    pageLabel: app.nodeById("pageLabel").textContent,
+    hasCompleteCache: Boolean(app.appState.catalogCaches.XGXK?.complete),
+    rejectedCount: xgxkTimeline.filter((item) => item.rejected).length,
+    minGapMs: Math.min(...xgxkGaps),
+    gapAfterRetry: rejectedIndex >= 0 ? (xgxkGaps[rejectedIndex + 1] ?? -1) : -1,
+    gaps: xgxkGaps,
+  };
+
+  // 12) 学校持续限流：重试次数耗尽后整体失败，不留下伪完整缓存
+  app.setSchoolThrottle({ rejectAlwaysPages: [2] });
+  app.appState.type = "TYKC";
+  const attemptsBeforeExhausted = app.schoolTimeline().filter(
+    (item) => item.type === "TYKC" && item.page === 2,
+  ).length;
+  const exhaustedOk = await app.fetchFullCatalog({ force: true });
+  const tykcAttemptsPage2 = app.schoolTimeline().filter(
+    (item) => item.type === "TYKC" && item.page === 2,
+  ).length - attemptsBeforeExhausted;
+  const throttleExhaustedState = {
+    ok: exhaustedOk,
+    tykcAttemptsPage2,
+    hasCache: Boolean(app.appState.catalogCaches.TYKC),
+    errorTitle: app.nodeById("courseList").children[0]?.children[0]?.textContent,
+    toast: app.nodeById("toastRegion").children.at(-1)?.textContent,
+  };
+  app.setSchoolThrottle();
+
   console.log(JSON.stringify({
     requestsAfterInit,
     searchState,
@@ -380,6 +462,8 @@ const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
     runningTaskReloginState,
     oversizedCatalogState,
     changingTotalState,
+    throttledRetryState,
+    throttleExhaustedState,
   }));
   process.exit(0);
 })().catch((error) => {
@@ -474,3 +558,23 @@ def test_course_search_filters_whole_catalog_and_repaginates(tmp_path: Path) -> 
     assert changing_total["ok"] is False
     assert changing_total["requests"] == ["TJKC:1", "TJKC:2"]
     assert changing_total["hasCompleteCache"] is False
+
+    # 学校限流拒绝一次：退避后重试同一页并完整加载；分页间隔自动加倍
+    throttled = out["throttledRetryState"]
+    assert throttled["requests"] == ["XGXK:1", "XGXK:2", "XGXK:3", "XGXK:4"]
+    assert throttled["rejectedCount"] == 1
+    assert throttled["hasCompleteCache"] is True
+    assert throttled["results"] == 23
+    assert throttled["pageLabel"] == "第 1 / 3 页"
+    assert throttled["minGapMs"] >= 30, throttled["gaps"]
+    # 被限流页重试成功后，下一页间隔应为基础间隔的 2 倍（40ms → 80ms）
+    assert throttled["gapAfterRetry"] >= 70, throttled["gaps"]
+
+    # 持续限流：初始请求 + 3 次重试全部被拒后整体失败，不留下缓存
+    exhausted = out["throttleExhaustedState"]
+    assert exhausted["ok"] is False
+    assert exhausted["tykcAttemptsPage2"] == 4
+    assert exhausted["hasCache"] is False
+    # 失败后必须脱离加载态：渲染带重试入口的错误态，并通过 toast 说明限流原因
+    assert exhausted["errorTitle"] == "课程目录尚未加载"
+    assert "学校暂时拒绝了请求" in (exhausted["toast"] or "")
