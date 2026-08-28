@@ -82,3 +82,19 @@ def test_course_page_exposes_pause_and_relogin_states():
     assert "task_pause_acknowledged" in script
     assert "正在完成当前学校请求；安全暂停后即可移除" in script
     assert "taskStopping || (!terminalCourse && !canEditPausedTask)" in script
+
+
+def test_course_search_filters_full_catalog_and_repaginates():
+    script = (STATIC / "course-app.js").read_text(encoding="utf-8")
+    index = (STATIC / "index.html").read_text(encoding="utf-8")
+
+    # 搜索不再局限于当前分页：旧的页内过滤文案必须移除
+    assert "本页没有匹配结果" not in script
+    assert "筛选本页课程" not in index
+    assert "搜索全部课程" in index
+    # 在完整目录上过滤，并按匹配结果重新分页
+    assert "没有匹配的课程" in script
+    assert "正在加载全部课程" in script
+    assert "appState.searchPage" in script
+    assert "results.slice(start, start + FILTER_PAGE_SIZE)" in script
+    assert "匹配" in script
