@@ -84,7 +84,7 @@ proxy_request = proxy_service.proxy_request
 
 SERVER_HOST = "127.0.0.1"
 DEFAULT_SERVER_PORT = 8000
-UI_ASSET_BUILD = "20260829.1"
+UI_ASSET_BUILD = "20260829.2"
 UI_CACHE_TOKEN = secrets.token_urlsafe(8)
 logger = logging.getLogger(__name__)
 
