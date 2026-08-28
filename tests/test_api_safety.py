@@ -61,6 +61,76 @@ def test_health_and_static_login_page():
     assert bootstrap["ui_asset_build"] == app.UI_ASSET_BUILD
 
 
+def test_api_allows_local_origins_and_missing_origin():
+    local = client.get("/api/health", headers={"Origin": app.LOCAL_ORIGINS[0]})
+    assert local.status_code == 200
+    assert local.headers["access-control-allow-origin"] == app.LOCAL_ORIGINS[0]
+
+    localhost = client.get("/api/health", headers={"Origin": app.LOCAL_ORIGINS[1]})
+    assert localhost.status_code == 200
+    assert localhost.headers["access-control-allow-origin"] == app.LOCAL_ORIGINS[1]
+
+    direct = client.get("/api/health")
+    assert direct.status_code == 200
+
+
+def test_api_rejects_non_local_and_lookalike_origins(monkeypatch):
+    monkeypatch.setattr(
+        app,
+        "get_session_snapshot",
+        lambda: (_ for _ in ()).throw(AssertionError("请求不应进入业务处理")),
+    )
+
+    for origin in ("https://evil.example", f"{app.LOCAL_ORIGINS[0]}.evil.example"):
+        response = client.get("/api/session", headers={"Origin": origin})
+        assert response.status_code == 403
+        assert response.json()["error_code"] == "INVALID_ORIGIN"
+
+
+def test_api_accepts_origin_for_the_actual_loopback_request_port():
+    local_client = TestClient(app.app, base_url="http://127.0.0.1:8000")
+
+    response = local_client.get(
+        "/api/health",
+        headers={"Origin": "http://127.0.0.1:8000"},
+    )
+
+    assert response.status_code == 200
+
+    preflight = local_client.options(
+        "/api/captcha/solve",
+        headers={
+            "Origin": "http://127.0.0.1:8000",
+            "Access-Control-Request-Method": "POST",
+            "Access-Control-Request-Headers": "content-type",
+        },
+    )
+    assert preflight.status_code == 200
+    assert preflight.headers["access-control-allow-origin"] == "http://127.0.0.1:8000"
+
+
+def test_api_preflight_rejects_non_local_origin_and_allows_local_origin():
+    local = client.options(
+        "/api/session",
+        headers={
+            "Origin": app.LOCAL_ORIGINS[0],
+            "Access-Control-Request-Method": "GET",
+        },
+    )
+    assert local.status_code == 200
+    assert local.headers["access-control-allow-origin"] == app.LOCAL_ORIGINS[0]
+
+    external = client.options(
+        "/api/session",
+        headers={
+            "Origin": "https://evil.example",
+            "Access-Control-Request-Method": "GET",
+        },
+    )
+    assert external.status_code == 403
+    assert external.json()["error_code"] == "INVALID_ORIGIN"
+
+
 def test_backend_selection_endpoint_updates_preference(monkeypatch):
     monkeypatch.setattr(config, "backend_preference", config.BACKEND_AUTO)
     monkeypatch.setattr(config, "webvpn_cookie", "")

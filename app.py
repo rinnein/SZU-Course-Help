@@ -13,6 +13,7 @@ import webbrowser
 from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import requests
 from fastapi import FastAPI, HTTPException, Query, Request, status
@@ -88,6 +89,7 @@ proxy_request = proxy_service.proxy_request
 
 SERVER_HOST = "127.0.0.1"
 DEFAULT_SERVER_PORT = 8000
+RUNTIME_PORT_ENV = "COURSE_SELECT_RUNTIME_PORT"
 UI_ASSET_BUILD = "20260829.2"
 logger = logging.getLogger(__name__)
 
@@ -116,7 +118,24 @@ def _find_available_port(preferred: int, attempts: int = 20) -> int:
     raise RuntimeError(f"端口 {preferred} 至 {last_candidate} 均被占用")
 
 
-SERVER_PORT = _find_available_port(_preferred_port())
+def _server_port() -> int:
+    """Reuse the port selected by the reload supervisor in child processes."""
+    runtime_port = os.getenv(RUNTIME_PORT_ENV, "").strip()
+    if runtime_port:
+        try:
+            port = int(runtime_port)
+        except ValueError:
+            port = 0
+        if 1 <= port <= 65535:
+            return port
+    return _find_available_port(_preferred_port())
+
+
+SERVER_PORT = _server_port()
+LOCAL_ORIGINS = (
+    f"http://127.0.0.1:{SERVER_PORT}",
+    f"http://localhost:{SERVER_PORT}",
+)
 
 _runtime_prefill = {"student_id": "", "card_key": ""}
 
@@ -124,14 +143,59 @@ _runtime_prefill = {"student_id": "", "card_key": ""}
 app = FastAPI(title="深大抢课助手 API", version="3.4.0")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        f"http://127.0.0.1:{SERVER_PORT}",
-        f"http://localhost:{SERVER_PORT}",
-    ],
+    allow_origins=[],
+    allow_origin_regex=r"^http://(?:127\.0\.0\.1|localhost|\[::1\]):[1-9]\d{0,4}$",
     allow_credentials=True,
     allow_methods=["GET", "POST"],
     allow_headers=["Content-Type"],
 )
+
+
+@app.middleware("http")
+async def restrict_api_origin(request: Request, call_next):
+    """Reject browser API requests originating outside this local service."""
+    path = request.url.path
+    if path == "/api" or path.startswith("/api/"):
+        origin = request.headers.get("origin")
+        if origin and not _is_local_service_origin(request, origin):
+            return JSONResponse(
+                status_code=status.HTTP_403_FORBIDDEN,
+                content={
+                    "message": "请求来源不是本地服务，已拒绝访问",
+                    "is_error": True,
+                    "error_code": "INVALID_ORIGIN",
+                    "retryable": False,
+                    "requires_manual_login": False,
+                },
+            )
+    return await call_next(request)
+
+
+def _is_local_service_origin(request: Request, origin: str) -> bool:
+    """Match the origin to this loopback endpoint, including reload port drift."""
+    try:
+        origin_url = urlsplit(origin)
+        request_url = request.url
+        origin_port = origin_url.port or (443 if origin_url.scheme == "https" else 80)
+        request_port = request_url.port or (443 if request_url.scheme == "https" else 80)
+    except ValueError:
+        return False
+
+    # TestClient uses a synthetic host, so retain the explicit configured list
+    # for it while production requests must match their actual loopback port.
+    if request_url.hostname not in {"127.0.0.1", "localhost", "::1"}:
+        return origin in LOCAL_ORIGINS
+
+    return (
+        origin_url.scheme == request_url.scheme == "http"
+        and origin_url.hostname in {"127.0.0.1", "localhost", "::1"}
+        and not origin_url.username
+        and not origin_url.password
+        and not origin_url.path
+        and not origin_url.query
+        and not origin_url.fragment
+        and origin_port == request_port
+    )
 
 
 class LoginRequest(BaseModel):
@@ -1537,6 +1601,9 @@ def start_server() -> None:
     import uvicorn
 
     configure_logging()
+    # The reload supervisor owns the listening socket before child imports app.
+    # Preserve its selected port so the child does not probe the next port.
+    os.environ[RUNTIME_PORT_ENV] = str(SERVER_PORT)
     if os.getenv("COURSE_SELECT_NO_BROWSER", "").strip() != "1":
         timer = threading.Timer(1.2, open_browser)
         timer.daemon = True
