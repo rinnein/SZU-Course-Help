@@ -270,6 +270,7 @@ def _session_payload() -> dict:
         "task_paused_at": task_state["paused_at"],
         "task_stopping": task_state["stopping"],
         "task_stopping_reason": task_state["stopping_reason"],
+        "catalog_page_delay_ms": int(config.catalog_page_delay_ms),
         "ui_cache_token": UI_CACHE_TOKEN,
         "campus_options": campus_options_payload(),
     }

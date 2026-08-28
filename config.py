@@ -22,6 +22,11 @@ def _positive_env_int(name: str, default: int) -> int:
     return value if value > 0 else default
 
 
+def _bounded_env_int(name: str, default: int, minimum: int, maximum: int) -> int:
+    """Read an integer setting clamped into an inclusive range."""
+    return max(minimum, min(_positive_env_int(name, default), maximum))
+
+
 # ====================================================================
 # 选课系统基础 URL（深圳大学本科选课系统）
 # ====================================================================
@@ -68,6 +73,20 @@ ocr_relogin_max_attempts: int = 50
 unknown_response_pause_threshold: int = _positive_env_int(
     "COURSE_SELECT_UNKNOWN_RESPONSE_LIMIT",
     200,
+)
+
+# ====================================================================
+# 课程目录全量读取节流（工作台搜索在整个目录内过滤时使用）
+# ====================================================================
+# 默认 600ms 来自真实环境观测：学校接口在请求间隔约 170–270ms 时会以
+# “请求过快”拒绝请求（推断最小间隔约 250ms），600ms 约为该阈值的 2.4 倍，
+# 为网络抖动留出余量；被限流时前端会自动加倍间隔并退避重试，无需设置过大。
+# 非法值回退到默认值，越界值收敛到边界（100–10000ms）。
+catalog_page_delay_ms: int = _bounded_env_int(
+    "COURSE_SELECT_CATALOG_PAGE_DELAY_MS",
+    600,
+    minimum=100,
+    maximum=10000,
 )
 
 # ====================================================================

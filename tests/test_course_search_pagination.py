@@ -113,8 +113,9 @@ globalThis.window = {
   location: { search: "", origin: "http://course.test", assign() {} },
   setTimeout: (handler, delay, ...rest) => setTimeout(handler, delay, ...rest),
   clearTimeout: (id) => clearTimeout(id),
-  setInterval: (handler, delay, ...rest) => setInterval(handler, delay, ...rest),
-  clearInterval: (id) => clearInterval(id),
+  // 5s 会话轮询与场景中的精确请求断言存在竞态；会话变化由场景显式驱动。
+  setInterval: () => 0,
+  clearInterval: () => {},
 };
 
 const PAGE_SIZE = 10;
@@ -174,6 +175,7 @@ let fakeSession = {
   task_running: false,
   relogin_status: "idle",
   relogin_in_progress: false,
+  catalog_page_delay_ms: 100,
 };
 const schoolRequests = [];
 let reportedTotalCount = fakeCourses.length;
@@ -224,8 +226,6 @@ globalThis.fetch = async (url) => {
 const appSource = fs.readFileSync(process.argv[2], "utf8");
 const scenarioSource = fs.readFileSync(process.argv[3], "utf8");
 globalThis.__CATALOG_TIMING__ = {
-  pageDelayMs: 40,
-  pageMaxDelayMs: 120,
   throttleBackoffMs: 40,
   throttleBackoffMaxMs: 120,
 };
@@ -424,6 +424,7 @@ const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
     results: app.appState.searchResults.length,
     pageLabel: app.nodeById("pageLabel").textContent,
     hasCompleteCache: Boolean(app.appState.catalogCaches.XGXK?.complete),
+    catalogPageDelay: app.appState.catalogPageDelayMs,
     rejectedCount: xgxkTimeline.filter((item) => item.rejected).length,
     minGapMs: Math.min(...xgxkGaps),
     gapAfterRetry: rejectedIndex >= 0 ? (xgxkGaps[rejectedIndex + 1] ?? -1) : -1,
@@ -566,9 +567,12 @@ def test_course_search_filters_whole_catalog_and_repaginates(tmp_path: Path) -> 
     assert throttled["hasCompleteCache"] is True
     assert throttled["results"] == 23
     assert throttled["pageLabel"] == "第 1 / 3 页"
-    assert throttled["minGapMs"] >= 30, throttled["gaps"]
-    # 被限流页重试成功后，下一页间隔应为基础间隔的 2 倍（40ms → 80ms）
-    assert throttled["gapAfterRetry"] >= 70, throttled["gaps"]
+    # 分页间隔来自会话下发的配置值（假会话携带 100ms）
+    assert throttled["catalogPageDelay"] == 100
+    # 首个分页间隔应用了会话配置（100ms，留出定时器抖动余量）
+    assert throttled["gaps"][0] >= 90, throttled["gaps"]
+    # 被限流页重试成功后，下一页间隔应为基础间隔的 2 倍（100ms → 200ms）
+    assert throttled["gapAfterRetry"] >= 150, throttled["gaps"]
 
     # 持续限流：初始请求 + 3 次重试全部被拒后整体失败，不留下缓存
     exhausted = out["throttleExhaustedState"]

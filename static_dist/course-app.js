@@ -5,9 +5,12 @@ const SESSION_RECOVERY_TIMEOUT_MS = 180000;
 const FILTER_PAGE_SIZE = 10;
 const MAX_CATALOG_PAGES = 1000;
 // 学校接口会拒绝连续过快的目录请求：分页间保持基础间隔，被限流时自动加倍并退避重试。
+// 基础间隔默认 600ms，来自真实环境观测：请求间隔约 170–270ms 时学校返回“请求过快”
+// （推断最小间隔约 250ms），600ms 约为其 2.4 倍，为网络抖动留出余量。
+// 可通过后端环境变量 COURSE_SELECT_CATALOG_PAGE_DELAY_MS（100–10000ms，默认 600）
+// 调整，经 /api/session 下发到 appState.catalogPageDelayMs。
+const CATALOG_PAGE_MAX_DELAY_MS = 2400;
 const catalogTiming = globalThis.__CATALOG_TIMING__ || {};
-const CATALOG_PAGE_DELAY_MS = Number(catalogTiming.pageDelayMs) || 600;
-const CATALOG_PAGE_MAX_DELAY_MS = Number(catalogTiming.pageMaxDelayMs) || 2400;
 const CATALOG_THROTTLE_BACKOFF_MS = Number(catalogTiming.throttleBackoffMs) || 2000;
 const CATALOG_THROTTLE_BACKOFF_MAX_MS = Number(catalogTiming.throttleBackoffMaxMs) || 10000;
 const CATALOG_THROTTLE_MAX_RETRIES = Number(catalogTiming.throttleMaxRetries) || 3;
@@ -44,6 +47,7 @@ const appState = {
   catalogLoadingType: "",
   catalogRequestController: null,
   catalogRequestId: 0,
+  catalogPageDelayMs: 600,
   cart: [],
   session: null,
   loadingCourses: false,
@@ -560,6 +564,10 @@ function applySessionData(session) {
   const previousReloginStatus = appState.lastReloginStatus;
   const previousCatalogScope = catalogScopeKey(appState.session);
   const nextCatalogScope = catalogScopeKey(session);
+  const configuredPageDelay = Number(session?.catalog_page_delay_ms);
+  if (Number.isFinite(configuredPageDelay) && configuredPageDelay >= 100 && configuredPageDelay <= 10000) {
+    appState.catalogPageDelayMs = configuredPageDelay;
+  }
   const reloginCompleted = Boolean(appState.session)
     && String(session.relogin_status || "idle") === "success"
     && previousReloginStatus !== "success";
@@ -924,7 +932,7 @@ function invalidateCatalogCaches() {
   appState.searchPage = 1;
 }
 
-let catalogPacingDelayMs = CATALOG_PAGE_DELAY_MS;
+let catalogPacingDelayMs = appState.catalogPageDelayMs;
 
 function waitForCatalogDelay(delayMs, signal) {
   if (delayMs <= 0) return Promise.resolve();
@@ -974,7 +982,7 @@ async function fetchFullCatalog({ force = false } = {}) {
         ? `正在加载全部课程 ${cache.courses.length} / ${cache.totalCount} 门`
         : "正在加载全部课程");
   };
-  catalogPacingDelayMs = CATALOG_PAGE_DELAY_MS;
+  catalogPacingDelayMs = appState.catalogPageDelayMs;
   updateProgress();
   renderCourses();
   updatePagination();
@@ -1006,7 +1014,7 @@ async function fetchFullCatalog({ force = false } = {}) {
           );
           catalogPacingDelayMs = Math.min(
             catalogPacingDelayMs * 2,
-            CATALOG_PAGE_MAX_DELAY_MS,
+            Math.max(appState.catalogPageDelayMs * 4, CATALOG_PAGE_MAX_DELAY_MS),
           );
           updateProgress(
             `学校限流，${Math.round(backoffMs / 1000)} 秒后自动重试`

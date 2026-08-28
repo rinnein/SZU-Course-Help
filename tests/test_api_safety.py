@@ -147,6 +147,36 @@ def test_session_uses_backend_phase_classification(monkeypatch):
     assert body["automatic_enroll_allowed"] is False
 
 
+def test_session_payload_exposes_catalog_page_delay(monkeypatch):
+    monkeypatch.setattr(config, "token", "token")
+    monkeypatch.setattr(config, "combined_cookie", "cookie")
+    monkeypatch.setattr(config, "catalog_page_delay_ms", 800)
+
+    body = client.get("/api/session").json()
+    assert body["catalog_page_delay_ms"] == 800
+
+
+def test_catalog_page_delay_env_parsing(monkeypatch):
+    import importlib
+
+    monkeypatch.setenv("COURSE_SELECT_CATALOG_PAGE_DELAY_MS", "800")
+    assert importlib.reload(config).catalog_page_delay_ms == 800
+
+    # 数值越界收敛到边界（100–10000ms）
+    monkeypatch.setenv("COURSE_SELECT_CATALOG_PAGE_DELAY_MS", "50")
+    assert importlib.reload(config).catalog_page_delay_ms == 100
+    monkeypatch.setenv("COURSE_SELECT_CATALOG_PAGE_DELAY_MS", "20000")
+    assert importlib.reload(config).catalog_page_delay_ms == 10000
+
+    # 非法、零与负值回退到默认 600
+    for raw in ("abc", "0", "-1", ""):
+        monkeypatch.setenv("COURSE_SELECT_CATALOG_PAGE_DELAY_MS", raw)
+        assert importlib.reload(config).catalog_page_delay_ms == 600
+
+    monkeypatch.delenv("COURSE_SELECT_CATALOG_PAGE_DELAY_MS")
+    assert importlib.reload(config).catalog_page_delay_ms == 600
+
+
 def test_course_api_converts_ui_pages_to_school_zero_based_pages(monkeypatch):
     observed_pages = []
 

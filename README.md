@@ -261,6 +261,7 @@ python main.py
 | `COURSE_SELECT_KEY_DIR` | 源码目录或可执行文件目录 | Card Key 密钥目录 |
 | `COURSE_SELECT_KEY_PASSPHRASE` | 空 | 加密 Ed25519 私钥 |
 | `COURSE_SELECT_PORT` | `8000` | 本地 WebUI 首选端口 |
+| `COURSE_SELECT_CATALOG_PAGE_DELAY_MS` | `600` | 工作台全目录搜索的相邻分页间隔（毫秒）；非法值回退默认，越界收敛到 100–10000 |
 | `COURSE_SELECT_USE_PADDLE_OCR` | `0` | 启用 PaddleOCR 顶部文字回退 |
 | `COURSE_SELECT_NO_BROWSER` | `0` | 启动时不自动打开浏览器 |
 

@@ -140,11 +140,13 @@ def test_course_search_filters_full_catalog_and_repaginates():
 def test_course_catalog_fetch_paces_and_backs_off_throttling():
     script = (STATIC / "course-app.js").read_text(encoding="utf-8")
 
-    # 分页间隔与限流退避常量：基础 600ms，被拒后自动加倍并重试
-    assert "const CATALOG_PAGE_DELAY_MS = Number(catalogTiming.pageDelayMs) || 600" in script
-    assert (
-        "const CATALOG_PAGE_MAX_DELAY_MS = Number(catalogTiming.pageMaxDelayMs) || 2400" in script
-    )
+    # 分页间隔来自会话下发的可配置值（后端环境变量 COURSE_SELECT_CATALOG_PAGE_DELAY_MS）
+    assert "appState.catalogPageDelayMs" in script
+    assert "catalog_page_delay_ms" in script
+    assert "COURSE_SELECT_CATALOG_PAGE_DELAY_MS" in script
+    assert "const CATALOG_PAGE_MAX_DELAY_MS = 2400" in script
+    # 间隔倍增上限随基础间隔缩放，且至少 2400ms
+    assert "Math.max(appState.catalogPageDelayMs * 4, CATALOG_PAGE_MAX_DELAY_MS)" in script
     assert (
         "const CATALOG_THROTTLE_BACKOFF_MS = Number(catalogTiming.throttleBackoffMs) || 2000"
         in script
