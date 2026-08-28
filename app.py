@@ -10,6 +10,7 @@ import re
 import socket
 import threading
 import webbrowser
+from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
 
@@ -249,14 +250,25 @@ def _start_runtime_services() -> None:
         _runtime_started = True
 
 
-@app.on_event("startup")
 async def startup_runtime_services() -> None:
     _start_runtime_services()
 
 
-@app.on_event("shutdown")
 async def shutdown_runtime_services() -> None:
     webvpn_auth_service.close_auth()
+
+
+@asynccontextmanager
+async def app_lifespan(_app: FastAPI):
+    """Manage process-level session restoration and browser cleanup."""
+    await startup_runtime_services()
+    try:
+        yield
+    finally:
+        await shutdown_runtime_services()
+
+
+app.router.lifespan_context = app_lifespan
 
 
 def configure_runtime_prefill(student_id: str, card_key: str) -> None:

@@ -19,14 +19,7 @@ client = TestClient(app.app)
 
 
 def test_runtime_registers_startup_and_shutdown_hooks():
-    assert any(
-        handler.__name__ == "startup_runtime_services"
-        for handler in app.app.router.on_startup
-    )
-    assert any(
-        handler.__name__ == "shutdown_runtime_services"
-        for handler in app.app.router.on_shutdown
-    )
+    assert app.app.router.lifespan_context is app.app_lifespan
 
 
 def test_startup_hook_restores_persisted_session(monkeypatch):
