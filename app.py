@@ -395,6 +395,22 @@ async def api_generate_card_key(req: CardKeyRequest):
         )
 
 
+@app.post("/api/backend/select")
+async def api_select_backend(req: BackendSelectRequest):
+    """Select the school backend used by subsequent login and API requests."""
+    preference = update_backend_preference(req.backend)
+    payload = backend_service.backend_payload()
+    if preference == config.BACKEND_WEBVPN and not payload["webvpn_authenticated"]:
+        return _api_error(
+            409,
+            "请先完成 WebVPN 统一认证",
+            "WEBVPN_AUTH_REQUIRED",
+            retryable=True,
+            **payload,
+        )
+    return JSONResponse(content=payload, headers=get_no_cache_headers())
+
+
 @app.post("/api/login", status_code=status.HTTP_200_OK)
 async def api_login(user: LoginRequest):
     """Verify the local card key, then establish a school session."""

@@ -42,6 +42,28 @@ def test_health_and_static_login_page():
     assert bootstrap["ui_asset_build"] == app.UI_ASSET_BUILD
 
 
+def test_backend_selection_endpoint_updates_preference(monkeypatch):
+    monkeypatch.setattr(config, "backend_preference", config.BACKEND_AUTO)
+    monkeypatch.setattr(config, "webvpn_cookie", "")
+
+    response = client.post("/api/backend/select", json={"backend": "primary"})
+
+    assert response.status_code == 200
+    assert response.json()["preference"] == config.BACKEND_PRIMARY
+    assert config.backend_preference == config.BACKEND_PRIMARY
+
+
+def test_backend_selection_requires_webvpn_auth(monkeypatch):
+    monkeypatch.setattr(config, "webvpn_cookie", "")
+
+    response = client.post("/api/backend/select", json={"backend": "webvpn"})
+
+    assert response.status_code == 409
+    body = response.json()
+    assert body["error_code"] == "WEBVPN_AUTH_REQUIRED"
+    assert body["preference"] == config.BACKEND_WEBVPN
+
+
 def test_school_proxy_route_separates_host_from_school_path(monkeypatch):
     async def fake_proxy(request, school_path):
         return {"school_path": school_path}
