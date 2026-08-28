@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 import requests
-from fastapi.testclient import TestClient
+from starlette.testclient import TestClient
 
 import app
 import config

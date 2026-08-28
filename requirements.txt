@@ -18,5 +18,6 @@ onnxruntime>=1.20.0
 # Development only:
 # pytest>=8.0.0
 # ruff>=0.15.0,<1
+# httpx2>=2.0.0
 # nuitka>=2.8.9
 # zstandard>=0.25.0

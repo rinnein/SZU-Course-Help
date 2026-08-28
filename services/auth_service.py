@@ -186,12 +186,6 @@ def _advance_session_generation() -> None:
     _session_generation += 1
 
 
-def update_backend_preference(preference: str) -> str:
-    """Set the preferred school backend without changing login state."""
-    with _state_lock:
-        return backend_service.set_preference(preference)
-
-
 def save_login_state(
     login_cookie: str,
     captcha_cookie: str,
@@ -365,7 +359,10 @@ def merge_backend_cookies(header_values: list[str], host: str) -> bool:
             _persist_current_session()
         return changed
 
-def _iter_set_cookie_pairs(cookie_header: str, names: tuple[str, ...] = ("route", "insert_cookie", "JSESSIONID", "_WEU")):
+
+def _iter_set_cookie_pairs(
+    cookie_header: str, names: tuple[str, ...] = ("route", "insert_cookie", "JSESSIONID", "_WEU")
+):
     """Yield ``(name, value)`` pairs from a raw ``Set-Cookie`` header string.
 
     The school returns cookies mixed with path/expires directives (and commas

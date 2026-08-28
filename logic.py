@@ -7,8 +7,8 @@ import logging
 import os
 import re
 import time
-from dataclasses import dataclass
 import unicodedata
+from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 from typing import Any

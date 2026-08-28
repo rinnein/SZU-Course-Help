@@ -4,7 +4,7 @@ import threading
 import time
 
 import requests
-from fastapi.testclient import TestClient
+from starlette.testclient import TestClient
 
 import app
 import config
@@ -15,6 +15,11 @@ from security import key_manager
 from services import cart_service, enroll_service
 
 client = TestClient(app.app)
+
+
+def test_runtime_uses_lifespan_context():
+    assert app.app.router.lifespan_context is app.app_lifespan
+    assert app.app.router.on_startup == []
 
 
 def set_logged_session(monkeypatch, *, batch_code="batch", batch_name="预选阶段"):
@@ -43,9 +48,7 @@ def test_school_proxy_route_separates_host_from_school_path(monkeypatch):
 
     monkeypatch.setattr(app, "proxy_request", fake_proxy)
 
-    response = client.get(
-        "/proxy/bkxk.szu.edu.cn/xsxkapp/sys/xsxkapp/%2Adefault/index.do"
-    )
+    response = client.get("/proxy/bkxk.szu.edu.cn/xsxkapp/sys/xsxkapp/%2Adefault/index.do")
     assert response.status_code == 200
     assert response.json()["school_path"] == "xsxkapp/sys/xsxkapp/*default/index.do"
 
@@ -188,9 +191,7 @@ def test_expired_restored_session_requires_manual_login(monkeypatch):
     monkeypatch.setattr(
         app,
         "refresh_elective_batch",
-        lambda *_args: (_ for _ in ()).throw(
-            logic.SchoolBatchSessionExpiredError("expired")
-        ),
+        lambda *_args: (_ for _ in ()).throw(logic.SchoolBatchSessionExpiredError("expired")),
     )
 
     response = client.get("/api/session")
@@ -712,16 +713,12 @@ def test_keep_alive_requires_manual_login_for_unvalidated_restored_session(monke
     monkeypatch.setattr(
         app,
         "refresh_elective_batch",
-        lambda *args: (_ for _ in ()).throw(
-            logic.SchoolBatchSessionExpiredError("expired")
-        ),
+        lambda *args: (_ for _ in ()).throw(logic.SchoolBatchSessionExpiredError("expired")),
     )
     monkeypatch.setattr(
         app,
         "attempt_automatic_relogin",
-        lambda *args, **kwargs: (_ for _ in ()).throw(
-            AssertionError("must require manual login")
-        ),
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("must require manual login")),
     )
 
     app._keep_alive_once()
@@ -736,7 +733,6 @@ def test_keep_alive_skips_when_frontend_session_heartbeat_is_active(monkeypatch)
     monkeypatch.setattr(config, "student_id", "2024110122")
     called = []
     monkeypatch.setattr(app, "refresh_elective_batch", lambda *args: called.append(args))
-    monkeypatch.setattr(app.random, "choice", lambda choices: choices[0])
 
     assert client.get("/api/session").status_code == 200
     app._keep_alive_once()

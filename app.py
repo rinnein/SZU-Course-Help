@@ -5,18 +5,18 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-import random
 import re
 import secrets
 import socket
 import threading
 import time
 import webbrowser
+from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
 
 import requests
-from fastapi import BackgroundTasks, FastAPI, HTTPException, Query, Request, status
+from fastapi import FastAPI, HTTPException, Query, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, ConfigDict, Field
 from starlette.responses import FileResponse, JSONResponse
@@ -37,7 +37,7 @@ from security.key_manager import (
     generate_card_key,
     get_or_create_key_pair,
 )
-from services import backend_service, cart_service, webvpn_auth_service
+from services import backend_service, cart_service, proxy_service, webvpn_auth_service
 from services.auth_service import (
     LOGIN_ERROR_MSG,
     attempt_automatic_relogin,
@@ -77,9 +77,8 @@ from services.enroll_service import (
     start_enroll_worker,
     stop_enroll_task,
 )
-from services.timetable_service import build_timetable
-from services import proxy_service
 from services.proxy_service import SCHOOL_HOST, clear_proxy_cookie_mirror
+from services.timetable_service import build_timetable
 
 proxy_request = proxy_service.proxy_request
 
@@ -119,7 +118,14 @@ SERVER_PORT = _find_available_port(_preferred_port())
 _runtime_prefill = {"student_id": "", "card_key": ""}
 
 
-app = FastAPI(title="深大抢课助手 API", version="3.4.0")
+@asynccontextmanager
+async def app_lifespan(_app: FastAPI):
+    """Start process-local services when the ASGI application starts."""
+    _start_runtime_services()
+    yield
+
+
+app = FastAPI(title="深大抢课助手 API", version="3.4.0", lifespan=app_lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -243,11 +249,6 @@ def _start_runtime_services() -> None:
         keep_alive.start()
         logger.info("Session keep-alive started (every %ds)", KEEP_ALIVE_INTERVAL_SECONDS)
         _runtime_started = True
-
-
-@app.on_event("startup")
-async def startup_runtime_services() -> None:
-    _start_runtime_services()
 
 
 def configure_runtime_prefill(student_id: str, card_key: str) -> None:
@@ -871,7 +872,12 @@ async def api_school_courses(
             retryable=True,
         )
     except backend_service.WebVPNAuthenticationRequiredError:
-        return _api_error(409, "主站暂时无法访问，请先完成 WebVPN 统一认证后重试", "WEBVPN_AUTH_REQUIRED", retryable=True)
+        return _api_error(
+            409,
+            "主站暂时无法访问，请先完成 WebVPN 统一认证后重试",
+            "WEBVPN_AUTH_REQUIRED",
+            retryable=True,
+        )
     except requests.Timeout:
         logger.warning("Course-list endpoint timed out")
         return _api_error(
@@ -937,7 +943,12 @@ async def api_school_enrolled():
             retryable=True,
         )
     except backend_service.WebVPNAuthenticationRequiredError:
-        return _api_error(409, "主站暂时无法访问，请先完成 WebVPN 统一认证后重试", "WEBVPN_AUTH_REQUIRED", retryable=True)
+        return _api_error(
+            409,
+            "主站暂时无法访问，请先完成 WebVPN 统一认证后重试",
+            "WEBVPN_AUTH_REQUIRED",
+            retryable=True,
+        )
     except requests.Timeout:
         logger.warning("Selected-course endpoint timed out")
         return _api_error(
