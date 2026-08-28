@@ -244,7 +244,7 @@ OCR 和 ONNX Runtime 会携带较多本地模型及动态库，未签名的新�
 
 ## 十二、开发者源码运行
 
-普通用户可以跳过本节。开发者可在 Python 3.13 环境中运行：
+普通用户可以跳过本节。开发者可在 Python 3.14 环境中运行：
 
 ```powershell
 git clone git@github.com:Weeye-hua/SZU-Course-Help.git
