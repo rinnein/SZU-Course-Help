@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>本地缓存 | 深大抢课助手</title>
+  <link rel="icon" href="/favicon.ico">
+  <link rel="stylesheet" href="/styles.css?build=20260829.2">
+</head>
+<body class="offline-page">
+  <header class="offline-header">
+    <a class="brand-lockup" href="/login">
+      <span class="brand-mark" aria-hidden="true">SZU</span>
+      <span>
+        <strong>深大抢课助手</strong>
+        <small>本地缓存查阅</small>
+      </span>
+    </a>
+    <a class="button button-quiet" href="/login">返回登录</a>
+  </header>
+
+  <main class="offline-main">
+    <section class="offline-intro">
+      <p class="eyebrow">离线只读</p>
+      <h1>本地缓存</h1>
+      <p>这里显示本机曾经成功加载过的课程目录和选课清单，不会请求学校选课系统。</p>
+    </section>
+
+    <section class="offline-toolbar" aria-label="本地课程目录">
+      <div id="offlineTypes" class="offline-types">
+        <button class="button button-secondary is-active" type="button" data-type="TJKC">本班推荐</button>
+        <button class="button button-secondary" type="button" data-type="FANKC">方案内课程</button>
+      </div>
+      <label class="offline-search">
+        <span class="sr-only">搜索本地课程</span>
+        <input id="offlineSearch" type="search" placeholder="搜索课程名称、课程号或教师">
+      </label>
+    </section>
+
+    <section class="offline-section">
+      <div class="offline-section-heading">
+        <div>
+          <h2 id="offlineTitle">本班推荐</h2>
+          <p id="offlineSummary" role="status" aria-live="polite">正在读取本地缓存</p>
+        </div>
+        <span class="status-pill status-neutral">只读</span>
+      </div>
+      <div id="offlineCourseList" class="course-list"></div>
+      <nav class="pagination" aria-label="本地课程分页">
+        <button id="offlinePrevious" class="button button-quiet" type="button" disabled>上一页</button>
+        <span id="offlinePageLabel">第 1 页</span>
+        <button id="offlineNext" class="button button-quiet" type="button" disabled>下一页</button>
+      </nav>
+    </section>
+
+    <section class="offline-section">
+      <div class="offline-section-heading">
+        <div>
+          <h2>选课清单</h2>
+          <p id="offlineCartSummary">正在读取本地清单</p>
+        </div>
+        <span class="status-pill status-neutral">本机数据</span>
+      </div>
+      <div id="offlineCartList" class="cart-list"></div>
+    </section>
+  </main>
+
+  <script src="/offline.js?build=20260829.2" defer></script>
+</body>
+</html>

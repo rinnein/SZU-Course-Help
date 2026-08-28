@@ -5,6 +5,8 @@ from __future__ import annotations
 import pytest
 import requests
 
+from services import course_cache_service
+
 
 @pytest.fixture(autouse=True)
 def block_unmocked_network(monkeypatch):
@@ -19,3 +21,9 @@ def block_unmocked_network(monkeypatch):
     # also uses httpx internally. Removing the httpx block here lets the
     # TestClient tests continue to run (the deprecation warning was pre-existing).
     # The proxy tests use a mock client and never reach real network.
+
+
+@pytest.fixture(autouse=True)
+def isolate_course_cache(monkeypatch, tmp_path):
+    """Keep persistent course-cache tests out of the repository workspace."""
+    monkeypatch.setattr(course_cache_service, "_path", tmp_path / "course_cache.json")

@@ -7,7 +7,9 @@ const MAX_CATALOG_PAGES = 1000;
 const CATALOG_PAGE_DELAY_MS = 150;
 const SEARCH_DEBOUNCE_MS = 250;
 const SESSION_POLL_INTERVAL_MS = 5000;
+const CACHE_REFRESH_INTERVAL_MS = 30000;
 const FILTER_PREFERENCES_KEY = "szu-course-help.course-filters.v1";
+const OFFLINE_CACHE_TYPES = new Set(["TJKC", "FANKC"]);
 
 const categoryNames = {
   TJKC: "本班推荐",
@@ -49,6 +51,7 @@ const appState = {
   courseRequestController: null,
   courseRequestId: 0,
   courseDataKey: "",
+  courseCacheMeta: null,
   catalogBlockedCode: "",
   loadingSession: false,
   sessionTimer: null,
@@ -59,6 +62,8 @@ const appState = {
   myCourses: [],
   myCoursesLoaded: false,
   loadingMyCourses: false,
+  cacheMode: false,
+  cacheRefreshTimer: null,
   myCoursesView: "grid",
   showCartOnSchedule: true,
   scheduleConflict: null,
@@ -93,6 +98,7 @@ const appElements = {
   courseSearch: document.querySelector("#courseSearch"),
   filterConflictSwitch: document.querySelector("#filterConflictSwitch"),
   filterFullSwitch: document.querySelector("#filterFullSwitch"),
+  cacheModeSwitch: document.querySelector("#cacheModeSwitch"),
   refreshCourses: document.querySelector("#refreshCourses"),
   campusSelect: document.querySelector("#campusSelect"),
   courseList: document.querySelector("#courseList"),
@@ -170,6 +176,76 @@ function stripUiQuery() {
     "",
     `${url.pathname}${search ? `?${search}` : ""}${url.hash}`,
   );
+}
+
+function courseRequestUrl(courseType, page, pageSize = 10, { cacheMode = appState.cacheMode } = {}) {
+  const params = new URLSearchParams({
+    type: String(courseType || ""),
+    page: String(page),
+    page_size: String(pageSize),
+  });
+  if (cacheMode) params.set("cache_mode", "true");
+  return `/api/school/courses?${params.toString()}`;
+}
+
+function cacheTimestampLabel(timestamp) {
+  const value = Number(timestamp);
+  if (!Number.isFinite(value) || value <= 0) return "时间未知";
+  return new Date(value * 1000).toLocaleString("zh-CN", { hour12: false });
+}
+
+function courseSummary(totalCount, courseCount, metadata = {}) {
+  const base = `共 ${totalCount} 门课程，本页 ${courseCount} 门`;
+  if (!metadata.cached) return base;
+  return `缓存课程：${base}（最近更新 ${cacheTimestampLabel(metadata.cached_at)}）`;
+}
+
+function clearCacheRefreshTimer() {
+  if (appState.cacheRefreshTimer) {
+    window.clearInterval(appState.cacheRefreshTimer);
+    appState.cacheRefreshTimer = null;
+  }
+}
+
+function isOfflineCacheType(type = appState.type) {
+  return OFFLINE_CACHE_TYPES.has(String(type || "").toUpperCase());
+}
+
+function setCacheMode(enabled, { load = true } = {}) {
+  const wasEnabled = appState.cacheMode;
+  appState.cacheMode = Boolean(enabled);
+  if (appElements.cacheModeSwitch) appElements.cacheModeSwitch.checked = appState.cacheMode;
+  if (!appState.session?.logged_in) {
+    clearCacheRefreshTimer();
+    if (appState.cacheMode && load && isOfflineCacheType() && !wasEnabled) {
+      loadCourses({ cacheOnly: true });
+    }
+    return;
+  }
+  if (!appState.cacheMode) {
+    clearCacheRefreshTimer();
+    if (wasEnabled && appState.session?.logged_in) {
+      if (isFilterActive()) {
+        runSearchFetch({ force: true, preserveExisting: true, forceLive: true });
+      } else {
+        loadCourses({ preserveExisting: true, forceLive: true });
+      }
+    }
+    return;
+  }
+  if (!appState.cacheRefreshTimer) {
+    appState.cacheRefreshTimer = window.setInterval(
+      refreshCoursesFromNetwork,
+      CACHE_REFRESH_INTERVAL_MS,
+    );
+  }
+  if (!wasEnabled && appState.session?.logged_in) {
+    if (isFilterActive()) {
+      runSearchFetch({ force: true, preserveExisting: true });
+    } else {
+      loadCourses({ preserveExisting: true });
+    }
+  }
 }
 
 function isAbortError(error) {
@@ -536,6 +612,7 @@ function renderCourseAvailabilityState(message = "") {
   appState.courses = [];
   appState.totalCount = 0;
   appState.courseDataKey = "";
+  appState.courseCacheMeta = null;
   appState.searchKeyword = "";
   appState.searchResults = [];
   appState.searchPage = 1;
@@ -635,8 +712,10 @@ function applySessionData(session) {
     appState.courses = [];
     appState.totalCount = 0;
     appState.courseDataKey = "";
+    appState.courseCacheMeta = null;
   }
   appState.session = session;
+  if (!session?.logged_in && appState.cacheMode) clearCacheRefreshTimer();
   renderCampusOptions(session);
   appState.lastReloginStatus = String(session.relogin_status || "idle");
   appElements.studentLabel.textContent = session.relogin_in_progress
@@ -730,9 +809,13 @@ async function loadSession(showDialog = true, refreshOnCatalogChange = true) {
       if (!appState.session.logged_in) {
         appState.searchKeyword = "";
         appElements.courseSearch.value = "";
-        appElements.courseSearch.disabled = true;
-        renderState("登录状态已失效", "请返回登录页完成登录后再读取课程目录。");
-        updatePagination();
+        if (isOfflineCacheType()) {
+          await loadCourses({ cacheOnly: true });
+        } else {
+          appElements.courseSearch.disabled = true;
+          renderState("登录状态已失效", "请返回登录页完成登录后再读取课程目录。");
+          updatePagination();
+        }
       } else if (courseCatalogBlocked()) {
         renderCourseAvailabilityState();
       } else if (refreshOnCatalogChange) {
@@ -911,9 +994,12 @@ function applyCourseFilter() {
     (appState.searchPage - 1) * FILTER_PAGE_SIZE,
     appState.searchPage * FILTER_PAGE_SIZE,
   );
+  const prefix = cache.cached
+    ? `缓存课程（最近更新 ${cacheTimestampLabel(cache.cachedAt)}）：`
+    : "";
   appElements.courseSummary.textContent = results.length
-    ? `匹配 ${results.length} 门课程（全部 ${cache.totalCount} 门），本页 ${pageItems.length} 门`
-    : `没有匹配课程，全部目录共 ${cache.totalCount} 门`;
+    ? `${prefix}匹配 ${results.length} 门课程（全部 ${cache.totalCount} 门），本页 ${pageItems.length} 门`
+    : `${prefix}没有匹配课程，全部目录共 ${cache.totalCount} 门`;
 }
 
 function renderFilteredCourses() {
@@ -963,7 +1049,7 @@ function renderCourses() {
 }
 
 function updatePagination() {
-  const blocked = courseCatalogBlocked();
+  const blocked = courseCatalogBlocked() && !appState.cacheMode;
   if (isFilterActive()) {
     const results = Array.isArray(appState.searchResults) ? appState.searchResults : [];
     const totalPages = Math.max(1, Math.ceil(results.length / FILTER_PAGE_SIZE));
@@ -1029,8 +1115,9 @@ function waitForCatalogPageDelay(signal) {
   });
 }
 
-async function fetchFullCatalog({ force = false } = {}) {
+async function fetchFullCatalog({ force = false, preserveExisting = false, forceLive = false } = {}) {
   const type = appState.type;
+  const offlineCache = !appState.session?.logged_in && isOfflineCacheType();
   const scopeKey = catalogScopeKey();
   const existing = appState.catalogCaches[type];
   if (existing?.complete && existing.scopeKey === scopeKey && !force) return true;
@@ -1049,16 +1136,20 @@ async function fetchFullCatalog({ force = false } = {}) {
     totalCount: 0,
     complete: false,
     scopeKey,
+    cached: true,
+    cachedAt: 0,
   };
-  appState.catalogCaches[type] = cache;
+  if (!preserveExisting) appState.catalogCaches[type] = cache;
 
   const updateProgress = () => {
-    appElements.courseSummary.textContent = cache.totalCount
-      ? `正在加载全部课程 ${cache.courses.length} / ${cache.totalCount} 门`
-      : "正在加载全部课程";
+    if (!preserveExisting) {
+      appElements.courseSummary.textContent = cache.totalCount
+        ? `正在加载全部课程 ${cache.courses.length} / ${cache.totalCount} 门`
+        : "正在加载全部课程";
+    }
   };
   updateProgress();
-  renderCourses();
+  if (!preserveExisting) renderCourses();
   updatePagination();
 
   try {
@@ -1066,7 +1157,9 @@ async function fetchFullCatalog({ force = false } = {}) {
     let expectedTotalCount = null;
     for (let page = 1; page <= MAX_CATALOG_PAGES; page += 1) {
       const data = await api(
-        `/api/school/courses?type=${encodeURIComponent(type)}&page=${page}&page_size=${FILTER_PAGE_SIZE}`,
+        courseRequestUrl(type, page, FILTER_PAGE_SIZE, {
+          cacheMode: (appState.cacheMode || offlineCache) && !forceLive,
+        }),
         { signal: controller.signal, timeoutMs: SESSION_RECOVERY_TIMEOUT_MS },
       );
       if (
@@ -1074,6 +1167,21 @@ async function fetchFullCatalog({ force = false } = {}) {
         || scopeKey !== catalogScopeKey()
       ) return false;
       const items = Array.isArray(data.courses) ? data.courses : [];
+      if (data.full_catalog) {
+        const reportedTotal = Number(data.total_count);
+        if (!Number.isInteger(reportedTotal) || reportedTotal < items.length) {
+          throw new ApiError("本地课程缓存数据无效，请重新加载", {
+            code: "SCHOOL_RESPONSE_INVALID",
+            retryable: true,
+          });
+        }
+        cache.courses = items;
+        cache.totalCount = reportedTotal;
+        cache.cached = Boolean(data.cached);
+        cache.cachedAt = Number(data.cached_at) || 0;
+        completed = true;
+        break;
+      }
       const reportedTotal = Number(data.total_count);
       if (!Number.isInteger(reportedTotal) || reportedTotal < 0) {
         throw new ApiError("学校返回的课程总数无效，请稍后重新加载", {
@@ -1091,6 +1199,8 @@ async function fetchFullCatalog({ force = false } = {}) {
       }
       cache.totalCount = expectedTotalCount;
       cache.courses.push(...items);
+      cache.cached = cache.cached && Boolean(data.cached);
+      cache.cachedAt = Math.max(cache.cachedAt, Number(data.cached_at) || 0);
       updateProgress();
       const totalPages = Math.max(1, Math.ceil(cache.totalCount / FILTER_PAGE_SIZE));
       if (totalPages > MAX_CATALOG_PAGES) {
@@ -1125,13 +1235,15 @@ async function fetchFullCatalog({ force = false } = {}) {
       });
     }
     cache.complete = true;
+    if (preserveExisting) appState.catalogCaches[type] = cache;
     return true;
   } catch (error) {
     if (isAbortError(error) || requestId !== appState.catalogRequestId) return false;
-    delete appState.catalogCaches[type];
+    if (!preserveExisting) delete appState.catalogCaches[type];
     if (error instanceof SessionExpiredError) return false;
     const availabilityError = ["COURSE_WINDOW_CLOSED", "BATCH_UNAVAILABLE"].includes(error.code);
     if (availabilityError) {
+      if (preserveExisting && existing?.complete) return false;
       appState.catalogBlockedCode = error.code;
       setPhasePresentation();
       renderCourseAvailabilityState(error.message);
@@ -1146,19 +1258,24 @@ async function fetchFullCatalog({ force = false } = {}) {
       appState.loadingCatalog = false;
       appState.catalogLoadingType = "";
       appState.catalogRequestController = null;
-      appElements.courseSearch.disabled = courseCatalogBlocked();
+      appElements.courseSearch.disabled = courseCatalogBlocked()
+        && !appState.cacheMode
+        && !offlineCache;
       appElements.refreshCourses.disabled = appState.loadingCourses || appState.refreshingPhase;
     }
   }
 }
 
-async function runSearchFetch({ force = false } = {}) {
-  if (!appState.session?.logged_in || courseCatalogBlocked()) return;
-  const ok = await fetchFullCatalog({ force });
+async function runSearchFetch({ force = false, preserveExisting = false, forceLive = false } = {}) {
+  const offlineCache = !appState.session?.logged_in && isOfflineCacheType();
+  if (!appState.session?.logged_in && !offlineCache) return;
+  if (courseCatalogBlocked() && !appState.cacheMode && !forceLive) return;
+  const ok = await fetchFullCatalog({ force, preserveExisting, forceLive });
   if (!ok || !isFilterActive()) return;
   applyCourseFilter();
   renderCourses();
   updatePagination();
+  return ok;
 }
 
 async function handleSearchInput() {
@@ -1169,7 +1286,11 @@ async function handleSearchInput() {
       appState.searchKeyword = "";
       abortCatalogFetch();
       if (appState.courseDataKey) {
-        appElements.courseSummary.textContent = `共 ${appState.totalCount} 门课程，本页 ${appState.courses.length} 门`;
+        appElements.courseSummary.textContent = courseSummary(
+          appState.totalCount,
+          appState.courses.length,
+          appState.courseCacheMeta || {},
+        );
         renderCourses();
       }
       updatePagination();
@@ -1192,11 +1313,13 @@ function courseErrorTitle(error) {
 }
 
 async function loadCourses(options = {}) {
-  if (!appState.session?.logged_in) {
+  const offlineCache = Boolean(options.cacheOnly || (!appState.session?.logged_in && isOfflineCacheType()));
+  if (!appState.session?.logged_in && !offlineCache) {
     renderState("尚未登录", "返回登录页完成学号、密码、卡密和验证码校验。");
     return;
   }
-  if (courseCatalogBlocked()) {
+  const forceLive = Boolean(options.forceLive);
+  if (courseCatalogBlocked() && !appState.cacheMode && !offlineCache && !forceLive) {
     renderCourseAvailabilityState();
     return;
   }
@@ -1231,22 +1354,50 @@ async function loadCourses(options = {}) {
 
   try {
     const data = await api(
-      `/api/school/courses?type=${encodeURIComponent(requestedType)}&page=${requestedPage}&page_size=10`,
+      courseRequestUrl(requestedType, requestedPage, 10, {
+        cacheMode: (appState.cacheMode || offlineCache) && !forceLive,
+      }),
       { signal: controller.signal, timeoutMs: SESSION_RECOVERY_TIMEOUT_MS },
     );
     if (requestId !== appState.courseRequestId) return;
-    appState.courses = Array.isArray(data.courses) ? data.courses : [];
-    appState.totalCount = Number(data.total_count || 0);
+    const allCourses = Array.isArray(data.courses) ? data.courses : [];
+    const courses = data.full_catalog
+      ? allCourses.slice((requestedPage - 1) * 10, requestedPage * 10)
+      : allCourses;
+    if (preserveExisting && !courses.length && hasCurrentResult) {
+      appElements.courseSummary.textContent = "实时刷新返回空列表，仍显示上次成功结果";
+      return;
+    }
+    appState.courses = courses;
+    appState.totalCount = Number(data.total_count || allCourses.length || 0);
     appState.courseDataKey = requestedKey;
+    appState.courseCacheMeta = data;
     appState.catalogBlockedCode = "";
-    appElements.courseSummary.textContent = `共 ${appState.totalCount} 门课程，本页 ${appState.courses.length} 门`;
+    appElements.courseSummary.textContent = courseSummary(
+      appState.totalCount,
+      appState.courses.length,
+      data,
+    );
     renderCourses();
   } catch (error) {
     if (isAbortError(error) || requestId !== appState.courseRequestId) return;
-    if (error instanceof SessionExpiredError) return;
+    if (error instanceof SessionExpiredError) {
+      if (offlineCache) {
+        appElements.courseSummary.textContent = "没有找到本地课程缓存";
+        renderState(
+          "暂无离线课程数据",
+          "请先登录并成功加载本班推荐或方案内课程，之后即使学校系统不可用也可以本地查阅。",
+        );
+      }
+      return;
+    }
 
     const availabilityError = ["COURSE_WINDOW_CLOSED", "BATCH_UNAVAILABLE"].includes(error.code);
     if (availabilityError) {
+      if (preserveExisting && hasCurrentResult) {
+        appElements.courseSummary.textContent = "实时刷新暂不可用，仍显示上次成功结果";
+        return;
+      }
       appState.catalogBlockedCode = error.code;
       setPhasePresentation();
       renderCourseAvailabilityState(error.message);
@@ -1278,6 +1429,9 @@ async function loadCourses(options = {}) {
       appState.loadingCourses = false;
       appState.courseRequestController = null;
       appElements.refreshCourses.disabled = appState.refreshingPhase || appState.loadingCatalog;
+      appElements.courseSearch.disabled = courseCatalogBlocked()
+        && !appState.cacheMode
+        && !offlineCache;
       updatePagination();
     }
   }
@@ -1337,12 +1491,35 @@ async function refreshPhaseAndCourses() {
 }
 
 async function refreshCurrentView() {
-  if (courseCatalogBlocked()) await refreshPhaseAndCourses();
+  if (courseCatalogBlocked() && !appState.cacheMode) await refreshPhaseAndCourses();
   else {
-    invalidateCatalogCache(appState.type);
-    if (isFilterActive()) await runSearchFetch({ force: true });
-    else await loadCourses({ preserveExisting: true });
+    if (!appState.cacheMode) invalidateCatalogCache(appState.type);
+    if (isFilterActive()) {
+      await runSearchFetch({ force: true, preserveExisting: true, forceLive: true });
+    } else {
+      await loadCourses({ preserveExisting: true, forceLive: true });
+    }
   }
+}
+
+async function refreshCoursesFromNetwork() {
+  if (
+    !appState.cacheMode
+    || !appState.session?.logged_in
+    || appState.loadingCourses
+    || appState.loadingCatalog
+    || appState.refreshingPhase
+  ) return;
+  if (isFilterActive()) {
+    const ok = await runSearchFetch({ force: true, preserveExisting: true, forceLive: true });
+    if (ok !== false) {
+      applyCourseFilter();
+      renderCourses();
+      updatePagination();
+    }
+    return;
+  }
+  await loadCourses({ preserveExisting: true, forceLive: true });
 }
 
 function syncEnrollControls() {
@@ -1403,7 +1580,7 @@ function renderCart() {
     const actions = element("div", "cart-item-actions");
     const statusClass = item.status === "SUCCESS" ? "status-success" : item.status === "FAILED" ? "status-danger" : item.status === "ENROLLING" ? "status-warning" : "status-neutral";
     actions.append(element("span", `status-pill ${statusClass}`, statusNames[item.status] || "待启动"));
-    if (item.status === "FAILED" && !appState.session?.task_running) {
+    if (item.status === "FAILED" && appState.session?.logged_in && !appState.session?.task_running) {
       const retry = element("button", "button button-secondary", "重新排队");
       retry.type = "button";
       retry.addEventListener("click", async () => {
@@ -1431,9 +1608,12 @@ function renderCart() {
       && Boolean(appState.session?.task_pause_acknowledged)
       && !taskStopping;
     const terminalCourse = ["SUCCESS", "FAILED"].includes(item.status);
-    remove.disabled = taskRunning && (taskStopping || (!terminalCourse && !canEditPausedTask));
+    remove.disabled = !appState.session?.logged_in
+      || (taskRunning && (taskStopping || (!terminalCourse && !canEditPausedTask)));
     if (remove.disabled) {
-      remove.title = taskStopping
+      remove.title = !appState.session?.logged_in
+        ? "未登录时仅可查阅本地选课清单"
+        : taskStopping
         ? "抢课任务正在结束"
         : appState.session?.task_paused
           ? "正在完成当前请求，请等待安全暂停"
@@ -2202,6 +2382,9 @@ appElements.filterFullSwitch.addEventListener("change", () => {
   renderCourses();
   updatePagination();
 });
+appElements.cacheModeSwitch?.addEventListener("change", () => {
+  setCacheMode(appElements.cacheModeSwitch.checked);
+});
 appElements.campusSelect.addEventListener("change", () => {
   switchCampus(appElements.campusSelect.value);
 });
@@ -2277,6 +2460,9 @@ appElements.logout.addEventListener("click", async () => {
     if (result.is_error) throw new Error(result.message);
     stopProgressPolling();
     stopSessionPolling();
+    appState.cacheMode = false;
+    clearCacheRefreshTimer();
+    if (appElements.cacheModeSwitch) appElements.cacheModeSwitch.checked = false;
     window.location.assign(cleanPagePath("/login"));
   } catch (error) {
     if (!(error instanceof SessionExpiredError)) showToast(error.message, true);
@@ -2300,15 +2486,20 @@ for (const closeButton of document.querySelectorAll("[data-close-dialog]")) {
   });
 }
 
+window.addEventListener?.("pagehide", clearCacheRefreshTimer);
+
 async function initializeApp() {
   stripUiQuery();
-  await loadSession(true);
+  await loadSession(false);
   startSessionPolling();
   appElements.brandLink.href = cleanPagePath("/");
   appElements.sessionLoginLink.href = cleanPagePath("/login");
   await loadCart();
-  if (appState.session?.logged_in) await loadCourses();
-  else renderState("尚未登录", "返回登录页完成学号、密码、卡密和验证码校验。");
+  if (appState.session?.logged_in) {
+    await loadCourses();
+  } else {
+    await loadCourses({ cacheOnly: true });
+  }
 }
 
 initializeApp();

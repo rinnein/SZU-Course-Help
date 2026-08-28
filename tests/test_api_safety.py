@@ -13,7 +13,7 @@ import database
 import logic
 from database import DatabaseManager
 from security import key_manager
-from services import cart_service, enroll_service
+from services import cart_service, course_cache_service, enroll_service
 
 client = TestClient(app.app)
 
@@ -59,6 +59,9 @@ def test_health_and_static_login_page():
     response = client.get("/login")
     assert response.status_code == 200
     assert "进入抢课工作台" in response.text
+    offline = client.get("/offline")
+    assert offline.status_code == 200
+    assert "本地缓存" in offline.text
 
     bootstrap = client.get("/api/bootstrap").json()
     assert "ui_cache_token" not in bootstrap
@@ -274,6 +277,157 @@ def test_course_api_converts_ui_pages_to_school_zero_based_pages(monkeypatch):
     assert first_page.status_code == 200
     assert second_page.status_code == 200
     assert observed_pages == [("TJKC", 0), ("TJKC", 1)]
+
+
+def test_live_course_response_updates_persistent_cache(monkeypatch, tmp_path):
+    set_logged_session(monkeypatch)
+    monkeypatch.setattr(course_cache_service, "_path", tmp_path / "courses.json")
+    payload = {
+        "total_count": 1,
+        "courses": [{"course_name": "实时课程"}],
+        "msg": "",
+        "is_error": False,
+    }
+    monkeypatch.setattr(app, "query_courses", lambda *_args: (True, payload, "课程"))
+
+    response = client.get("/api/school/courses?type=TJKC&page=1&page_size=10")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["cached"] is False
+    assert body["has_cache"] is True
+    assert body["cached_at"] > 0
+    assert body["cache_version"] == 1
+    assert course_cache_service.get("TJKC", 1, 10)["courses"] == payload["courses"]
+
+
+def test_cache_mode_returns_cached_course_without_school_request(monkeypatch, tmp_path):
+    set_logged_session(monkeypatch, batch_name="补选已结束")
+    monkeypatch.setattr(course_cache_service, "_path", tmp_path / "courses.json")
+    payload = {
+        "total_count": 1,
+        "courses": [{"course_name": "缓存课程"}],
+        "msg": "",
+        "is_error": False,
+    }
+    course_cache_service.put("TJKC", 1, 10, payload)
+    monkeypatch.setattr(
+        app,
+        "query_courses",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("cache hit must not query school")),
+    )
+
+    response = client.get(
+        "/api/school/courses?type=TJKC&page=1&page_size=10&cache_mode=true"
+    )
+
+    assert response.status_code == 200
+    assert response.json()["cached"] is True
+    assert response.json()["courses"] == payload["courses"]
+
+
+def test_cache_mode_can_read_full_catalog_without_login(monkeypatch, tmp_path):
+    monkeypatch.setattr(course_cache_service, "_path", tmp_path / "courses.json")
+    payload = {
+        "total_count": 2,
+        "courses": [{"course_name": "离线课程一"}, {"course_name": "离线课程二"}],
+        "msg": "",
+        "is_error": False,
+    }
+    course_cache_service.put_full("FANKC", payload)
+    monkeypatch.setattr(config, "token", "")
+    monkeypatch.setattr(config, "combined_cookie", "")
+    monkeypatch.setattr(
+        app,
+        "query_courses",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("offline cache must not query school")),
+    )
+
+    response = client.get(
+        "/api/school/courses?type=FANKC&page=99&page_size=10&cache_mode=true"
+    )
+
+    assert response.status_code == 200
+    assert response.json()["full_catalog"] is True
+    assert response.json()["courses"] == payload["courses"]
+
+
+def test_full_catalog_refresh_collects_all_pages(monkeypatch, tmp_path):
+    monkeypatch.setattr(course_cache_service, "_path", tmp_path / "courses.json")
+    first_page = {
+        "total_count": 11,
+        "courses": [{"course_name": f"课程{i}"} for i in range(10)],
+        "msg": "",
+        "is_error": False,
+    }
+    last_page = {
+        "total_count": 11,
+        "courses": [{"course_name": "课程10"}],
+        "msg": "",
+        "is_error": False,
+    }
+    monkeypatch.setattr(
+        app,
+        "query_courses",
+        lambda course_type, page: (True, last_page, "方案内课程")
+        if (course_type, page) == ("FANKC", 1)
+        else (_ for _ in ()).throw(AssertionError("unexpected page")),
+    )
+
+    app._cache_full_catalog("FANKC", 1, first_page)
+
+    cached = course_cache_service.get_full("FANKC")
+    assert cached["total_count"] == 11
+    assert [item["course_name"] for item in cached["courses"]] == [f"课程{i}" for i in range(11)]
+
+
+def test_cache_mode_miss_falls_back_to_live_course_request(monkeypatch, tmp_path):
+    set_logged_session(monkeypatch)
+    monkeypatch.setattr(course_cache_service, "_path", tmp_path / "courses.json")
+    payload = {
+        "total_count": 1,
+        "courses": [{"course_name": "实时回退课程"}],
+        "msg": "",
+        "is_error": False,
+    }
+    observed = []
+    monkeypatch.setattr(
+        app,
+        "query_courses",
+        lambda course_type, page: observed.append((course_type, page))
+        or (True, payload, "课程"),
+    )
+
+    response = client.get(
+        "/api/school/courses?type=TJKC&page=1&page_size=10&cache_mode=true"
+    )
+
+    assert response.status_code == 200
+    assert response.json()["cached"] is False
+    assert observed == [("TJKC", 0)]
+    assert course_cache_service.get("TJKC", 1, 10)["courses"] == payload["courses"]
+
+
+def test_live_refresh_failure_keeps_existing_course_cache(monkeypatch, tmp_path):
+    set_logged_session(monkeypatch)
+    monkeypatch.setattr(course_cache_service, "_path", tmp_path / "courses.json")
+    original = {
+        "total_count": 1,
+        "courses": [{"course_name": "保留课程"}],
+        "msg": "",
+        "is_error": False,
+    }
+    course_cache_service.put("TJKC", 1, 10, original)
+    monkeypatch.setattr(
+        app,
+        "query_courses",
+        lambda *_args: (_ for _ in ()).throw(requests.Timeout("slow")),
+    )
+
+    response = client.get("/api/school/courses?type=TJKC&page=1&page_size=10")
+
+    assert response.status_code == 504
+    assert course_cache_service.get("TJKC", 1, 10)["courses"] == original["courses"]
 
 
 def test_closed_phase_does_not_query_school_course_endpoint(monkeypatch):
