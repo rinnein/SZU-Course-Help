@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 from types import ModuleType
 
+import numpy as np
 import pytest
 
 import logic
@@ -71,3 +72,20 @@ def test_engine_factory_adapts_legacy_ddddocr_api(monkeypatch):
         {"det": True, "ocr": False, "show_ad": False},
         {"ocr": True, "det": False, "beta": True, "show_ad": False},
     ]
+
+
+def test_ocr_pipeline_uses_predict_contract(monkeypatch):
+    class Detector:
+        def predict(self, image):
+            return [[1, 1, 10, 20]]
+
+    class Recognizer:
+        def predict(self, image):
+            return "候"
+
+    image = np.full((80, 250, 3), 255, dtype=np.uint8)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(logic, "_ddddocr_engines", lambda: (Detector(), Recognizer()))
+        assert logic._candidate_boxes(image) == [[1, 26, 10, 45]]
+    assert logic._ocr_glyph(Recognizer(), image[2:14, 82:94]) == "候"
