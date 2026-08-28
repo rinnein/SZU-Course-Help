@@ -6,7 +6,7 @@
   <meta name="color-scheme" content="light">
   <title>抢课工作台 | 深大抢课助手</title>
   <link rel="icon" href="/favicon.ico">
-  <link rel="stylesheet" href="/styles.css?build=20260828.6">
+  <link rel="stylesheet" href="/styles.css?build=20260829.1">
 </head>
 <body class="app-page">
   <header class="topbar">
@@ -222,7 +222,18 @@
       </div>
       <button class="dialog-close" type="button" data-close-dialog="myCoursesDialog" aria-label="关闭">×</button>
     </div>
-    <div id="myCoursesList" class="my-courses-list"></div>
+    <div class="schedule-view-toggle">
+      <div class="schedule-view-toggle-group">
+        <button id="scheduleViewGrid" class="button button-quiet is-active" type="button">周表视图</button>
+        <button id="scheduleViewList" class="button button-quiet" type="button">列表视图</button>
+      </div>
+      <label class="schedule-pending-toggle">
+        <input id="showPendingSwitch" type="checkbox" checked>
+        <span>显示待选课程（虚化）</span>
+      </label>
+    </div>
+    <div id="myCoursesScheduleWrap" class="my-courses-schedule-wrap"></div>
+    <div id="myCoursesList" class="my-courses-list" hidden></div>
     <div class="dialog-footer">
       <p id="myCoursesHint">这里显示学校系统中当前学号已选中的课程。</p>
       <button id="refreshMyCourses" class="button button-secondary button-block" type="button">刷新已选课程</button>
@@ -269,7 +280,7 @@
   </dialog>
 
   <div id="toastRegion" class="toast-region" aria-live="polite" aria-atomic="true"></div>
-  <script src="/course-app.js?build=20260828.6" defer></script>
-  <script src="/schedule-parser.js?build=20260828.6" defer></script>
+  <script src="/course-app.js?build=20260829.1" defer></script>
+  <script src="/schedule-parser.js?build=20260829.1" defer></script>
 </body>
 </html>
