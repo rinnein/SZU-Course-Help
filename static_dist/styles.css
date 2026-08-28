@@ -346,12 +346,12 @@ a {
   min-height: 100dvh;
   display: grid;
   place-items: center;
-  padding: 40px clamp(28px, 6vw, 92px);
-  overflow-y: auto;
+  padding: 24px clamp(24px, 5vw, 72px);
+  overflow: hidden;
 }
 
 .login-shell {
-  width: min(100%, 452px);
+  width: min(100%, 440px);
   animation: rise 620ms cubic-bezier(0.22, 1, 0.36, 1) both;
 }
 
@@ -361,31 +361,31 @@ a {
 }
 
 .login-header {
-  margin-bottom: 26px;
+  margin-bottom: 14px;
 }
 
 .login-header h1 {
   margin: 0;
-  font-size: 32px;
+  font-size: 28px;
   font-weight: 800;
   line-height: 1.18;
   letter-spacing: 0;
 }
 
 .login-header > p:last-child {
-  margin: 12px 0 0;
+  margin: 7px 0 0;
   color: var(--ink-soft);
   font-size: 14px;
 }
 
 .login-form {
   display: grid;
-  gap: 17px;
+  gap: 10px;
 }
 
 .field {
   display: grid;
-  gap: 8px;
+  gap: 4px;
 }
 
 .field > span:first-child,
@@ -413,8 +413,8 @@ a {
 }
 
 .field input {
-  height: 48px;
-  padding: 0 15px;
+  height: 40px;
+  padding: 0 12px;
 }
 
 .field textarea {
@@ -441,15 +441,15 @@ a {
 }
 
 .input-with-action input {
-  padding-right: 70px;
+  padding-right: 64px;
 }
 
 .field-action {
   position: absolute;
-  top: 6px;
-  right: 6px;
-  height: 36px;
-  padding: 0 12px;
+  top: 4px;
+  right: 4px;
+  height: 32px;
+  padding: 0 10px;
   border: 0;
   border-radius: var(--radius-xs);
   color: var(--brand);
@@ -475,7 +475,7 @@ a {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin-bottom: 9px;
+  margin-bottom: 6px;
   padding: 0;
 }
 
@@ -610,7 +610,7 @@ a {
   display: flex;
   justify-content: flex-end;
   gap: 6px;
-  margin-top: 8px;
+  margin-top: 6px;
 }
 
 .captcha-webvpn-auth {
@@ -642,8 +642,8 @@ a {
 }
 
 .captcha-actions .button {
-  min-height: 34px;
-  padding: 6px 12px;
+  min-height: 30px;
+  padding: 4px 10px;
   font-size: 12px;
 }
 
@@ -661,7 +661,7 @@ a {
   display: flex;
   align-items: center;
   gap: 8px;
-  margin-top: 4px;
+  margin-top: 0;
   color: var(--ink-soft);
   font-size: 12.5px;
   cursor: pointer;
@@ -683,7 +683,7 @@ a {
 .backend-fieldset {
   min-width: 0;
   margin: 0;
-  padding: 14px;
+  padding: 9px;
   border: 1px solid var(--line);
   border-radius: var(--radius-sm);
   background: var(--surface-2);
@@ -698,14 +698,15 @@ a {
 
 .backend-options {
   display: grid;
-  gap: 8px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 5px;
 }
 
 .backend-option {
   display: flex;
   align-items: flex-start;
-  gap: 9px;
-  padding: 9px 10px;
+  gap: 6px;
+  padding: 6px 7px;
   border: 1px solid transparent;
   border-radius: var(--radius-xs);
   cursor: pointer;
@@ -733,22 +734,149 @@ a {
 
 .backend-option small {
   color: var(--muted);
-  font-size: 11.5px;
+  font-size: 10px;
   line-height: 1.4;
 }
 
 .backend-status {
-  margin-top: 10px;
+  margin-top: 6px;
   color: var(--brand);
   font-size: 12px;
   line-height: 1.5;
 }
 
 .privacy-note {
-  margin: 16px 0 0;
+  margin: 10px 0 0;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.offline-note {
+  margin: 10px 0 0;
   color: var(--muted);
   font-size: 12px;
-  line-height: 1.65;
+  text-align: center;
+}
+
+.offline-page {
+  background: var(--canvas);
+}
+
+.offline-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  max-width: 1240px;
+  margin: 0 auto;
+  padding: 24px 32px;
+  border-bottom: 1px solid var(--line);
+}
+
+.offline-main {
+  width: min(1240px, calc(100% - 64px));
+  margin: 0 auto;
+  padding: 42px 0 72px;
+}
+
+.offline-intro {
+  margin-bottom: 28px;
+}
+
+.offline-intro h1 {
+  margin: 0;
+  font-size: clamp(28px, 4vw, 42px);
+  line-height: 1.2;
+}
+
+.offline-intro p:last-child {
+  max-width: 680px;
+  margin: 12px 0 0;
+  color: var(--ink-soft);
+}
+
+.offline-toolbar,
+.offline-section {
+  padding: 22px 0;
+  border-top: 1px solid var(--line);
+}
+
+.offline-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+}
+
+.offline-types {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.offline-types .is-active {
+  color: var(--brand-ink);
+  background: var(--brand);
+  border-color: var(--brand);
+}
+
+.offline-search {
+  min-width: min(340px, 100%);
+}
+
+.offline-search input {
+  width: 100%;
+  padding: 9px 12px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+}
+
+.offline-section-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 18px;
+  margin-bottom: 16px;
+}
+
+.offline-section-heading h2 {
+  margin: 0;
+  font-size: 20px;
+}
+
+.offline-section-heading p {
+  margin: 4px 0 0;
+  color: var(--muted);
+}
+
+.offline-section .course-list {
+  min-height: 80px;
+}
+
+.offline-section .pagination {
+  margin-top: 16px;
+}
+
+@media (max-width: 680px) {
+  .offline-header {
+    padding: 18px 20px;
+  }
+
+  .offline-main {
+    width: min(100% - 40px, 1240px);
+    padding-top: 30px;
+  }
+
+  .offline-toolbar {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .offline-search {
+    min-width: 0;
+  }
 }
 
 /* ==================================================================
@@ -1932,19 +2060,19 @@ dialog::backdrop {
   }
 
   .login-visual {
-    min-height: 208px;
+    min-height: 132px;
     background-position: center 40%;
   }
 
   .login-visual-copy {
-    right: 26px;
-    bottom: 26px;
-    left: 26px;
+    right: 20px;
+    bottom: 18px;
+    left: 20px;
   }
 
   .login-visual-copy .headline {
-    margin-top: 10px;
-    font-size: 30px;
+    margin-top: 0;
+    font-size: 26px;
   }
 
   .login-visual-copy p,
@@ -1954,7 +2082,15 @@ dialog::backdrop {
 
   .login-main {
     min-height: auto;
-    padding: 36px 24px 48px;
+    padding: 24px 20px 28px;
+  }
+
+  .login-header h1 {
+    font-size: 26px;
+  }
+
+  .backend-options {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 
   .workspace {

@@ -42,6 +42,11 @@ webvpn-browser-profile
 # Captcha/OCR working files may contain session-derived data.
 img/
 
+# Local course catalog cache and browser inspection artifacts.
+course_cache.json
+.playwright-cli/
+output/playwright/
+
 .env
 .env.*
 !.env.example

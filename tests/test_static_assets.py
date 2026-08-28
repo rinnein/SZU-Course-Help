@@ -11,9 +11,11 @@ STATIC = ROOT / "static_dist"
 def test_frontend_entrypoints_and_assets_exist():
     expected = {
         "login.html",
+        "offline.html",
         "index.html",
         "styles.css",
         "login.js",
+        "offline.js",
         "course-app.js",
         "bg.avif",
         "favicon.ico",
@@ -23,8 +25,10 @@ def test_frontend_entrypoints_and_assets_exist():
 
 def test_login_and_course_pages_expose_required_controls():
     login = (STATIC / "login.html").read_text(encoding="utf-8")
+    offline = (STATIC / "offline.html").read_text(encoding="utf-8")
     course = (STATIC / "index.html").read_text(encoding="utf-8")
     login_script = (STATIC / "login.js").read_text(encoding="utf-8")
+    offline_script = (STATIC / "offline.js").read_text(encoding="utf-8")
     course_script = (STATIC / "course-app.js").read_text(encoding="utf-8")
 
     for control_id in (
@@ -59,7 +63,12 @@ def test_login_and_course_pages_expose_required_controls():
     assert f"/styles.css?build={app.UI_ASSET_BUILD}" in login
     assert f"/styles.css?build={app.UI_ASSET_BUILD}" in course
     assert f"/login.js?build={app.UI_ASSET_BUILD}" in login
+    assert 'href="/offline" target="_blank"' in login
+    assert 'id="offlineCourseList"' in offline
+    assert f"/offline.js?build={app.UI_ASSET_BUILD}" in offline
+    assert 'cache_mode=true' in offline_script
     assert f"/course-app.js?build={app.UI_ASSET_BUILD}" in course
+    assert 'id="cacheModeSwitch"' in course
     assert "versionedPage" not in login_script
     assert "versionedPage" not in course_script
     assert "ui_cache_token" not in login_script
@@ -178,3 +187,16 @@ def test_course_search_filters_full_catalog_and_repaginates():
     assert "CATALOG_PAGE_DELAY_MS" in script
     assert 'code: "CATALOG_PAGE_LIMIT"' in script
     assert "cache.courses.length !== cache.totalCount" in script
+
+
+def test_course_cache_mode_keeps_cached_view_and_refreshes_in_background():
+    script = (STATIC / "course-app.js").read_text(encoding="utf-8")
+
+    assert "cacheMode" in script
+    assert "cacheRefreshTimer" in script
+    assert "CACHE_REFRESH_INTERVAL_MS = 30000" in script
+    assert 'params.set("cache_mode", "true")' in script
+    assert "refreshCoursesFromNetwork" in script
+    assert "实时刷新返回空列表，仍显示上次成功结果" in script
+    assert "实时刷新暂不可用，仍显示上次成功结果" in script
+    assert "clearCacheRefreshTimer" in script

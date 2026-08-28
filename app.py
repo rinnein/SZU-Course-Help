@@ -55,6 +55,11 @@ from services.auth_service import (
     validate_login_params,
 )
 from services.cache_service import get_no_cache_headers
+from services.course_cache_service import annotate_live as annotate_live_course_cache
+from services.course_cache_service import get as get_course_cache
+from services.course_cache_service import get_full as get_full_course_cache
+from services.course_cache_service import put as put_course_cache
+from services.course_cache_service import put_full as put_full_course_cache
 from services.course_service import (
     COURSE_QUERY_REJECTED,
     COURSE_RESPONSE_INVALID,
@@ -787,6 +792,83 @@ async def api_switch_campus(request: CampusSwitchRequest):
     )
 
 
+_full_catalog_refreshing: set[str] = set()
+_full_catalog_refresh_lock = threading.Lock()
+
+
+def _cache_full_catalog(course_type: str, requested_page: int, first_payload: dict) -> None:
+    """Fetch and persist every page for the categories used as local catalogs."""
+    normalized_type = course_type.strip().upper()
+    if normalized_type not in {"TJKC", "FANKC"}:
+        return
+    try:
+        total_count = int(first_payload.get("total_count", 0))
+    except (TypeError, ValueError):
+        return
+    if total_count <= 0 or not first_payload.get("courses"):
+        return
+
+    total_pages = max(1, (total_count + 9) // 10)
+    all_courses: list[dict] = []
+    for page in range(1, total_pages + 1):
+        if page == requested_page:
+            content = first_payload
+        else:
+            success, data, _ = query_courses(normalized_type, page - 1)
+            if not success:
+                logger.info("Full %s catalog cache refresh stopped on page %s", normalized_type, page)
+                return
+            content = data.to_api_dict() if hasattr(data, "to_api_dict") else data
+        if not isinstance(content, dict) or not isinstance(content.get("courses"), list):
+            return
+        if not content["courses"]:
+            return
+        all_courses.extend(content["courses"])
+
+    if len(all_courses) < total_count:
+        logger.info("Full %s catalog cache refresh was incomplete", normalized_type)
+        return
+    put_full_course_cache(
+        normalized_type,
+        {
+            "total_count": total_count,
+            "courses": all_courses[:total_count],
+            "msg": str(first_payload.get("msg") or ""),
+            "is_error": False,
+        },
+    )
+
+
+async def _run_full_catalog_cache_refresh(
+    course_type: str,
+    requested_page: int,
+    first_payload: dict,
+) -> None:
+    try:
+        await asyncio.to_thread(_cache_full_catalog, course_type, requested_page, first_payload)
+    except Exception:
+        logger.exception("Full %s catalog cache refresh failed", course_type)
+    finally:
+        with _full_catalog_refresh_lock:
+            _full_catalog_refreshing.discard(course_type)
+
+
+def _schedule_full_catalog_cache_refresh(
+    course_type: str,
+    requested_page: int,
+    first_payload: dict,
+) -> None:
+    if course_type not in {"TJKC", "FANKC"}:
+        return
+    with _full_catalog_refresh_lock:
+        if course_type in _full_catalog_refreshing:
+            return
+        _full_catalog_refreshing.add(course_type)
+    asyncio.create_task(
+        _run_full_catalog_cache_refresh(course_type, requested_page, first_payload)
+    )
+
+
 @app.get("/api/school/courses")
 async def api_school_courses(
     course_type: str = Query(
@@ -797,9 +879,8 @@ async def api_school_courses(
     ),
     page: int = Query(default=1, ge=1, le=10000),
     page_size: int = Query(default=10, ge=1, le=100),
+    cache_mode: bool = Query(default=False),
 ):
-    if not config.token or not config.combined_cookie:
-        return _not_logged_in_response()
     if page_size != 10:
         return _api_error(
             400,
@@ -815,6 +896,16 @@ async def api_school_courses(
             "UNSUPPORTED_COURSE_TYPE",
             retryable=False,
         )
+
+    if cache_mode:
+        cached = get_full_course_cache(normalized_type)
+        if cached is None:
+            cached = get_course_cache(normalized_type, page, page_size)
+        if cached is not None:
+            return JSONResponse(content=cached, headers=get_no_cache_headers())
+
+    if not config.token or not config.combined_cookie:
+        return _not_logged_in_response()
 
     snapshot = get_session_snapshot()
     phase = config.classify_elective_phase(str(snapshot["batch_name"]))
@@ -863,6 +954,16 @@ async def api_school_courses(
             )
         if success:
             content = data.to_api_dict() if hasattr(data, "to_api_dict") else data
+            if isinstance(content, dict):
+                put_course_cache(normalized_type, page, page_size, content)
+                if content.get("courses"):
+                    _schedule_full_catalog_cache_refresh(normalized_type, page, content)
+                content = annotate_live_course_cache(
+                    content,
+                    normalized_type,
+                    page,
+                    page_size,
+                )
             return JSONResponse(content=content, headers=get_no_cache_headers())
         failure_map = {
             COURSE_WINDOW_CLOSED: (

@@ -157,8 +157,10 @@ let fakeSession = {
   relogin_in_progress: false,
 };
 const schoolRequests = [];
+const courseRequestModes = [];
 let reportedTotalCount = fakeCourses.length;
 let totalCountByPage = null;
+let cacheResponseMode = "default";
 globalThis.fetch = async (url) => {
   const parsed = new URL(url, "http://course.test");
   const respond = (payload) => ({
@@ -176,6 +178,64 @@ globalThis.fetch = async (url) => {
     const type = parsed.searchParams.get("type");
     const page = Number(parsed.searchParams.get("page"));
     schoolRequests.push(`${type}:${page}`);
+    courseRequestModes.push(parsed.searchParams.get("cache_mode") || "false");
+    if (cacheResponseMode === "cached" && parsed.searchParams.get("cache_mode") === "true") {
+      return respond({
+        total_count: 1,
+        courses: [{
+          course_name: "缓存课程",
+          course_number: "CACHE-001",
+          tcList: [{
+            teaching_class_id: "CACHE-T1",
+            teacher_name: "缓存教师",
+            teaching_place: "教学楼缓存教室",
+            course_index: "1",
+            is_choose: "0",
+            is_conflict: "0",
+            is_full: "0",
+            is_mooc: "0",
+            number_of_selected: 1,
+            class_capacity: 100,
+          }],
+        }],
+        cached: true,
+        cached_at: 1730000000,
+        cache_version: 2,
+        msg: "",
+        is_error: false,
+      });
+    }
+    if (cacheResponseMode === "refresh-error" && parsed.searchParams.get("cache_mode") !== "true") {
+      return {
+        ok: false,
+        status: 503,
+        text: async () => JSON.stringify({ message: "学校暂时不可用", error_code: "SCHOOL_NETWORK_ERROR" }),
+      };
+    }
+    if (cacheResponseMode === "refreshed" && parsed.searchParams.get("cache_mode") !== "true") {
+      return respond({
+        total_count: 1,
+        courses: [{
+          course_name: "实时更新课程",
+          course_number: "LIVE-001",
+          tcList: [{
+            teaching_class_id: "LIVE-T1",
+            teacher_name: "实时教师",
+            teaching_place: "教学楼实时教室",
+            course_index: "1",
+            is_choose: "0",
+            is_conflict: "0",
+            is_full: "0",
+            is_mooc: "0",
+            number_of_selected: 2,
+            class_capacity: 100,
+          }],
+        }],
+        cached: false,
+        msg: "",
+        is_error: false,
+      });
+    }
     const start = (page - 1) * PAGE_SIZE;
     return respond({
       total_count: totalCountByPage?.[page] ?? reportedTotalCount,
@@ -207,11 +267,14 @@ const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
     fetchFullCatalog,
     handleSearchInput,
     loadSession,
+    refreshCoursesFromNetwork,
+    setCacheMode,
     refreshCurrentView,
     setSession: (updates) => {
       fakeSession = { ...fakeSession, ...updates };
     },
     schoolRequests: () => schoolRequests.slice(),
+    courseRequestModes: () => courseRequestModes.slice(),
     nodeById: (id) => nodesById.get(id),
   };
 
@@ -367,6 +430,41 @@ const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
     hasCompleteCache: Boolean(app.appState.catalogCaches.TJKC?.complete),
   };
 
+  // 11) 缓存模式先显示缓存，实时刷新失败保留旧结果，成功后替换内容
+  app.appElements.courseSearch.value = "";
+  await app.handleSearchInput();
+  cacheResponseMode = "cached";
+  app.appElements.cacheModeSwitch.checked = true;
+  for (const handler of app.appElements.cacheModeSwitch.handlers.change || []) {
+    handler({ target: app.appElements.cacheModeSwitch });
+  }
+  await wait(20);
+  const cacheModeState = {
+    enabled: app.appState.cacheMode,
+    displayedCachedCourse: app.appState.courses[0]?.course_name === "缓存课程",
+    requestUsesCacheMode: app.courseRequestModes().includes("true"),
+  };
+  cacheResponseMode = "refresh-error";
+  await app.refreshCoursesFromNetwork();
+  const preservedAfterRefreshFailure = {
+    displayedCachedCourse: app.appState.courses[0]?.course_name === "缓存课程",
+    summary: app.nodeById("courseSummary").textContent,
+  };
+  cacheResponseMode = "refreshed";
+  await app.refreshCoursesFromNetwork();
+  const replacedAfterRefresh = {
+    displayedLiveCourse: app.appState.courses[0]?.course_name === "实时更新课程",
+  };
+  app.appElements.cacheModeSwitch.checked = false;
+  for (const handler of app.appElements.cacheModeSwitch.handlers.change || []) {
+    handler({ target: app.appElements.cacheModeSwitch });
+  }
+  await wait(20);
+  const cacheModeDisabled = {
+    enabled: app.appState.cacheMode,
+    timerCleared: app.appState.cacheRefreshTimer === null,
+  };
+
   console.log(JSON.stringify({
     requestsAfterInit,
     searchState,
@@ -380,6 +478,10 @@ const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
     runningTaskReloginState,
     oversizedCatalogState,
     changingTotalState,
+    cacheModeState,
+    preservedAfterRefreshFailure,
+    replacedAfterRefresh,
+    cacheModeDisabled,
   }));
   process.exit(0);
 })().catch((error) => {
@@ -474,3 +576,15 @@ def test_course_search_filters_whole_catalog_and_repaginates(tmp_path: Path) -> 
     assert changing_total["ok"] is False
     assert changing_total["requests"] == ["TJKC:1", "TJKC:2"]
     assert changing_total["hasCompleteCache"] is False
+
+    cache_mode = out["cacheModeState"]
+    assert cache_mode["enabled"] is True
+    assert cache_mode["displayedCachedCourse"] is True
+    assert cache_mode["requestUsesCacheMode"] is True
+
+    preserved = out["preservedAfterRefreshFailure"]
+    assert preserved["displayedCachedCourse"] is True
+    assert "仍显示上次成功结果" in preserved["summary"]
+
+    assert out["replacedAfterRefresh"]["displayedLiveCourse"] is True
+    assert out["cacheModeDisabled"] == {"enabled": False, "timerCleared": True}
