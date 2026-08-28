@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import time
 from typing import Any
@@ -141,9 +142,35 @@ def submit_course_selection(
     )
 
 
+def delete_course_selection(class_id: str):
+    """Withdraw one selected volunteer using the confirmed school contract."""
+    form_data = {
+        "deleteParam": json.dumps(
+            {
+                "data": {
+                    "operationType": "2",
+                    "studentCode": str(config.student_id),
+                    "electiveBatchCode": str(config.elective_batch_code),
+                    "teachingClassId": str(class_id),
+                    "isMajor": "1",
+                }
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+    }
+    return _school_request(
+        "elective/deleteVolunteer.do",
+        data=form_data,
+        token=config.token,
+        cookie=backend_service.cookie_header(backend_service.active_profile()),
+    )
+
+
 __all__ = [
     "REQUEST_TIMEOUT",
     "SchoolSessionExpiredError",
     "query_enrolled_courses",
     "submit_course_selection",
+    "delete_course_selection",
 ]

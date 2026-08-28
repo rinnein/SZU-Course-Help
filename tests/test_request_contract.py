@@ -76,6 +76,36 @@ def test_enrollment_request_contract_is_source_compatible(monkeypatch):
     assert captured["timeout"] == choose_course.REQUEST_TIMEOUT
 
 
+def test_withdraw_request_contract_uses_delete_param_and_string_values(monkeypatch):
+    captured = {}
+
+    def fake_post(url, **kwargs):
+        captured["url"] = url
+        captured.update(kwargs)
+        return DummyResponse()
+
+    monkeypatch.setattr(choose_course._session, "post", fake_post)
+    monkeypatch.setattr(config, "student_id", "2024110122")
+    monkeypatch.setattr(config, "elective_batch_code", "2025202601")
+    monkeypatch.setattr(config, "combined_cookie", "route=x; JSESSIONID=y")
+    monkeypatch.setattr(config, "token", "token")
+
+    response = choose_course.delete_course_selection("202520262010192004801")
+
+    assert response.status_code == 200
+    assert captured["url"].endswith("elective/deleteVolunteer.do")
+    assert json.loads(captured["data"]["deleteParam"]) == {
+        "data": {
+            "operationType": "2",
+            "studentCode": "2024110122",
+            "electiveBatchCode": "2025202601",
+            "teachingClassId": "202520262010192004801",
+            "isMajor": "1",
+        }
+    }
+    assert captured["timeout"] == choose_course.REQUEST_TIMEOUT
+
+
 def test_recommended_course_uses_zero_based_school_page_and_dedicated_endpoint(monkeypatch):
     captured = {}
 

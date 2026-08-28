@@ -736,6 +736,7 @@ def test_keep_alive_skips_when_frontend_session_heartbeat_is_active(monkeypatch)
     monkeypatch.setattr(config, "student_id", "2024110122")
     called = []
     monkeypatch.setattr(app, "refresh_elective_batch", lambda *args: called.append(args))
+    monkeypatch.setattr(app.random, "choice", lambda choices: choices[0])
 
     assert client.get("/api/session").status_code == 200
     app._keep_alive_once()
