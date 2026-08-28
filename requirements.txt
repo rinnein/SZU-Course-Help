@@ -6,7 +6,7 @@ chardet>=5.0.0,<6
 pycryptodome>=3.23.0
 
 # OCR is required for automatic re-login after the school session expires.
-ddddocr>=1.6.0
+ddddocr>=1.6.1,<1.7
 opencv-python>=4.10.0
 onnxruntime>=1.20.0
 

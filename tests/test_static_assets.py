@@ -43,6 +43,10 @@ def test_login_and_course_pages_expose_required_controls():
         "openEnrollConfirm",
         "openMyCourses",
         "myCoursesDialog",
+        "openTimetable",
+        "timetableDialog",
+        "timetableContent",
+        "campusSelect",
         "enrollProgress",
         "progressState",
         "progressNotice",
@@ -82,6 +86,31 @@ def test_course_page_exposes_pause_and_relogin_states():
     assert "task_pause_acknowledged" in script
     assert "正在完成当前学校请求；安全暂停后即可移除" in script
     assert "taskStopping || (!terminalCourse && !canEditPausedTask)" in script
+
+
+def test_course_groups_start_collapsed_and_timetable_is_read_only():
+    script = (STATIC / "course-app.js").read_text(encoding="utf-8")
+    styles = (STATIC / "styles.css").read_text(encoding="utf-8")
+
+    assert "details.open" not in script
+    assert '"/api/session/campus"' in script
+    assert '"/api/school/enrolled"' in script
+    assert "timetableEntriesWithLanes" in script
+    assert "appendCluster" in script
+    assert "fitTimetableRows" in script
+    assert "block.dataset.periodSpan" in script
+    assert "--timetable-row-height" in styles
+    timetable_card_styles = styles[
+        styles.index(".timetable-course {") : styles.index(".unscheduled-courses {")
+    ]
+    assert "overflow-wrap: anywhere" in timetable_card_styles
+    assert "white-space: nowrap" not in timetable_card_styles
+    assert (
+        "/api/courses/add"
+        not in script[
+            script.index("function renderTimetable") : script.index("function renderTimetableError")
+        ]
+    )
 
 
 def test_course_search_filters_full_catalog_and_repaginates():

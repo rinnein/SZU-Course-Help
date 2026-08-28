@@ -20,6 +20,12 @@ from starlette.responses import FileResponse, JSONResponse
 
 import config
 import logic
+from campus import (
+    DEFAULT_CAMPUS_CODE,
+    campus_name,
+    campus_options_payload,
+    get_campus,
+)
 from card_key import verify_card_key
 from logging_config import configure_logging
 from project_paths import resource_path
@@ -34,6 +40,7 @@ from services.auth_service import (
     perform_school_login,
     refresh_elective_batch,
     save_login_state,
+    set_current_campus,
     validate_login_params,
 )
 from services.cache_service import get_no_cache_headers
@@ -56,10 +63,11 @@ from services.enroll_service import (
     resume_enroll_task,
     start_enroll_worker,
 )
+from services.timetable_service import build_timetable
 
 SERVER_HOST = "127.0.0.1"
 DEFAULT_SERVER_PORT = 8000
-UI_ASSET_BUILD = "20260828.3"
+UI_ASSET_BUILD = "20260828.6"
 UI_CACHE_TOKEN = secrets.token_urlsafe(8)
 logger = logging.getLogger(__name__)
 
@@ -93,7 +101,7 @@ SERVER_PORT = _find_available_port(_preferred_port())
 _runtime_prefill = {"student_id": "", "card_key": ""}
 
 
-app = FastAPI(title="深大抢课助手 API", version="3.2.1")
+app = FastAPI(title="深大抢课助手 API", version="3.4.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -137,6 +145,8 @@ class CartCourse(BaseModel):
         pattern=r"^[A-Z]+$",
     )
     name: str = Field(min_length=1, max_length=512)
+    campus_code: str = Field(default=DEFAULT_CAMPUS_CODE, pattern=r"^\d{2}$")
+    campus_name: str = Field(default="", max_length=64)
     is_choose: str = Field(default="", max_length=8)
     is_conflict: str = Field(default="", max_length=8)
     is_full: str = Field(default="", max_length=8)
@@ -152,6 +162,12 @@ class EnrollmentStartRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     confirmed_phase: bool = False
+
+
+class CampusSwitchRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    campus_code: str = Field(pattern=r"^\d{2}$")
 
 
 static_dir = resource_path("static_dist")
@@ -182,6 +198,10 @@ def _cart_from_row(row: dict) -> CartCourse:
         id=row.get("id", ""),
         course_type=row.get("type", ""),
         name=row.get("name", ""),
+        campus_code=row.get("campus_code", DEFAULT_CAMPUS_CODE),
+        campus_name=(
+            row.get("campus_name", "") or campus_name(row.get("campus_code", DEFAULT_CAMPUS_CODE))
+        ),
         status=row.get("status", ""),
     )
 
@@ -251,6 +271,7 @@ def _session_payload() -> dict:
         "task_stopping": task_state["stopping"],
         "task_stopping_reason": task_state["stopping_reason"],
         "ui_cache_token": UI_CACHE_TOKEN,
+        "campus_options": campus_options_payload(),
     }
 
 
@@ -329,7 +350,7 @@ async def api_login(user: LoginRequest):
 
         message = "登录成功"
         try:
-            await asyncio.to_thread(refresh_elective_batch, student_id, config.token)
+            await asyncio.to_thread(refresh_elective_batch, student_id, config.token, True)
         except Exception as exc:
             logger.warning("Login succeeded but batch refresh failed: %s", exc)
             message = "登录成功，选课批次暂未读取到，请稍后刷新"
@@ -478,6 +499,29 @@ async def api_logout():
         )
     clear_login_state()
     return ApiMessage(message="已清除本地登录态", is_error=False)
+
+
+@app.post("/api/session/campus")
+async def api_switch_campus(request: CampusSwitchRequest):
+    """Select the campus used by subsequent catalog requests."""
+    if not config.token or not config.combined_cookie:
+        return _not_logged_in_response()
+    if get_campus(request.campus_code) is None:
+        return _api_error(
+            400,
+            "不支持的校区，请刷新页面后重试",
+            "INVALID_CAMPUS",
+            retryable=False,
+        )
+    try:
+        await asyncio.to_thread(set_current_campus, request.campus_code)
+    except RuntimeError:
+        return _not_logged_in_response()
+    logger.info("Course catalog campus changed to %s", campus_name(request.campus_code))
+    return JSONResponse(
+        content={**_session_payload(), "message": f"已切换到{campus_name(request.campus_code)}"},
+        headers=get_no_cache_headers(),
+    )
 
 
 @app.get("/api/school/courses")
@@ -635,7 +679,11 @@ async def api_school_enrolled():
             success, data = await asyncio.to_thread(get_enrolled_courses)
         if success:
             return JSONResponse(
-                content={"courses": data, "total_count": len(data)},
+                content={
+                    "courses": data,
+                    "total_count": len(data),
+                    "timetable": build_timetable(data),
+                },
                 headers=get_no_cache_headers(),
             )
         return _api_error(

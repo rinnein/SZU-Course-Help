@@ -9,6 +9,7 @@ from typing import Any
 import requests
 
 import config
+from campus import DEFAULT_CAMPUS_CODE, normalize_campus_code
 from school_session import is_session_expired_response
 
 REQUEST_TIMEOUT = (5, 20)
@@ -83,24 +84,31 @@ def query_enrolled_courses(
     return data_list
 
 
-def submit_course_selection(class_id: str, teaching_class_type: str):
+def submit_course_selection(
+    class_id: str,
+    teaching_class_type: str,
+    campus_code: str = DEFAULT_CAMPUS_CODE,
+):
     """Submit one course-selection request using the school's legacy payload."""
+    normalized_campus = normalize_campus_code(campus_code)
     headers = _request_headers(config.combined_cookie, config.token)
     form_data = {
         "addParam": (
-            r"""{"data":{"operationType":"1","studentCode":%s,"electiveBatchCode":%s,"teachingClassId":%s,"isMajor":"1","campus":"01","teachingClassType":%s,"chooseVolunteer":"1"}}"""  # noqa: UP031 - exact legacy wire template
+            r"""{"data":{"operationType":"1","studentCode":%s,"electiveBatchCode":%s,"teachingClassId":%s,"isMajor":"1","campus":"%s","teachingClassType":%s,"chooseVolunteer":"1"}}"""  # noqa: UP031 - exact legacy wire template
             % (
                 str(config.student_id),
                 config.elective_batch_code,
                 class_id,
+                normalized_campus,
                 teaching_class_type,
             )
         )
     }
     logger.info(
-        "Submitting enrollment request: class=%s type=%s",
+        "Submitting enrollment request: class=%s type=%s campus=%s",
         class_id,
         teaching_class_type,
+        normalized_campus,
     )
     return requests.post(
         url=config.SCHOOL_BASE_URL + "elective/volunteer.do",

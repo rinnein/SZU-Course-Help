@@ -142,6 +142,7 @@ def _map_enrolled_row(item: dict) -> dict[str, str]:
         "credit": str(item.get("credit") or ""),
         "course_number": str(item.get("courseNumber") or ""),
         "course_type_name": str(item.get("courseTypeName") or item.get("typeName") or ""),
+        "campus_name": str(item.get("campusName") or ""),
     }
 
 

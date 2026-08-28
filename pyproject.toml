@@ -1,6 +1,6 @@
 [project]
 name = "szu-course-select"
-version = "3.3.1"
+version = "3.4.0"
 description = "Local WebUI helper for Shenzhen University course selection"
 readme = "README.md"
 requires-python = ">=3.13"
@@ -10,7 +10,7 @@ dependencies = [
     "requests>=2.32.5",
     "chardet>=5.0.0,<6",
     "pycryptodome>=3.23.0",
-    "ddddocr>=1.6.0",
+    "ddddocr>=1.6.1,<1.7",
     "opencv-python>=4.10.0",
     "onnxruntime>=1.20.0",
 ]
@@ -42,6 +42,7 @@ packages = ["security", "services", "static_dist"]
 py-modules = [
     "app",
     "card_key",
+    "campus",
     "choose_course",
     "config",
     "course_list",

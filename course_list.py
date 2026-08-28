@@ -12,6 +12,7 @@ from dataclasses import dataclass
 import requests
 
 import config
+from campus import DEFAULT_CAMPUS_CODE, normalize_campus_code
 from course_models import CoursesResponse
 
 REQUEST_TIMEOUT = (5, 20)
@@ -52,10 +53,14 @@ def _query_courses(
     endpoint: str = "elective/programCourse.do",
 ) -> CoursesResponse | CourseQueryFailure:
     """Query one zero-based page without changing the school request contract."""
+    campus_code = normalize_campus_code(
+        getattr(config, "campus_code", DEFAULT_CAMPUS_CODE),
+        fallback=DEFAULT_CAMPUS_CODE,
+    )
     query_setting = {
         "data": {
             "studentCode": config.student_id,
-            "campus": "01",
+            "campus": campus_code,
             "electiveBatchCode": config.elective_batch_code,
             "isMajor": "1",
             "teachingClassType": teaching_class_type,

@@ -6,7 +6,7 @@
   <meta name="color-scheme" content="light">
   <title>抢课工作台 | 深大抢课助手</title>
   <link rel="icon" href="/favicon.ico">
-  <link rel="stylesheet" href="/styles.css?build=20260828.3">
+  <link rel="stylesheet" href="/styles.css?build=20260828.6">
 </head>
 <body class="app-page">
   <header class="topbar">
@@ -20,9 +20,11 @@
     <div class="topbar-actions">
       <span id="taskIndicator" class="task-indicator" hidden>抢课中</span>
       <span id="studentLabel" class="student-label">未登录</span>
+      <button id="openTimetable" class="button button-quiet" type="button">查看课表</button>
       <button id="openMyCourses" class="button button-quiet" type="button">我的课程</button>
       <button id="openCart" class="button button-secondary cart-button" type="button">
-        选课清单 <span id="cartCount" class="count-badge">0</span>
+        <span class="cart-label-long">选课清单</span><span class="cart-label-short">清单</span>
+        <span id="cartCount" class="count-badge">0</span>
       </button>
       <button id="logoutButton" class="button button-quiet" type="button">退出登录</button>
     </div>
@@ -78,6 +80,12 @@
           <p id="courseSummary" class="toolbar-summary">正在读取课程</p>
         </div>
         <div class="toolbar-controls">
+          <label class="campus-field">
+            <span>校区</span>
+            <select id="campusSelect" aria-label="课程校区" disabled>
+              <option value="">正在读取</option>
+            </select>
+          </label>
           <label class="search-field">
             <span class="sr-only">搜索全部课程</span>
             <input id="courseSearch" type="search" placeholder="搜索全部课程" autocomplete="off">
@@ -123,6 +131,22 @@
     <div class="dialog-footer">
       <p id="cartHint">满员课程可以加入清单；冲突课程不能加入。</p>
       <button id="openEnrollConfirm" class="button button-danger button-block" type="button">启动抢课</button>
+    </div>
+  </dialog>
+
+  <dialog id="timetableDialog" class="timetable-dialog">
+    <div class="dialog-header">
+      <div>
+        <p class="eyebrow">学校已选课程</p>
+        <h2>我的课表</h2>
+        <p id="timetableSummary" class="dialog-summary">正在读取课表</p>
+      </div>
+      <button class="dialog-close" type="button" data-close-dialog="timetableDialog" aria-label="关闭">×</button>
+    </div>
+    <div id="timetableContent" class="timetable-content"></div>
+    <div class="dialog-footer timetable-footer">
+      <p id="timetableHint">课表来自学校系统当前已选课程，不会执行选课或退课操作。</p>
+      <button id="refreshTimetable" class="button button-secondary" type="button">刷新课表</button>
     </div>
   </dialog>
 
@@ -181,6 +205,6 @@
   </dialog>
 
   <div id="toastRegion" class="toast-region" aria-live="polite" aria-atomic="true"></div>
-  <script src="/course-app.js?build=20260828.3" defer></script>
+  <script src="/course-app.js?build=20260828.6" defer></script>
 </body>
 </html>

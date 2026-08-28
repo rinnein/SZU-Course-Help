@@ -16,6 +16,7 @@ from __future__ import annotations
 from typing import Any
 
 import database
+from campus import get_campus
 from database import DatabaseManager
 
 # 全局数据库实例
@@ -48,6 +49,10 @@ def add_course(course: Any) -> dict[str, bool | str]:
         for field in ("id", "type", "name")
     ):
         return {"success": False, "message": "课程信息不完整，无法加入购物车"}
+
+    campus_code = str(getattr(course, "campus_code", "01") or "01").strip()
+    if get_campus(campus_code) is None:
+        return {"success": False, "message": "校区信息无效，无法加入购物车"}
 
     if db.add_course(course):
         return {"success": True, "message": "成功加入购物车"}

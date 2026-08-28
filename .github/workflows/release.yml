@@ -47,6 +47,9 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install ".[build]"
 
+      - name: Smoke-test OCR engine initialization
+        run: python -c "import logic; detector, recognizer = logic._ddddocr_engines(); assert callable(detector.predict) and callable(recognizer.predict)"
+
       - name: Build native release package
         run: python scripts/build_release.py
 

@@ -9,7 +9,7 @@
     5. 线程安全的进度与事件跟踪，供 Web UI 轮询
 
 核心约束：
-    - 不修改 choose_course.submit_course_selection() 的请求格式和参数
+    - 保持 choose_course.submit_course_selection() 的学校请求字段兼容
     - 不修改学校返回结果的判断关键词
     - 保留 PENDING → ENROLLING → SUCCESS/FAILED 的状态语义
 """
@@ -27,6 +27,7 @@ import requests
 import choose_course
 import config
 import database
+from campus import DEFAULT_CAMPUS_CODE, campus_name
 from school_session import is_session_expired_response
 from services import cart_service
 from services.auth_service import (
@@ -55,6 +56,8 @@ class EnrollmentCourse:
     id: str
     type: str
     name: str
+    campus_code: str = DEFAULT_CAMPUS_CODE
+    campus_name: str = ""
 
 
 class GrabOutcome(StrEnum):
@@ -165,6 +168,8 @@ def _reset_progress(courses) -> None:
                 "id": course.id,
                 "name": course.name,
                 "type": course.type,
+                "campus_code": getattr(course, "campus_code", DEFAULT_CAMPUS_CODE),
+                "campus_name": getattr(course, "campus_name", ""),
                 "status": database.STATUS_IN_PROGRESS,
                 "attempts": 0,
                 "message": "等待抢课",
@@ -606,7 +611,17 @@ def grab_courses(courses: list) -> GrabOutcome:
             try:
                 # 发送选课请求（核心接口，不修改）
                 _update_course_progress(course.id, increment_attempts=True)
-                response = choose_course.submit_course_selection(course.id, course.type)
+                course_campus = str(getattr(course, "campus_code", "") or "").strip()
+                if course_campus:
+                    response = choose_course.submit_course_selection(
+                        course.id,
+                        course.type,
+                        course_campus,
+                    )
+                else:
+                    # Compatibility for legacy command-line callers. The request
+                    # function itself defaults these old courses to campus 01.
+                    response = choose_course.submit_course_selection(course.id, course.type)
                 network_streak[course.id] = 0
                 action = _classify_response(response)
 
@@ -768,7 +783,16 @@ def _run_enroll_task():
     courses_data = cart_service.get_courses_by_status(database.STATUS_NOT_STARTED)
 
     courses = [
-        EnrollmentCourse(id=item["id"], type=item["type"], name=item["name"])
+        EnrollmentCourse(
+            id=item["id"],
+            type=item["type"],
+            name=item["name"],
+            campus_code=str(item.get("campus_code") or DEFAULT_CAMPUS_CODE),
+            campus_name=str(
+                item.get("campus_name")
+                or campus_name(item.get("campus_code") or DEFAULT_CAMPUS_CODE)
+            ),
+        )
         for item in courses_data
     ]
 

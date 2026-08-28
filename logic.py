@@ -7,6 +7,7 @@ import logging
 import os
 import re
 import time
+from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -59,6 +60,21 @@ class CaptchaUnavailableError(RuntimeError):
 
 class CaptchaResponseError(RuntimeError):
     """The school captcha response is present but cannot be safely consumed."""
+
+
+@dataclass(frozen=True, slots=True)
+class ElectiveBatchResult:
+    """Batch metadata plus the student's default campus from one response."""
+
+    batch_code: str
+    batch_name: str
+    campus_code: str = ""
+    campus_name: str = ""
+
+    def __iter__(self):
+        """Preserve the historical two-value unpacking contract."""
+        yield self.batch_code
+        yield self.batch_name
 
 
 def _captcha_image_path() -> Path:
@@ -149,7 +165,7 @@ def fetch_elective_batch(
     student_id: str,
     token: str,
     combined_cookie: str,
-) -> tuple[str, str]:
+) -> ElectiveBatchResult:
     """Fetch the enrollment batch using one consistent session snapshot."""
     headers = {
         "Accept": "*/*",
@@ -206,8 +222,15 @@ def fetch_elective_batch(
         raise ElectiveBatchUnavailableError(payload.get("msg") or "学校当前未返回有效的选课批次")
     normalized_code = str(batch_code)
     normalized_name = str(batch_name)
+    campus_code = str(response_data.get("campus") or "").strip()
+    campus_name = str(response_data.get("campusName") or "").strip()
     logger.info("Current enrollment batch: %s", normalized_name or "unknown")
-    return normalized_code, normalized_name
+    return ElectiveBatchResult(
+        batch_code=normalized_code,
+        batch_name=normalized_name,
+        campus_code=campus_code,
+        campus_name=campus_name,
+    )
 
 
 def login(
@@ -341,7 +364,29 @@ def _paddle_engine():
 
 @lru_cache(maxsize=1)
 def _ddddocr_engines():
-    from ddddocr import DetectionEngine, OCREngine
+    """Create OCR engines across the two ddddocr 1.6.1 export layouts."""
+    try:
+        from ddddocr.core import DetectionEngine, OCREngine
+    except (ImportError, AttributeError):
+        try:
+            from ddddocr import DetectionEngine, OCREngine
+        except (ImportError, AttributeError):
+            from ddddocr import DdddOcr
+
+            class LegacyEngineAdapter:
+                def __init__(self, engine, method_name: str):
+                    self._engine = engine
+                    self._method_name = method_name
+
+                def predict(self, image):
+                    return getattr(self._engine, self._method_name)(image)
+
+            detector = DdddOcr(det=True, ocr=False, show_ad=False)
+            recognizer = DdddOcr(ocr=True, det=False, beta=True, show_ad=False)
+            return (
+                LegacyEngineAdapter(detector, "detection"),
+                LegacyEngineAdapter(recognizer, "classification"),
+            )
 
     return DetectionEngine(), OCREngine(beta=True)
 

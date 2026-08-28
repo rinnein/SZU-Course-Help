@@ -9,6 +9,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Protocol
 
+from campus import DEFAULT_CAMPUS_CODE, get_campus
 from project_paths import data_dir
 
 logger = logging.getLogger(__name__)
@@ -33,6 +34,8 @@ class CartCourse(Protocol):
     id: str
     type: str
     name: str
+    campus_code: str
+    campus_name: str
 
 
 def _default_db_path() -> Path:
@@ -66,25 +69,49 @@ class DatabaseManager:
                     id TEXT PRIMARY KEY,
                     type TEXT NOT NULL,
                     name TEXT NOT NULL,
+                    campus_code TEXT NOT NULL DEFAULT '01',
+                    campus_name TEXT NOT NULL DEFAULT '粤海校区',
                     status TEXT NOT NULL DEFAULT 'PENDING',
                     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
                 )
                 """
             )
+            columns = {
+                str(row["name"])
+                for row in connection.execute("PRAGMA table_info(courses)").fetchall()
+            }
+            if "campus_code" not in columns:
+                connection.execute(
+                    "ALTER TABLE courses ADD COLUMN campus_code TEXT NOT NULL DEFAULT '01'"
+                )
+            if "campus_name" not in columns:
+                connection.execute(
+                    "ALTER TABLE courses ADD COLUMN campus_name TEXT NOT NULL DEFAULT '粤海校区'"
+                )
 
     def add_course(self, course: CartCourse) -> bool:
         """Insert or refresh one course and reset it to ``PENDING``."""
         try:
             now = datetime.now().isoformat(timespec="seconds")
+            raw_campus_code = str(
+                getattr(course, "campus_code", DEFAULT_CAMPUS_CODE) or DEFAULT_CAMPUS_CODE
+            ).strip()
+            selected_campus = get_campus(raw_campus_code)
+            if selected_campus is None:
+                return False
             with self._connect() as connection:
                 connection.execute(
                     """
-                    INSERT INTO courses (id, type, name, status, updated_at)
-                    VALUES (?, ?, ?, ?, ?)
+                    INSERT INTO courses (
+                        id, type, name, campus_code, campus_name, status, updated_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(id) DO UPDATE SET
                         type = excluded.type,
                         name = excluded.name,
+                        campus_code = excluded.campus_code,
+                        campus_name = excluded.campus_name,
                         status = excluded.status,
                         updated_at = excluded.updated_at
                     """,
@@ -92,6 +119,8 @@ class DatabaseManager:
                         course.id,
                         course.type,
                         course.name,
+                        selected_campus.code,
+                        selected_campus.name,
                         STATUS_NOT_STARTED,
                         now,
                     ),

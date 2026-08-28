@@ -7,6 +7,8 @@
 
 import os
 
+from campus import DEFAULT_CAMPUS_CODE, DEFAULT_CAMPUS_NAME
+
 
 def _positive_env_int(name: str, default: int) -> int:
     """Read a positive integer setting while keeping startup deterministic."""
@@ -38,6 +40,11 @@ elective_batch_code = ""
 
 # 当前批次名称（如预选、复选、补选或学校返回的其他名称）
 elective_batch_name = ""
+
+# 当前课程目录校区。首次登录后优先采用学校返回的学生默认校区，
+# 用户在工作台切换后会一直保留到退出登录。
+campus_code = DEFAULT_CAMPUS_CODE
+campus_name = DEFAULT_CAMPUS_NAME
 
 # ====================================================================
 # 抢课参数

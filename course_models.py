@@ -214,6 +214,7 @@ class CourseView:
     sport_name: str
     number: int
     selected: bool
+    campus_name: str = ""
 
     @classmethod
     def from_school_course(cls, course: SchoolCourse) -> CourseView:
@@ -225,6 +226,7 @@ class CourseView:
             course_name=course.course_name,
             department_name=course.department_name,
             sport_name=course.sport_name,
+            campus_name=course.campus_name,
             number=course.number,
             selected=course.selected,
         )
@@ -236,6 +238,7 @@ class CourseView:
             "course_name": self.course_name,
             "department_name": self.department_name,
             "sport_name": self.sport_name,
+            "campus_name": self.campus_name,
             "number": self.number,
             "selected": self.selected,
         }

@@ -34,6 +34,8 @@ else:
     config.student_id = "2024******"
     config.token = "preview-token"
     config.combined_cookie = "preview-cookie"
+    config.campus_code = "01"
+    config.campus_name = "粤海校区"
     if PREVIEW_PHASE == "closed":
         config.elective_batch_code = "PREVIEW-CLOSED"
         config.elective_batch_name = "补选已结束"
@@ -121,6 +123,7 @@ def _preview_courses(course_type: str, page: int):
         else:
             course_name = PREVIEW_MATCH_NAMES[index % len(PREVIEW_MATCH_NAMES)]
         number_label = f"{index + 1:02d}"
+        campus_name = config.campus_name
         courses.append(
             {
                 "tcList": [
@@ -128,7 +131,7 @@ def _preview_courses(course_type: str, page: int):
                         "teaching_class_id": f"{course_type}-OPEN-{number_label}",
                         "is_mooc": "0",
                         "class_capacity": "60",
-                        "teaching_place": f"粤海校区 教学楼 C{number_label} · 周二 3-4 节",
+                        "teaching_place": f"1-18周 星期二 3-4节 {campus_name} 教学楼C{number_label}",
                         "course_index": "01班",
                         "teacher_name": "陈老师",
                         "sport_name": "",
@@ -142,7 +145,7 @@ def _preview_courses(course_type: str, page: int):
                         "teaching_class_id": f"{course_type}-FULL-{number_label}",
                         "is_mooc": "0",
                         "class_capacity": "50",
-                        "teaching_place": f"丽湖校区 A{number_label}05 · 周四 5-6 节",
+                        "teaching_place": f"1-18周 星期四 5-6节 {campus_name} A{number_label}05",
                         "course_index": "02班",
                         "teacher_name": "林老师",
                         "sport_name": "",
@@ -156,6 +159,7 @@ def _preview_courses(course_type: str, page: int):
                 "course_number": f"CS{300 + index}",
                 "course_name": f"{course_name}（{number_label}）",
                 "department_name": "计算机与软件学院",
+                "campus_name": campus_name,
                 "sport_name": "",
                 "number": index + 1,
                 "selected": False,
@@ -172,21 +176,73 @@ def fake_get_enrolled_courses():
     return True, [
         {
             "teaching_class_id": "PREVIEW-01",
-            "course_name": "计算机系统基础",
+            "course_name": "计算机系统（3）-组成设计与综合实践",
             "teacher_name": "陈老师",
-            "teaching_place": "粤海校区 教学楼 C201 · 周二 3-4 节",
+            "teaching_place": "1-18周 星期一 1-1节 致信楼S308综合实验中心",
             "credit": "4",
             "course_number": "CS305",
             "course_type_name": "方案内课程",
+            "campus_name": "粤海校区",
         },
         {
             "teaching_class_id": "PREVIEW-02",
             "course_name": "人工智能导论",
             "teacher_name": "林老师",
-            "teaching_place": "丽湖校区 A305 · 周四 5-6 节",
+            "teaching_place": "2-16周 星期三 7-9节 汇智楼A305",
             "credit": "3",
             "course_number": "CS410",
             "course_type_name": "校公选课",
+            "campus_name": "丽湖校区",
+        },
+        {
+            "teaching_class_id": "PREVIEW-03",
+            "course_name": "计算机网络与应用",
+            "teacher_name": "史老师",
+            "teaching_place": "1-18周 星期四 11-13节 致理楼L1-606",
+            "credit": "3",
+            "course_number": "CS312",
+            "course_type_name": "方案内课程",
+            "campus_name": "粤海校区",
+        },
+        {
+            "teaching_class_id": "PREVIEW-04",
+            "course_name": "创新实践",
+            "teacher_name": "王老师",
+            "teaching_place": "1-8周 星期六 1-2节 创客中心201",
+            "credit": "2",
+            "course_number": "IN201",
+            "course_type_name": "实践课程",
+            "campus_name": "粤海校区",
+        },
+        {
+            "teaching_class_id": "PREVIEW-05",
+            "course_name": "专业实习",
+            "teacher_name": "李老师",
+            "teaching_place": "",
+            "credit": "2",
+            "course_number": "PR401",
+            "course_type_name": "实践课程",
+            "campus_name": "粤海校区",
+        },
+        {
+            "teaching_class_id": "PREVIEW-06",
+            "course_name": "计算机系统课程设计与体系结构综合实验",
+            "teacher_name": "周老师",
+            "teaching_place": "2-18周(双) 星期三 3-4节 致腾楼326综合实验室",
+            "credit": "3",
+            "course_number": "CS306",
+            "course_type_name": "方案内课程",
+            "campus_name": "粤海校区",
+        },
+        {
+            "teaching_class_id": "PREVIEW-07",
+            "course_name": "嵌入式计算平台设计与软硬件协同开发",
+            "teacher_name": "吴老师",
+            "teaching_place": "1-17周(单) 星期三 3-4节 致腾楼326创新实验室",
+            "credit": "3",
+            "course_number": "CS307",
+            "course_type_name": "方案内课程",
+            "campus_name": "粤海校区",
         },
     ]
 

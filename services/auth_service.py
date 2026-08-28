@@ -10,6 +10,12 @@ from typing import Any
 
 import config
 import logic
+from campus import (
+    DEFAULT_CAMPUS_CODE,
+    DEFAULT_CAMPUS_NAME,
+    campus_name,
+    get_campus,
+)
 from school_password import encrypt_school_password
 
 logger = logging.getLogger(__name__)
@@ -166,6 +172,9 @@ def save_login_state(
         config.password = password
         config.elective_batch_code = ""
         config.elective_batch_name = ""
+        if not preserve_relogin_state:
+            config.campus_code = DEFAULT_CAMPUS_CODE
+            config.campus_name = DEFAULT_CAMPUS_NAME
         _advance_session_generation()
         if not preserve_relogin_state:
             _reset_relogin_state_locked()
@@ -180,6 +189,8 @@ def clear_login_state() -> None:
         config.password = ""
         config.elective_batch_code = ""
         config.elective_batch_name = ""
+        config.campus_code = DEFAULT_CAMPUS_CODE
+        config.campus_name = DEFAULT_CAMPUS_NAME
         _advance_session_generation()
         _reset_relogin_state_locked()
 
@@ -209,6 +220,8 @@ def get_session_snapshot() -> dict[str, str | bool | int]:
             "student_id": str(config.student_id or ""),
             "batch_code": str(config.elective_batch_code or ""),
             "batch_name": str(config.elective_batch_name or ""),
+            "campus_code": str(config.campus_code or DEFAULT_CAMPUS_CODE),
+            "campus_name": str(config.campus_name or DEFAULT_CAMPUS_NAME),
             "relogin_in_progress": _relogin_state["status"] == "running",
             "relogin_status": str(_relogin_state["status"]),
             "relogin_message": str(_relogin_state["message"]),
@@ -218,7 +231,11 @@ def get_session_snapshot() -> dict[str, str | bool | int]:
         }
 
 
-def refresh_elective_batch(student_id: str, token: str) -> str:
+def refresh_elective_batch(
+    student_id: str,
+    token: str,
+    adopt_school_campus: bool = False,
+) -> str:
     """Refresh the batch only if the originating session is still current."""
     normalized_student_id = str(student_id)
     normalized_token = str(token)
@@ -231,11 +248,13 @@ def refresh_elective_batch(student_id: str, token: str) -> str:
             raise RuntimeError("登录状态已变化，已放弃批次刷新")
         combined_cookie = str(config.combined_cookie)
 
-    batch_code, batch_name = logic.fetch_elective_batch(
+    batch_result = logic.fetch_elective_batch(
         normalized_student_id,
         normalized_token,
         combined_cookie,
     )
+    batch_code, batch_name = batch_result
+    school_campus_code = str(getattr(batch_result, "campus_code", "") or "").strip()
     with _state_lock:
         if (
             config.student_id != normalized_student_id
@@ -245,7 +264,23 @@ def refresh_elective_batch(student_id: str, token: str) -> str:
             raise RuntimeError("登录状态已变化，已丢弃过期批次结果")
         config.elective_batch_code = batch_code
         config.elective_batch_name = batch_name
+        if adopt_school_campus and get_campus(school_campus_code) is not None:
+            config.campus_code = school_campus_code
+            config.campus_name = campus_name(school_campus_code)
     return batch_name
+
+
+def set_current_campus(campus_code: str) -> dict[str, str | bool | int]:
+    """Switch the catalog campus without changing the school login session."""
+    selected = get_campus(campus_code)
+    if selected is None:
+        raise ValueError("不支持的校区代码")
+    with _state_lock:
+        if not config.token or not config.combined_cookie:
+            raise RuntimeError("登录状态无效，请重新登录")
+        config.campus_code = selected.code
+        config.campus_name = selected.name
+        return get_session_snapshot()
 
 
 def attempt_ocr_relogin(
@@ -359,5 +394,6 @@ __all__ = [
     "perform_school_login",
     "refresh_elective_batch",
     "save_login_state",
+    "set_current_campus",
     "validate_login_params",
 ]
