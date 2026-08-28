@@ -24,6 +24,8 @@ def test_frontend_entrypoints_and_assets_exist():
 def test_login_and_course_pages_expose_required_controls():
     login = (STATIC / "login.html").read_text(encoding="utf-8")
     course = (STATIC / "index.html").read_text(encoding="utf-8")
+    login_script = (STATIC / "login.js").read_text(encoding="utf-8")
+    course_script = (STATIC / "course-app.js").read_text(encoding="utf-8")
 
     for control_id in (
         "studentId",
@@ -58,6 +60,12 @@ def test_login_and_course_pages_expose_required_controls():
     assert f"/styles.css?build={app.UI_ASSET_BUILD}" in course
     assert f"/login.js?build={app.UI_ASSET_BUILD}" in login
     assert f"/course-app.js?build={app.UI_ASSET_BUILD}" in course
+    assert "versionedPage" not in login_script
+    assert "versionedPage" not in course_script
+    assert "ui_cache_token" not in login_script
+    assert "ui_cache_token" not in course_script
+    assert "stripUiQuery" in login_script
+    assert "stripUiQuery" in course_script
     assert 'id="openTimetable"' not in course
     assert 'id="timetableDialog"' not in course
 
