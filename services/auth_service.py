@@ -186,6 +186,12 @@ def _advance_session_generation() -> None:
     _session_generation += 1
 
 
+def update_backend_preference(preference: str) -> str:
+    """Set the preferred school backend without changing login state."""
+    with _state_lock:
+        return backend_service.set_preference(preference)
+
+
 def save_login_state(
     login_cookie: str,
     captcha_cookie: str,
