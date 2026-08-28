@@ -112,6 +112,23 @@ def test_course_groups_start_collapsed_and_timetable_is_read_only():
     )
 
 
+def test_my_courses_restores_schedule_and_list_views():
+    course = (STATIC / "index.html").read_text(encoding="utf-8")
+    script = (STATIC / "course-app.js").read_text(encoding="utf-8")
+    styles = (STATIC / "styles.css").read_text(encoding="utf-8")
+
+    assert 'id="scheduleViewGrid"' in course
+    assert 'id="scheduleViewList"' in course
+    assert 'id="showPendingSwitch"' in course
+    assert 'id="myCoursesScheduleWrap"' in course
+    assert "switchMyCoursesView" in script
+    assert "renderMyCoursesSchedule" in script
+    assert "showCartOnSchedule" in script
+    assert '"schedule-course" + (placed.pending ? " is-pending" : "")' in script
+    assert "虚化块为选课清单中的待选课程" in script
+    assert ".schedule-course.is-pending" in styles
+
+
 def test_course_search_filters_full_catalog_and_repaginates():
     script = (STATIC / "course-app.js").read_text(encoding="utf-8")
     index = (STATIC / "index.html").read_text(encoding="utf-8")

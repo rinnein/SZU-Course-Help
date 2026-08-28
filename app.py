@@ -84,7 +84,7 @@ proxy_request = proxy_service.proxy_request
 
 SERVER_HOST = "127.0.0.1"
 DEFAULT_SERVER_PORT = 8000
-UI_ASSET_BUILD = "20260828.6"
+UI_ASSET_BUILD = "20260829.1"
 UI_CACHE_TOKEN = secrets.token_urlsafe(8)
 logger = logging.getLogger(__name__)
 
@@ -204,6 +204,9 @@ class CartCourse(BaseModel):
     name: str = Field(min_length=1, max_length=512)
     campus_code: str = Field(default=DEFAULT_CAMPUS_CODE, pattern=r"^\d{2}$")
     campus_name: str = Field(default="", max_length=64)
+    teaching_place: str = Field(default="", max_length=512)
+    course_name: str = Field(default="", max_length=256)
+    teacher_name: str = Field(default="", max_length=128)
     is_choose: str = Field(default="", max_length=8)
     is_conflict: str = Field(default="", max_length=8)
     is_full: str = Field(default="", max_length=8)
@@ -280,6 +283,9 @@ def _cart_from_row(row: dict) -> CartCourse:
         campus_name=(
             row.get("campus_name", "") or campus_name(row.get("campus_code", DEFAULT_CAMPUS_CODE))
         ),
+        teaching_place=row.get("teaching_place", ""),
+        course_name=row.get("course_name", ""),
+        teacher_name=row.get("teacher_name", ""),
         status=row.get("status", ""),
     )
 
