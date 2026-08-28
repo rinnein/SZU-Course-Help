@@ -425,7 +425,7 @@ def _ocr_glyph(ocr: Any, image: Any, upscale: int = 5, padding: int = 14) -> str
     canvas[padding : padding + upscaled.shape[0], padding : padding + upscaled.shape[1]] = upscaled
     buffer = io.BytesIO()
     Image.fromarray(cv2.cvtColor(canvas, cv2.COLOR_BGR2RGB)).save(buffer, format="PNG")
-    return _normalize_ocr_text(ocr.classification(buffer.getvalue()))
+    return _normalize_ocr_text(ocr.predict(buffer.getvalue()))
 
 
 def _ocr_glyph_options(ocr: Any, image: Any) -> list[str]:
@@ -500,7 +500,7 @@ def _candidate_boxes(image: Any) -> list[list[int]]:
 
     buffer = io.BytesIO()
     Image.fromarray(cv2.cvtColor(image[25:80, 0:250], cv2.COLOR_BGR2RGB)).save(buffer, format="PNG")
-    boxes = _sanitize_candidate_boxes(detector.detection(buffer.getvalue()), image.shape)
+    boxes = _sanitize_candidate_boxes(detector.predict(buffer.getvalue()), image.shape)
     # Convert crop-relative box coordinates back to full-image coordinates.
     return [[x1, y1 + 25, x2, y2 + 25] for x1, y1, x2, y2 in boxes]
 
