@@ -136,7 +136,6 @@ TERMINAL_ERROR_KEYWORDS = (
     "不符合",
 )
 # 连续未知或网络异常达到阈值时触发保护性暂停，不会把课程写成 FAILED。
-MAX_UNKNOWN_STREAK = 5
 MAX_NETWORK_STREAK = 8
 # 事件队列上限（仅保留最近的事件）
 MAX_EVENTS = 200
@@ -586,6 +585,10 @@ def grab_courses(courses: list) -> GrabOutcome:
     """
     active_ids = _active_course_ids()
     active = [course for course in courses if course.id in active_ids]
+    unknown_streak_limit = max(
+        1,
+        int(config.unknown_response_pause_threshold),
+    )
     unknown_streak = {course.id: 0 for course in active}
     network_streak = {course.id: 0 for course in active}
 
@@ -656,16 +659,16 @@ def grab_courses(courses: list) -> GrabOutcome:
                         course.id,
                         message=(
                             "学校返回暂时无法识别，准备保护性暂停"
-                            if unknown_streak[course.id] >= MAX_UNKNOWN_STREAK
+                            if unknown_streak[course.id] >= unknown_streak_limit
                             else (
                                 "学校返回暂时无法识别，继续观察"
-                                f"（{unknown_streak[course.id]}/{MAX_UNKNOWN_STREAK}）"
+                                f"（{unknown_streak[course.id]}/{unknown_streak_limit}）"
                             )
                         ),
                     )
-                    if unknown_streak[course.id] >= MAX_UNKNOWN_STREAK:
+                    if unknown_streak[course.id] >= unknown_streak_limit:
                         reason = (
-                            f"{course.name} 连续 {MAX_UNKNOWN_STREAK} 次收到无法识别的学校返回，"
+                            f"{course.name} 连续 {unknown_streak_limit} 次收到无法识别的学校返回，"
                             f"任务已保护性暂停：{snippet or '响应内容为空'}"
                         )
                         _update_course_progress(course.id, message=reason)

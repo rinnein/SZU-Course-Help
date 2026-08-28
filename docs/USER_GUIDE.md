@@ -1,4 +1,4 @@
-# 深大抢课助手 3.3.0 使用手册
+# 深大抢课助手 3.3.1 使用手册
 
 - 适用项目：SZU Course Help
 - 适用人群：希望直接下载并运行、不熟悉 Python 或命令行的用户
@@ -11,10 +11,10 @@
 
 打开 GitHub Releases 页面，在最新版本底部的 Assets 中按系统下载：
 
-- Windows 10/11 64 位：`SZU-Course-Help-v3.3.0-windows-x64.zip`
-- macOS Apple 芯片：`SZU-Course-Help-v3.3.0-macos-arm64.zip`
-- macOS Intel 芯片：`SZU-Course-Help-v3.3.0-macos-x64.zip`
-- Linux 64 位：`SZU-Course-Help-v3.3.0-linux-x64.zip`
+- Windows 10/11 64 位：`SZU-Course-Help-v3.3.1-windows-x64.zip`
+- macOS Apple 芯片：`SZU-Course-Help-v3.3.1-macos-arm64.zip`
+- macOS Intel 芯片：`SZU-Course-Help-v3.3.1-macos-x64.zip`
+- Linux 64 位：`SZU-Course-Help-v3.3.1-linux-x64.zip`
 - 源码仅供开发者使用，普通用户不要下载 Source code 压缩包。
 
 下载后必须先完整解压。不要在压缩包预览窗口内直接运行程序，也不要只把主程序单独拖出来，否则 OCR 模型和依赖文件可能丢失。
@@ -139,6 +139,8 @@ Card Key 只在本机验证，不会发送给学校。学校密码只保存在�
 
 学校明确返回“当前时间不在选课开放时间范围内”时，程序只提交一次并自动暂停。等待学校实际开放后再点击“继续任务”。满员响应则会继续轮询，不受未知响应保护阈值限制。
 
+学校偶尔可能返回 `NullPointer` 或其他不符合接口协议的内容。未知响应按课程分别统计，默认连续 200 次才保护性暂停；中间只要收到一次成功、满员、繁忙等可识别结果，该课程计数就会清零。需要调整时可在启动前设置环境变量 `COURSE_SELECT_UNKNOWN_RESPONSE_LIMIT`，非法值、零或负数会回退到 200。不要设置得过低，也不建议完全取消保护。
+
 ## 八、会话过期与 OCR 自动重登录
 
 学校登录状态可能在运行一段时间后过期。程序检测到明确的过期响应时，会自动：
@@ -194,7 +196,7 @@ Card Key 只在本机验证，不会发送给学校。学校密码只保存在�
 
 ### 暂停或失败后无法移除课程
 
-先确认页面状态。显示“正在暂停”时，程序正在等待当前学校请求结束；变为“已暂停”后，活动课程的“移除”会自动启用。已停止课程可以直接移除，无需暂停其他课程。如果按钮仍是旧状态，请确认使用的是 v3.3.0 或更新版本，并重新打开本次终端输出的页面地址。
+先确认页面状态。显示“正在暂停”时，程序正在等待当前学校请求结束；变为“已暂停”后，活动课程的“移除”会自动启用。已停止课程可以直接移除，无需暂停其他课程。如果按钮仍是旧状态，请确认使用的是 v3.3.1 或更新版本，并重新打开本次终端输出的页面地址。
 
 ### 杀毒软件提示未知程序
 
@@ -242,4 +244,4 @@ python -m pytest -q
 
 ---
 
-版本：3.3.0 · 许可证：MIT License · 问题反馈：https://github.com/Weeye-hua/SZU-Course-Help/issues
+版本：3.3.1 · 许可证：MIT License · 问题反馈：https://github.com/Weeye-hua/SZU-Course-Help/issues
