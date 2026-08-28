@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import random
 import re
 import secrets
 import socket
@@ -77,7 +78,10 @@ from services.enroll_service import (
     stop_enroll_task,
 )
 from services.timetable_service import build_timetable
-from services.proxy_service import SCHOOL_HOST, clear_proxy_cookie_mirror, proxy_request
+from services import proxy_service
+from services.proxy_service import SCHOOL_HOST, clear_proxy_cookie_mirror
+
+proxy_request = proxy_service.proxy_request
 
 SERVER_HOST = "127.0.0.1"
 DEFAULT_SERVER_PORT = 8000

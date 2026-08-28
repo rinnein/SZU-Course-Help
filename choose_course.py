@@ -56,11 +56,11 @@ def _request_headers(combined_cookie: str, token: str) -> dict[str, str]:
     )
 
 
-def _school_request(path: str, *, data=None, params=None, token: str = "", cookie: str | None = None):
+def _school_request(path: str, *, data=None, params=None, token: str = "", cookie: str | None = None, request_sender=None):
     def sender(**kwargs):
         kwargs.pop("method", None)
         kwargs.pop("json", None)
-        return _session.post(**kwargs)
+        return (request_sender or _session.post)(**kwargs)
 
     return backend_service.request_with_failover(
         "POST", path, sender=sender, data=data, params=params,
@@ -164,6 +164,7 @@ def delete_course_selection(class_id: str):
         data=form_data,
         token=config.token,
         cookie=backend_service.cookie_header(backend_service.active_profile()),
+        request_sender=_session.post,
     )
 
 
