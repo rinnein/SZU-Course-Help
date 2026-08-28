@@ -82,6 +82,12 @@ def fake_refresh_elective_batch(_student_id: str, _token: str) -> str:
 app.refresh_elective_batch = fake_refresh_elective_batch
 
 
+PREVIEW_TOTAL_COURSES = 16
+PREVIEW_PAGE_SIZE = 10
+PREVIEW_MATCH_NAMES = ["数据结构", "数据库系统", "大数据分析"]
+PREVIEW_OTHER_NAMES = ["设计思维", "城市规划", "音乐鉴赏", "现代文学"]
+
+
 def fake_query_courses(course_type: str, page: int):
     names = {
         "TJKC": "本班推荐",
@@ -93,24 +99,36 @@ def fake_query_courses(course_type: str, page: int):
     }
     if course_type == "FXKC":
         return False, "辅修课程暂不支持，如需选辅修课请前往学校官方选课系统", ""
-    course_name = {
-        "TJKC": "计算机系统基础",
-        "FANKC": "数据库系统",
-        "FAWKC": "设计思维",
-        "XGXK": "城市与文化",
-        "TYKC": "羽毛球",
-        "MOOC": "人工智能导论",
-    }.get(course_type, "示例课程")
     data = {
-        "total_count": 16,
-        "courses": [
+        "total_count": PREVIEW_TOTAL_COURSES,
+        "courses": _preview_courses(course_type, page),
+        "msg": "",
+        "is_error": False,
+    }
+    return True, data, names.get(course_type, course_type)
+
+
+def _preview_courses(course_type: str, page: int):
+    """按页返回 16 门不重复课程；其中 12 门名称含“数据”，便于检验全目录搜索。
+
+    学校接口每页固定 10 门：第 0 页返回 10 门，第 1 页返回剩余 6 门。
+    """
+    start = page * PREVIEW_PAGE_SIZE
+    courses = []
+    for index in range(start, min(start + PREVIEW_PAGE_SIZE, PREVIEW_TOTAL_COURSES)):
+        if index % 4 == 3:
+            course_name = PREVIEW_OTHER_NAMES[index % len(PREVIEW_OTHER_NAMES)]
+        else:
+            course_name = PREVIEW_MATCH_NAMES[index % len(PREVIEW_MATCH_NAMES)]
+        number_label = f"{index + 1:02d}"
+        courses.append(
             {
                 "tcList": [
                     {
-                        "teaching_class_id": f"{course_type}-OPEN-01",
+                        "teaching_class_id": f"{course_type}-OPEN-{number_label}",
                         "is_mooc": "0",
                         "class_capacity": "60",
-                        "teaching_place": "粤海校区 教学楼 C201 · 周二 3-4 节",
+                        "teaching_place": f"粤海校区 教学楼 C{number_label} · 周二 3-4 节",
                         "course_index": "01班",
                         "teacher_name": "陈老师",
                         "sport_name": "",
@@ -121,10 +139,10 @@ def fake_query_courses(course_type: str, page: int):
                         "number_of_selected": "42",
                     },
                     {
-                        "teaching_class_id": f"{course_type}-FULL-02",
+                        "teaching_class_id": f"{course_type}-FULL-{number_label}",
                         "is_mooc": "0",
                         "class_capacity": "50",
-                        "teaching_place": "丽湖校区 A305 · 周四 5-6 节",
+                        "teaching_place": f"丽湖校区 A{number_label}05 · 周四 5-6 节",
                         "course_index": "02班",
                         "teacher_name": "林老师",
                         "sport_name": "",
@@ -134,57 +152,16 @@ def fake_query_courses(course_type: str, page: int):
                         "is_conflict": "",
                         "number_of_selected": "50",
                     },
-                    {
-                        "teaching_class_id": f"{course_type}-CONFLICT-03",
-                        "is_mooc": "0",
-                        "class_capacity": "45",
-                        "teaching_place": "粤海校区 汇文楼 H102 · 周五 1-2 节",
-                        "course_index": "03班",
-                        "teacher_name": "王老师",
-                        "sport_name": "",
-                        "is_choose": "",
-                        "course_total_number": "20",
-                        "is_full": "",
-                        "is_conflict": "1",
-                        "number_of_selected": "20",
-                    },
                 ],
-                "course_number": "CS305",
-                "course_name": course_name,
+                "course_number": f"CS{300 + index}",
+                "course_name": f"{course_name}（{number_label}）",
                 "department_name": "计算机与软件学院",
                 "sport_name": "",
-                "number": 1,
+                "number": index + 1,
                 "selected": False,
-            },
-            {
-                "tcList": [
-                    {
-                        "teaching_class_id": f"{course_type}-CHOSEN-04",
-                        "is_mooc": "0",
-                        "class_capacity": "55",
-                        "teaching_place": "粤海校区 南区实验楼 · 周三 7-8 节",
-                        "course_index": "01班",
-                        "teacher_name": "张老师",
-                        "sport_name": "",
-                        "is_choose": "1",
-                        "course_total_number": "36",
-                        "is_full": "",
-                        "is_conflict": "",
-                        "number_of_selected": "36",
-                    }
-                ],
-                "course_number": "CS306",
-                "course_name": f"{names.get(course_type, '课程')}专题实践",
-                "department_name": "深圳大学",
-                "sport_name": "",
-                "number": 2,
-                "selected": True,
-            },
-        ],
-        "msg": "",
-        "is_error": False,
-    }
-    return True, data, names.get(course_type, course_type)
+            }
+        )
+    return courses
 
 
 app.query_courses = fake_query_courses
