@@ -868,11 +868,11 @@ def test_keep_alive_skips_when_not_logged_in(monkeypatch):
 
 
 def test_keep_alive_refreshes_session_when_logged_in(monkeypatch):
-    monkeypatch.setattr(app, "_last_frontend_session_success", 0.0)
     monkeypatch.setattr(config, "token", "active-token")
     monkeypatch.setattr(config, "combined_cookie", "cookie")
     monkeypatch.setattr(config, "student_id", "2024110122")
     called = []
+    monkeypatch.setattr(app.random, "choice", lambda choices: choices[0])
     monkeypatch.setattr(app, "refresh_elective_batch", lambda *args: called.append(args))
 
     app._keep_alive_once()
@@ -882,10 +882,10 @@ def test_keep_alive_refreshes_session_when_logged_in(monkeypatch):
 
 
 def test_keep_alive_triggers_ocr_recovery_on_expiry(monkeypatch):
-    monkeypatch.setattr(app, "_last_frontend_session_success", 0.0)
     monkeypatch.setattr(config, "token", "expired-token")
     monkeypatch.setattr(config, "combined_cookie", "cookie")
     monkeypatch.setattr(config, "student_id", "2024110122")
+    monkeypatch.setattr(app.random, "choice", lambda choices: choices[0])
     monkeypatch.setattr(
         app,
         "refresh_elective_batch",
@@ -904,10 +904,10 @@ def test_keep_alive_triggers_ocr_recovery_on_expiry(monkeypatch):
 
 
 def test_keep_alive_requires_manual_login_for_unvalidated_restored_session(monkeypatch):
-    monkeypatch.setattr(app, "_last_frontend_session_success", 0.0)
     monkeypatch.setattr(config, "token", "expired-token")
     monkeypatch.setattr(config, "combined_cookie", "cookie")
     monkeypatch.setattr(config, "student_id", "2024110122")
+    monkeypatch.setattr(app.random, "choice", lambda choices: choices[0])
     monkeypatch.setattr(app, "restored_session_validation_pending", lambda: True)
     monkeypatch.setattr(
         app,
@@ -926,17 +926,18 @@ def test_keep_alive_requires_manual_login_for_unvalidated_restored_session(monke
     assert config.combined_cookie == ""
 
 
-def test_keep_alive_skips_when_frontend_session_heartbeat_is_active(monkeypatch):
+def test_keep_alive_randomly_uses_an_authenticated_read_api(monkeypatch):
     monkeypatch.setattr(config, "token", "active-token")
     monkeypatch.setattr(config, "combined_cookie", "cookie")
     monkeypatch.setattr(config, "student_id", "2024110122")
     called = []
-    monkeypatch.setattr(app, "refresh_elective_batch", lambda *args: called.append(args))
+    monkeypatch.setattr(app.random, "choice", lambda choices: choices[1])
+    monkeypatch.setattr(app, "get_enrolled_courses", lambda: called.append("enrolled"))
 
     assert client.get("/api/session").status_code == 200
     app._keep_alive_once()
 
-    assert called == []
+    assert called == ["enrolled"]
 
 
 def test_captcha_solve_rejects_missing_image():
