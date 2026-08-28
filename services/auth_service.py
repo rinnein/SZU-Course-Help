@@ -359,7 +359,6 @@ def merge_backend_cookies(header_values: list[str], host: str) -> bool:
             _persist_current_session()
         return changed
 
-
 def _iter_set_cookie_pairs(cookie_header: str, names: tuple[str, ...] = ("route", "insert_cookie", "JSESSIONID", "_WEU")):
     """Yield ``(name, value)`` pairs from a raw ``Set-Cookie`` header string.
 
