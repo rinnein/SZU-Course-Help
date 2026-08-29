@@ -153,6 +153,31 @@ def test_backend_selection_requires_webvpn_auth(monkeypatch):
     assert body["preference"] == config.BACKEND_WEBVPN
 
 
+def test_webvpn_auth_start_and_status_routes(monkeypatch):
+    monkeypatch.setattr(
+        app.webvpn_auth_service,
+        "start_auth",
+        lambda: {"state": "pending", "authenticated": False, "message": "请完成认证"},
+    )
+    monkeypatch.setattr(
+        app.webvpn_auth_service,
+        "get_status",
+        lambda: {"state": "pending", "authenticated": False, "message": "请完成认证"},
+    )
+
+    started = client.post("/api/webvpn/auth/start")
+    assert started.status_code == 200
+    assert started.json()["state"] == "pending"
+
+    current = client.get("/api/webvpn/auth/status")
+    assert current.status_code == 200
+    assert current.json() == {
+        "state": "pending",
+        "authenticated": False,
+        "message": "请完成认证",
+    }
+
+
 def test_school_proxy_route_separates_host_from_school_path(monkeypatch):
     async def fake_proxy(request, school_path):
         return {"school_path": school_path}

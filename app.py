@@ -38,6 +38,7 @@ from security.key_manager import (
     get_or_create_key_pair,
 )
 from services import backend_service, cart_service, proxy_service, webvpn_auth_service
+from services.webvpn_auth_service import ControlledBrowserUnavailableError
 from services.auth_service import (
     LOGIN_ERROR_MSG,
     attempt_automatic_relogin,
@@ -568,6 +569,33 @@ async def api_select_backend(req: BackendSelectRequest):
             **payload,
         )
     return JSONResponse(content=payload, headers=get_no_cache_headers())
+
+
+@app.post("/api/webvpn/auth/start")
+async def api_start_webvpn_auth():
+    """Start the local controlled-browser WebVPN authentication flow."""
+    try:
+        payload = await asyncio.to_thread(webvpn_auth_service.start_auth)
+    except ControlledBrowserUnavailableError as exc:
+        recovery_status = webvpn_auth_service.get_status()
+        recovery_status.pop("message", None)
+        return _api_error(
+            503,
+            str(exc),
+            "WEBVPN_AUTH_START_FAILED",
+            retryable=True,
+            **recovery_status,
+        )
+    return JSONResponse(content=payload, headers=get_no_cache_headers())
+
+
+@app.get("/api/webvpn/auth/status")
+async def api_webvpn_auth_status():
+    """Return the current state of the local WebVPN authentication browser."""
+    return JSONResponse(
+        content=webvpn_auth_service.get_status(),
+        headers=get_no_cache_headers(),
+    )
 
 
 @app.post("/api/login", status_code=status.HTTP_200_OK)

@@ -85,8 +85,16 @@ def test_login_captcha_ui_has_terminal_failure_states():
     script = (STATIC / "login.js").read_text(encoding="utf-8")
 
     assert 'data-state="idle"' in login
+    assert 'id="captchaWebvpnAuthButton"' in login
+    assert 'id="captchaActions"' in login
     assert "当前时段暂无验证码" in script
     assert 'code === "CAPTCHA_UNAVAILABLE"' in script
+    assert "loginState.backend === \"webvpn\"" in script
+    assert "loginState.captcha = null" in script
+    assert "当前选择 WebVPN，但验证码暂时无法获取，请先完成统一认证" in script
+    assert "loginElements.captchaActions.hidden = webvpnFallback" in script
+    assert "loginElements.stage.hidden = webvpnFallback" in script
+    assert "WebVPN 统一认证完成，正在刷新验证码" in script
     assert "本次加载已经停止，不会在后台自动循环" in script
     assert "重新获取验证码" in script
 
