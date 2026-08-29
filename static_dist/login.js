@@ -3,6 +3,7 @@
 const REQUEST_TIMEOUT_MS = 30000;
 const CAPTCHA_IMAGE_TIMEOUT_MS = 8000;
 const CREDENTIALS_STORAGE_KEY = "szu.loginCredentials.v1";
+const SESSION_CREDENTIALS_STORAGE_KEY = "szu.loginSessionCredentials.v1";
 
 /* ------------------------------------------------------------------
    Password obfuscation via Web Crypto AES-GCM.
@@ -95,6 +96,18 @@ async function saveCredentials(studentId, password) {
     );
   } catch {
     /* crypto / localStorage 不可用时静默忽略 */
+  }
+}
+
+async function saveSessionCredentials(studentId, password, backend) {
+  try {
+    const blob = await _encryptPassword(studentId, password);
+    window.sessionStorage.setItem(
+      SESSION_CREDENTIALS_STORAGE_KEY,
+      JSON.stringify({ student_id: studentId, backend, blob }),
+    );
+  } catch {
+    /* 当前浏览器不支持会话存储时，不阻断正常登录。 */
   }
 }
 
@@ -653,6 +666,7 @@ async function submitLogin(event) {
     } else {
       clearSavedCredentials();
     }
+    await saveSessionCredentials(studentId, password, loginState.backend);
     setLoginMessage(result.message || "登录成功", true);
     window.location.assign(cleanPagePath("/"));
   } catch (error) {

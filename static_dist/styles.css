@@ -913,6 +913,9 @@ a {
 }
 
 .student-label {
+  appearance: none;
+  cursor: default;
+  font-family: inherit;
   max-width: 176px;
   padding: 6px 13px;
   border: 1px solid var(--line);
@@ -923,6 +926,21 @@ a {
   font-size: 12.5px;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.student-label.is-actionable {
+  cursor: pointer;
+  color: var(--brand);
+  border-color: rgba(42, 93, 180, 0.28);
+}
+
+.student-label.is-actionable:hover {
+  background: var(--brand-tint);
+}
+
+.student-label:disabled {
+  cursor: wait;
+  opacity: 0.72;
 }
 
 .backend-indicator {

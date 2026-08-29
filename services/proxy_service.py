@@ -22,6 +22,7 @@ so sub-resources keep carrying the shared session.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -462,6 +463,7 @@ async def proxy_request(
     request: Request,
     school_path: str,
     proxy_host: str = SCHOOL_HOST,
+    _allow_session_recovery: bool = True,
 ) -> Response:
     """Forward a school or CAS request through an approved local proxy route."""
     logged_in, _combined_cookie, token, student_id = auth_service.get_shared_browser_session()
@@ -661,6 +663,22 @@ async def proxy_request(
     if expired:
         logger.info("Proxy request detected an expired shared session")
         await _close_upstream(client, upstream)
+        if _allow_session_recovery and auth_service.automatic_relogin_available():
+            logger.info("Proxy request starting OCR session recovery")
+            recovered, error = await asyncio.to_thread(
+                auth_service.attempt_automatic_relogin,
+                config.ocr_relogin_max_attempts,
+            )
+            if recovered:
+                # Rebuild the upstream request with the newly issued shared
+                # cookies/token. Retry exactly once to avoid a recovery loop.
+                return await proxy_request(
+                    request,
+                    school_path,
+                    proxy_host,
+                    _allow_session_recovery=False,
+                )
+            logger.warning("Proxy OCR session recovery failed: %s", error)
         return _json_error(401, _expiry_message())
 
     if upstream.status_code in {301, 302, 303, 307, 308} and upstream.headers.get("location"):

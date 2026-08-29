@@ -41,6 +41,7 @@ from services import backend_service, cart_service, proxy_service, webvpn_auth_s
 from services.auth_service import (
     LOGIN_ERROR_MSG,
     attempt_automatic_relogin,
+    automatic_relogin_available,
     clear_elective_batch,
     clear_login_state,
     consume_restored_session_validation,
@@ -53,6 +54,7 @@ from services.auth_service import (
     restored_session_validation_pending,
     save_login_state,
     set_current_campus,
+    start_automatic_relogin,
     update_backend_preference,
     validate_login_params,
 )
@@ -214,6 +216,14 @@ class LoginRequest(BaseModel):
         max_length=4,
     )
     cookie: str = Field(min_length=1, max_length=8192)
+    backend: str = Field(default=config.BACKEND_AUTO, pattern=r"^(auto|primary|webvpn)$")
+
+
+class SessionRecoverRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    student_id: str = Field(min_length=6, max_length=12, pattern=r"^\d+$")
+    password: str = Field(min_length=1, max_length=256)
     backend: str = Field(default=config.BACKEND_AUTO, pattern=r"^(auto|primary|webvpn)$")
 
 
@@ -474,6 +484,34 @@ def _session_payload() -> dict:
         "campus_options": campus_options_payload(),
         **backend_service.backend_payload(),
     }
+
+
+def _raise_if_session_expired_result(result) -> None:
+    """Turn tuple-style school service expiry results into one shared signal."""
+    if (
+        isinstance(result, tuple)
+        and len(result) >= 2
+        and result[0] is False
+        and result[1] == SESSION_EXPIRED
+    ):
+        raise logic.SchoolBatchSessionExpiredError("学校登录状态已过期")
+
+
+def _automatic_relogin_response(
+    error: str,
+    *,
+    status_code: int = 401,
+    error_code: str = "SESSION_RECOVERY_FAILED",
+):
+    """Return the common recoverable response when OCR login cannot finish."""
+    return _api_error(
+        status_code,
+        "登录已过期且 OCR 自动重登录失败，请手动登录",
+        error_code,
+        retryable=False,
+        requires_manual_login=True,
+        recovery_message=str(error or "自动重登录失败"),
+    )
 
 
 @app.get("/api/bootstrap")
@@ -771,10 +809,18 @@ async def api_session():
             payload = _session_payload()
         except logic.SchoolBatchSessionExpiredError:
             invalidate_school_session()
-            return _not_logged_in_response(
-                "保存的登录会话已失效，请重新登录",
-                "SESSION_RESTORE_EXPIRED",
+            logger.info("Restored session expired; starting OCR recovery")
+            recovered, error = await asyncio.to_thread(
+                attempt_automatic_relogin,
+                config.ocr_relogin_max_attempts,
             )
+            if recovered:
+                payload = _session_payload()
+            else:
+                return _automatic_relogin_response(
+                    error,
+                    error_code="SESSION_RESTORE_EXPIRED",
+                )
         except logic.ElectiveBatchUnavailableError as exc:
             clear_elective_batch()
             logger.info("Restored session is valid but no batch is available: %s", exc)
@@ -786,6 +832,39 @@ async def api_session():
         content=payload,
         headers=get_no_cache_headers(),
     )
+
+
+@app.post("/api/session/recover")
+async def api_session_recover(request: SessionRecoverRequest | None = None):
+    """Start OCR recovery immediately when the user clicks the login status.
+
+    Browser clients send their current tab credentials explicitly.  A bodyless
+    request remains supported for local tools and falls back to credentials
+    retained by this process, if any.
+    """
+    if request is None:
+        started, message = start_automatic_relogin()
+    else:
+        started, message = start_automatic_relogin(
+            student_id=request.student_id.strip(),
+            password=request.password,
+            backend=request.backend,
+        )
+    if not started:
+        snapshot = get_session_snapshot()
+        failure_count = int(snapshot.get("relogin_failure_count", 0))
+        max_retries = int(snapshot.get("relogin_max_retries", config.relogin_max_retries))
+        exhausted = failure_count >= max(1, max_retries)
+        return _api_error(
+            401 if exhausted else 409,
+            message,
+            "SESSION_RECOVERY_EXHAUSTED" if exhausted else "SESSION_RECOVERY_UNAVAILABLE",
+            retryable=not exhausted,
+            requires_manual_login=exhausted,
+        )
+    payload = _session_payload()
+    payload["message"] = message
+    return JSONResponse(content=payload, headers=get_no_cache_headers())
 
 
 @app.post("/api/session/refresh")
@@ -1296,6 +1375,15 @@ async def api_start_enroll(
             str(snapshot["student_id"]),
             config.token,
         )
+    except logic.SchoolBatchSessionExpiredError:
+        logger.info("Enrollment start detected expiry; starting OCR recovery")
+        recovered, error = await asyncio.to_thread(
+            attempt_automatic_relogin,
+            config.ocr_relogin_max_attempts,
+        )
+        if not recovered:
+            logger.warning("OCR session recovery failed before task start: %s", error)
+            return _automatic_relogin_response(error)
     except Exception as exc:
         logger.warning("Could not verify enrollment phase before task start: %s", exc)
         return JSONResponse(
@@ -1637,6 +1725,11 @@ def _keep_alive_once() -> None:
     """Touch one authenticated school API so its cookies remain active."""
     snapshot = get_session_snapshot()
     if not snapshot["logged_in"] or not snapshot["student_id"]:
+        if automatic_relogin_available():
+            logger.info("Keep-alive: no active school session; starting OCR recovery")
+            recovered, error = attempt_automatic_relogin(config.ocr_relogin_max_attempts)
+            if not recovered:
+                logger.warning("Keep-alive OCR recovery failed: %s", error)
         return
     student_id = str(snapshot["student_id"])
     token = str(config.token)
@@ -1652,19 +1745,21 @@ def _keep_alive_once() -> None:
             )
         )
         try:
-            keep_alive_call()
+            result = keep_alive_call()
+            _raise_if_session_expired_result(result)
+        except logic.SchoolBatchSessionExpiredError:
+            raise
         except Exception:
             # A temporary failure of an optional read endpoint must not stop
             # the canonical batch request from keeping the session alive.
-            refresh_elective_batch(student_id, token)
+            result = refresh_elective_batch(student_id, token)
+            _raise_if_session_expired_result(result)
         if restored_session:
             consume_restored_session_validation()
         logger.info("Keep-alive: school session refreshed")
     except logic.SchoolBatchSessionExpiredError:
         if restored_session:
-            logger.info("Keep-alive: restored session expired; requiring manual login")
             invalidate_school_session()
-            return
         logger.info("Keep-alive: session expired; starting OCR recovery")
         recovered, error = attempt_automatic_relogin(config.ocr_relogin_max_attempts)
         if not recovered:
@@ -1682,11 +1777,11 @@ def _keep_alive_once() -> None:
 def _keep_alive_loop() -> None:
     """Run periodic session refresh on a daemon thread until the process exits."""
     while True:
-        threading.Event().wait(KEEP_ALIVE_INTERVAL_SECONDS)
         try:
             _keep_alive_once()
         except Exception as exc:
             logger.warning("Keep-alive loop error: %s", exc)
+        threading.Event().wait(KEEP_ALIVE_INTERVAL_SECONDS)
 
 
 def start_server() -> None:

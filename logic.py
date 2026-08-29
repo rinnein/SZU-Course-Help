@@ -160,6 +160,55 @@ def verify_vcode(
     return vtoken, parsed_cookie, login_pwd, coordinates
 
 
+def verify_vcode_login_flow(
+    max_attempts: int = config.ocr_relogin_max_attempts,
+) -> tuple[str, str, str, str]:
+    """Run the same fetch-image/OCR flow used by the browser login page."""
+    if isinstance(max_attempts, bool) or not isinstance(max_attempts, int):
+        raise TypeError("max_attempts must be an integer")
+    if max_attempts < 1:
+        raise ValueError("max_attempts must be at least 1")
+    if not config.student_id or not config.password:
+        raise RuntimeError("缺少自动重登录所需的学号或密码")
+
+    last_error: Exception | None = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            captcha = fetch_vtoken_and_image(1)
+            _header, encoded = str(captcha["imageUrl"]).split(",", 1)
+            image_path = _captcha_image_path()
+            image_path.parent.mkdir(parents=True, exist_ok=True)
+            image_path.write_bytes(base64.b64decode(encoded, validate=True))
+            centers = recognize_captcha_centers()
+            coordinates = serialize_captcha_coordinates(centers)
+            parsed_cookie = parse_cookie(captcha["cookie"])
+            if coordinates and parsed_cookie:
+                return (
+                    str(captcha["vtoken"]),
+                    parsed_cookie,
+                    encrypt_school_password(config.password),
+                    coordinates,
+                )
+            last_error = RuntimeError("OCR did not return four valid coordinates")
+        except CaptchaUnavailableError:
+            raise
+        except (ImportError, ModuleNotFoundError):
+            raise
+        except Exception as exc:
+            last_error = exc
+        logger.warning(
+            "Login-page OCR attempt %s/%s failed: %s",
+            attempt,
+            max_attempts,
+            last_error,
+        )
+        if attempt < max_attempts:
+            time.sleep(min(OCR_RETRY_DELAY_SECONDS * attempt, 1.0))
+
+    detail = type(last_error).__name__ if last_error else "unknown error"
+    raise RuntimeError(f"OCR 连续 {max_attempts} 次识别失败 ({detail})")
+
+
 def serialize_captcha_coordinates(centers: list) -> str:
     """Serialize exactly four validated click coordinates for the school form."""
     if not centers or len(centers) != 4:

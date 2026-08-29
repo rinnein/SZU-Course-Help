@@ -2,6 +2,7 @@
 
 const REQUEST_TIMEOUT_MS = 30000;
 const SESSION_RECOVERY_TIMEOUT_MS = 180000;
+const SESSION_CREDENTIALS_STORAGE_KEY = "szu.loginSessionCredentials.v1";
 const FILTER_PAGE_SIZE = 10;
 const MAX_CATALOG_PAGES = 1000;
 const CATALOG_PAGE_DELAY_MS = 150;
@@ -95,6 +96,7 @@ const appState = {
   recoveryHideTimer: null,
   recoveryDismissedAt: "",
   lastReloginStatus: "idle",
+  reloginRequestPending: false,
 };
 
 const appElements = {
@@ -728,6 +730,56 @@ function showSessionDialog(message) {
   if (!appElements.sessionDialog.open) appElements.sessionDialog.showModal();
 }
 
+async function loadBrowserRecoveryCredentials() {
+  try {
+    const raw = window.sessionStorage?.getItem(SESSION_CREDENTIALS_STORAGE_KEY);
+    if (!raw) return null;
+    const data = JSON.parse(raw);
+    const studentId = typeof data?.student_id === "string" ? data.student_id : "";
+    const blob = typeof data?.blob === "string" ? data.blob : "";
+    const backend = ["auto", "primary", "webvpn"].includes(data?.backend)
+      ? data.backend
+      : "auto";
+    if (!studentId || !blob || !window.crypto?.subtle) return null;
+    const [ivPart, dataPart] = blob.split(".");
+    if (!ivPart || !dataPart) return null;
+    const decode = (value) => {
+      const binary = window.atob(value);
+      const bytes = new Uint8Array(binary.length);
+      for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+      return bytes;
+    };
+    const encoder = new TextEncoder();
+    const baseKey = await window.crypto.subtle.importKey(
+      "raw",
+      encoder.encode(`${window.location.origin}|${studentId}`),
+      { name: "PBKDF2" },
+      false,
+      ["deriveKey"],
+    );
+    const key = await window.crypto.subtle.deriveKey(
+      {
+        name: "PBKDF2",
+        salt: encoder.encode("szu-course-help/salt-v1"),
+        iterations: 100000,
+        hash: "SHA-256",
+      },
+      baseKey,
+      { name: "AES-GCM", length: 256 },
+      false,
+      ["decrypt"],
+    );
+    const plain = await window.crypto.subtle.decrypt(
+      { name: "AES-GCM", iv: decode(ivPart) },
+      key,
+      decode(dataPart),
+    );
+    return { student_id: studentId, password: new TextDecoder().decode(plain), backend };
+  } catch {
+    return null;
+  }
+}
+
 function hideSessionDialog() {
   if (appElements.sessionDialog.open) appElements.sessionDialog.close();
 }
@@ -795,13 +847,20 @@ function renderSessionRecovery(session, previousStatus = "idle") {
   }
   appElements.sessionRecoveryBanner.hidden = false;
   appElements.sessionRecoveryBanner.className = "session-recovery-banner is-error";
+  const failureCount = Number(session.relogin_failure_count || 0);
+  const maxRetries = Number(session.relogin_max_retries || 5);
+  const retryAfter = Number(session.relogin_retry_after || 0);
+  const recoveryExhausted = failureCount >= maxRetries;
   appElements.recoveryTitle.textContent = taskRunning && !taskPaused
     ? "自动重新登录暂未成功"
     : "自动重新登录失败";
+  const retryHint = recoveryExhausted
+    ? "自动重登录已停止，请手动登录。"
+    : `后台将在${retryAfter > 0 ? `${retryAfter}秒后` : "稍后"}继续尝试。`;
   appElements.recoveryDetail.textContent = taskRunning && !taskPaused
-    ? `${session.relogin_message || "OCR 暂未识别成功"}；后台仍会按策略继续尝试。`
+    ? `${session.relogin_message || "OCR 暂未识别成功"}；${retryHint}`
     : `${session.relogin_message || "无法恢复学校会话"}；请手动登录后返回清单继续任务。`;
-  appElements.recoveryLoginLink.hidden = taskRunning && !taskPaused;
+  appElements.recoveryLoginLink.hidden = taskRunning && !taskPaused && !recoveryExhausted;
 }
 
 function renderLoading() {
@@ -952,17 +1011,75 @@ function applySessionData(session) {
   if (!session?.logged_in && appState.cacheMode) clearCacheRefreshTimer();
   renderCampusOptions(session);
   appState.lastReloginStatus = String(session.relogin_status || "idle");
+  const reloginAvailable = !session.logged_in
+    && !session.relogin_in_progress
+    && Number(session.relogin_failure_count || 0)
+      < Number(session.relogin_max_retries || 5);
   appElements.studentLabel.textContent = session.relogin_in_progress
     ? "正在恢复登录"
     : session.logged_in
       ? `学号 ${session.student_id}`
       : "未登录";
+  appElements.studentLabel.disabled = !reloginAvailable;
+  appElements.studentLabel.classList.toggle("is-actionable", reloginAvailable);
+  appElements.studentLabel.title = reloginAvailable
+    ? "点击立即尝试自动重新登录"
+    : session.logged_in
+      ? "当前已登录"
+      : "自动重登录暂不可用，请稍候或手动登录";
   renderSessionRecovery(session, previousReloginStatus);
   if (session.logged_in && !session.relogin_in_progress) hideSessionDialog();
   updateTaskIndicator();
   setPhasePresentation();
   if (session.task_running) startProgressPolling();
   return catalogContextChanged;
+}
+
+async function requestAutomaticRelogin(options = {}) {
+  const automatic = Boolean(options?.automatic);
+  const suppliedCredentials = options?.credentials || null;
+  if (!appState.session || appState.session.logged_in || appState.session.relogin_in_progress) return;
+  if (appState.reloginRequestPending) return;
+  if (!automatic && appElements.studentLabel.disabled) return;
+  appState.reloginRequestPending = true;
+  appElements.studentLabel.disabled = true;
+  appElements.studentLabel.classList.remove("is-actionable");
+  appElements.studentLabel.textContent = "正在恢复登录";
+  try {
+    const credentials = suppliedCredentials || await loadBrowserRecoveryCredentials();
+    if (!credentials) {
+      if (automatic) return;
+      throw new ApiError("当前浏览器会话没有可用的自动登录凭据，请返回登录页重新登录", {
+        code: "BROWSER_CREDENTIALS_UNAVAILABLE",
+        retryable: false,
+      });
+    }
+    const session = await api("/api/session/recover", {
+      method: "POST",
+      body: JSON.stringify(credentials),
+      timeoutMs: SESSION_RECOVERY_TIMEOUT_MS,
+    });
+    applySessionData(session);
+    showToast(session.message || "已开始自动重新登录，请稍候", false, true);
+  } catch (error) {
+    if (!(error instanceof SessionExpiredError)) showToast(error.message, true);
+    await loadSession(false, false);
+  } finally {
+    appState.reloginRequestPending = false;
+    if (appState.session) applySessionData(appState.session);
+  }
+}
+
+async function maybeStartAutomaticRelogin() {
+  const session = appState.session;
+  if (!session || session.logged_in || session.relogin_in_progress) return;
+  if (session.relogin_status === "failed") return;
+  if (Number(session.relogin_failure_count || 0) >= Number(session.relogin_max_retries || 5)) return;
+  if (appState.reloginRequestPending) return;
+
+  const credentials = await loadBrowserRecoveryCredentials();
+  if (!credentials || appState.session !== session) return;
+  void requestAutomaticRelogin({ automatic: true, credentials });
 }
 
 function cartEditStateKey() {
@@ -1028,6 +1145,7 @@ async function loadSession(showDialog = true, refreshOnCatalogChange = true) {
   try {
     const session = await api("/api/session");
     const catalogContextChanged = applySessionData(session);
+    void maybeStartAutomaticRelogin();
     if (
       !appState.session.logged_in
       && !appState.session.relogin_in_progress
@@ -2819,6 +2937,7 @@ appElements.taskControlButton.addEventListener("click", toggleEnrollmentPause);
 appElements.openSchoolRaw?.addEventListener("click", () => {
   openSchoolRawPage();
 });
+appElements.studentLabel?.addEventListener("click", requestAutomaticRelogin);
 appElements.logout.addEventListener("click", async () => {
   try {
     const result = await api("/api/logout", { method: "POST" });
@@ -2828,6 +2947,9 @@ appElements.logout.addEventListener("click", async () => {
     appState.cacheMode = false;
     clearCacheRefreshTimer();
     if (appElements.cacheModeSwitch) appElements.cacheModeSwitch.checked = false;
+    try {
+      window.sessionStorage?.removeItem(SESSION_CREDENTIALS_STORAGE_KEY);
+    } catch {}
     window.location.assign(cleanPagePath("/login"));
   } catch (error) {
     if (!(error instanceof SessionExpiredError)) showToast(error.message, true);

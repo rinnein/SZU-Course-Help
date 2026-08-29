@@ -75,6 +75,7 @@ def test_login_and_course_pages_expose_required_controls():
     assert "ui_cache_token" not in course_script
     assert "stripUiQuery" in login_script
     assert "stripUiQuery" in course_script
+    assert "SESSION_CREDENTIALS_STORAGE_KEY" in login_script
     assert 'id="openTimetable"' not in course
     assert 'id="timetableDialog"' not in course
 
@@ -97,6 +98,10 @@ def test_course_page_exposes_pause_and_relogin_states():
     assert '"/api/enroll/resume"' in script
     assert "正在自动重新登录" in script
     assert "自动重新登录成功" in script
+    assert '"/api/session/recover"' in script
+    assert "点击立即尝试自动重新登录" in script
+    assert "loadBrowserRecoveryCredentials" in script
+    assert "window.sessionStorage?.removeItem(SESSION_CREDENTIALS_STORAGE_KEY)" in script
     assert "重新排队" in script
     assert "task_pause_acknowledged" in script
     assert "正在完成当前学校请求；安全暂停后即可移除" in script

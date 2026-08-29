@@ -6,6 +6,7 @@ import pytest
 import requests
 
 from services import course_cache_service
+from services import auth_service
 
 
 @pytest.fixture(autouse=True)
@@ -27,3 +28,11 @@ def block_unmocked_network(monkeypatch):
 def isolate_course_cache(monkeypatch, tmp_path):
     """Keep persistent course-cache tests out of the repository workspace."""
     monkeypatch.setattr(course_cache_service, "_path", tmp_path / "course_cache.json")
+
+
+@pytest.fixture(autouse=True)
+def isolate_relogin_state():
+    """Keep process-wide automatic recovery counters isolated per test."""
+    with auth_service._state_lock:
+        auth_service._reset_relogin_state_locked()
+    yield

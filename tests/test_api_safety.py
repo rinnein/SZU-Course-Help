@@ -296,7 +296,7 @@ def test_session_uses_backend_phase_classification(monkeypatch):
     assert body["automatic_enroll_allowed"] is False
 
 
-def test_expired_restored_session_requires_manual_login(monkeypatch):
+def test_expired_restored_session_starts_automatic_relogin(monkeypatch):
     set_logged_session(monkeypatch)
     monkeypatch.setattr(app, "consume_restored_session_validation", lambda: True)
     monkeypatch.setattr(
@@ -304,13 +304,20 @@ def test_expired_restored_session_requires_manual_login(monkeypatch):
         "refresh_elective_batch",
         lambda *_args: (_ for _ in ()).throw(logic.SchoolBatchSessionExpiredError("expired")),
     )
+    relogin_called = []
+    monkeypatch.setattr(
+        app,
+        "attempt_automatic_relogin",
+        lambda *args, **kwargs: relogin_called.append(args) or (False, "ocr failed"),
+    )
 
     response = client.get("/api/session")
 
     assert response.status_code == 401
     assert response.json()["error_code"] == "SESSION_RESTORE_EXPIRED"
     assert response.json()["requires_manual_login"] is True
-    assert "保存的登录会话已失效" in response.json()["message"]
+    assert relogin_called == [(config.ocr_relogin_max_attempts,)]
+    assert "OCR 自动重登录失败" in response.json()["message"]
     assert config.token == ""
     assert config.combined_cookie == ""
 
@@ -956,6 +963,65 @@ def test_keep_alive_skips_when_not_logged_in(monkeypatch):
     assert called == []
 
 
+def test_keep_alive_starts_automatic_relogin_without_active_session(monkeypatch):
+    monkeypatch.setattr(config, "token", "")
+    monkeypatch.setattr(config, "combined_cookie", "")
+    monkeypatch.setattr(config, "student_id", "2024110122")
+    monkeypatch.setattr(config, "password", "secret")
+    monkeypatch.setattr(app, "automatic_relogin_available", lambda: True)
+    relogin_called = []
+    monkeypatch.setattr(
+        app,
+        "attempt_automatic_relogin",
+        lambda *args, **kwargs: relogin_called.append(args) or (True, ""),
+    )
+
+    app._keep_alive_once()
+
+    assert relogin_called == [(config.ocr_relogin_max_attempts,)]
+
+
+def test_click_relogin_endpoint_starts_recovery_immediately(monkeypatch):
+    monkeypatch.setattr(config, "token", "")
+    monkeypatch.setattr(config, "combined_cookie", "")
+    monkeypatch.setattr(config, "student_id", "2024110122")
+    monkeypatch.setattr(config, "password", "secret")
+    called = []
+    monkeypatch.setattr(app, "start_automatic_relogin", lambda **kwargs: called.append(kwargs) or (True, "正在自动重新登录，请稍候"))
+
+    response = client.post(
+        "/api/session/recover",
+        json={"student_id": "2024110122", "password": "secret", "backend": "webvpn"},
+    )
+
+    assert response.status_code == 200
+    assert called == [{"student_id": "2024110122", "password": "secret", "backend": "webvpn"}]
+    assert response.json()["message"] == "正在自动重新登录，请稍候"
+
+
+def test_click_relogin_requires_webvpn_auth_for_webvpn_backend(monkeypatch):
+    monkeypatch.setattr(app, "start_automatic_relogin", lambda **kwargs: (False, "请先完成 WebVPN 统一认证"))
+
+    response = client.post(
+        "/api/session/recover",
+        json={"student_id": "2024110122", "password": "secret", "backend": "webvpn"},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["error_code"] == "SESSION_RECOVERY_UNAVAILABLE"
+    assert response.json()["message"] == "请先完成 WebVPN 统一认证"
+
+
+def test_relogin_endpoint_accepts_bodyless_local_request(monkeypatch):
+    monkeypatch.setattr(app, "start_automatic_relogin", lambda: (False, "没有可用于自动重登录的内存凭据"))
+
+    response = client.post("/api/session/recover")
+
+    assert response.status_code == 409
+    assert response.json()["error_code"] == "SESSION_RECOVERY_UNAVAILABLE"
+    assert response.json()["message"] == "没有可用于自动重登录的内存凭据"
+
+
 def test_keep_alive_refreshes_session_when_logged_in(monkeypatch):
     monkeypatch.setattr(config, "token", "active-token")
     monkeypatch.setattr(config, "combined_cookie", "cookie")
@@ -992,7 +1058,7 @@ def test_keep_alive_triggers_ocr_recovery_on_expiry(monkeypatch):
     assert len(relogin_called) == 1
 
 
-def test_keep_alive_requires_manual_login_for_unvalidated_restored_session(monkeypatch):
+def test_keep_alive_recovers_unvalidated_restored_session(monkeypatch):
     monkeypatch.setattr(config, "token", "expired-token")
     monkeypatch.setattr(config, "combined_cookie", "cookie")
     monkeypatch.setattr(config, "student_id", "2024110122")
@@ -1003,16 +1069,18 @@ def test_keep_alive_requires_manual_login_for_unvalidated_restored_session(monke
         "refresh_elective_batch",
         lambda *args: (_ for _ in ()).throw(logic.SchoolBatchSessionExpiredError("expired")),
     )
+    relogin_called = []
     monkeypatch.setattr(
         app,
         "attempt_automatic_relogin",
-        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("must require manual login")),
+        lambda *args, **kwargs: relogin_called.append(args) or (False, "ocr failed"),
     )
 
     app._keep_alive_once()
 
     assert config.token == ""
     assert config.combined_cookie == ""
+    assert relogin_called == [(config.ocr_relogin_max_attempts,)]
 
 
 def test_keep_alive_randomly_uses_an_authenticated_read_api(monkeypatch):
@@ -1027,6 +1095,36 @@ def test_keep_alive_randomly_uses_an_authenticated_read_api(monkeypatch):
     app._keep_alive_once()
 
     assert called == ["enrolled"]
+
+
+def test_keep_alive_starts_relogin_when_random_read_api_reports_expiry(monkeypatch):
+    monkeypatch.setattr(config, "token", "expired-token")
+    monkeypatch.setattr(config, "combined_cookie", "cookie")
+    monkeypatch.setattr(config, "student_id", "2024110122")
+    monkeypatch.setattr(app.random, "choice", lambda choices: choices[1])
+    monkeypatch.setattr(app, "restored_session_validation_pending", lambda: False)
+    monkeypatch.setattr(
+        app,
+        "get_enrolled_courses",
+        lambda: (False, app.SESSION_EXPIRED),
+    )
+    fallback_called = []
+    monkeypatch.setattr(
+        app,
+        "refresh_elective_batch",
+        lambda *args: fallback_called.append(args),
+    )
+    relogin_called = []
+    monkeypatch.setattr(
+        app,
+        "attempt_automatic_relogin",
+        lambda *args, **kwargs: relogin_called.append(args) or (True, ""),
+    )
+
+    app._keep_alive_once()
+
+    assert relogin_called == [(config.ocr_relogin_max_attempts,)]
+    assert fallback_called == []
 
 
 def test_captcha_solve_rejects_missing_image():

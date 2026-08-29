@@ -68,6 +68,9 @@ count: int = 150000000
 # 只要有一次重登录成功，计数即清零，因此长时间的补选/复选阶段可以持续恢复会话。
 relogin_max_retries: int = 5
 
+# 自动重登录失败后的再次尝试间隔。单位为秒。
+relogin_retry_interval_seconds: int = 60
+
 # 每次自动重登录中，OCR 最多尝试的验证码图片数量。
 ocr_relogin_max_attempts: int = 50
 
