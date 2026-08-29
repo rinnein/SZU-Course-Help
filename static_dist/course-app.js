@@ -146,6 +146,9 @@ const appElements = {
   myCoursesDialog: document.querySelector("#myCoursesDialog"),
   myCoursesList: document.querySelector("#myCoursesList"),
   myCoursesHint: document.querySelector("#myCoursesHint"),
+  selectedCreditTotal: document.querySelector("#selectedCreditTotal"),
+  pendingCreditTotal: document.querySelector("#pendingCreditTotal"),
+  combinedCreditTotal: document.querySelector("#combinedCreditTotal"),
   refreshMyCourses: document.querySelector("#refreshMyCourses"),
   myCoursesScheduleWrap: document.querySelector("#myCoursesScheduleWrap"),
   scheduleViewGrid: document.querySelector("#scheduleViewGrid"),
@@ -1256,6 +1259,7 @@ function appendClassRow(container, course, classInfo) {
           teaching_place: String(classInfo.teaching_place || ""),
           course_name: String(course.course_name || ""),
           teacher_name: String(classInfo.teacher_name || ""),
+          credit: String(course.credit || ""),
           auto_enabled: true,
           is_choose: String(classInfo.is_choose || ""),
           is_conflict: String(classInfo.is_conflict || ""),
@@ -2137,19 +2141,26 @@ async function loadCart() {
 
 function renderMyCourses() {
   const list = appState.myCourses;
-  if (!list.length) {
+  const pendingItems = getPendingMyCourseItems();
+  const entries = [
+    ...list.map((course) => ({ course, pending: false })),
+    ...pendingItems.map((course) => ({ course, pending: true })),
+  ];
+  if (!entries.length) {
     const empty = element("div", "empty-state");
     empty.append(element("strong", "", "还没有已选课程"));
-    empty.append(element("p", "", "抢到课程后会显示在这里，也可能是学校系统暂未返回数据。"));
+    empty.append(element("p", "", "抢到课程后会显示在这里；选课清单中的待抢课程会以虚化状态显示。"));
     appElements.myCoursesList.replaceChildren(empty);
     return;
   }
   const fragment = document.createDocumentFragment();
-  list.forEach((course, index) => {
-    const row = element("div", "my-course-item");
+  entries.forEach(({ course, pending }, index) => {
+    const row = element("div", `my-course-item${pending ? " is-pending" : ""}`);
     row.append(element("span", "my-course-index", String(index + 1)));
     const body = element("div", "my-course-body");
-    body.append(element("strong", "", course.course_name || "未命名课程"));
+    const title = element("strong", "", course.course_name || course.name || "未命名课程");
+    if (pending) title.append(element("span", "my-course-pending-badge", "待选"));
+    body.append(title);
     const meta = element("div", "my-course-meta");
     if (course.teacher_name) meta.append(element("span", "", `教师 ${course.teacher_name}`));
     if (course.teaching_place) meta.append(element("span", "", course.teaching_place));
@@ -2161,6 +2172,54 @@ function renderMyCourses() {
     fragment.append(row);
   });
   appElements.myCoursesList.replaceChildren(fragment);
+}
+
+function getPendingMyCourseItems({ visibleOnly = true } = {}) {
+  const enrolledIds = new Set(
+    appState.myCourses.map((course) => String(course.teaching_class_id || "")),
+  );
+  if (visibleOnly && !appState.showCartOnSchedule) return [];
+  return appState.cart.filter(
+    (item) => (item.status || "PENDING") !== "SUCCESS"
+      && !enrolledIds.has(String(item.id)),
+  );
+}
+
+function numericCredit(value) {
+  const number = Number.parseFloat(String(value ?? "").replace(/[^0-9.+-]/g, ""));
+  return Number.isFinite(number) && number >= 0 ? number : 0;
+}
+
+function formatCredit(value) {
+  return Number.isInteger(value)
+    ? String(value)
+    : value.toFixed(2).replace(/0+$/, "").replace(/\.$/, "");
+}
+
+function myCoursesCreditSummary() {
+  const selected = appState.myCourses.reduce(
+    (total, course) => total + numericCredit(course.credit),
+    0,
+  );
+  const pending = getPendingMyCourseItems({ visibleOnly: false }).reduce(
+    (total, course) => total + numericCredit(course.credit),
+    0,
+  );
+  return `已选课程 ${formatCredit(selected)} 学分 + 待抢课程 ${formatCredit(pending)} 学分 = 合计 ${formatCredit(selected + pending)} 学分`;
+}
+
+function renderMyCoursesCreditSummary() {
+  const selected = appState.myCourses.reduce(
+    (total, course) => total + numericCredit(course.credit),
+    0,
+  );
+  const pending = getPendingMyCourseItems({ visibleOnly: false }).reduce(
+    (total, course) => total + numericCredit(course.credit),
+    0,
+  );
+  if (appElements.selectedCreditTotal) appElements.selectedCreditTotal.textContent = formatCredit(selected);
+  if (appElements.pendingCreditTotal) appElements.pendingCreditTotal.textContent = formatCredit(pending);
+  if (appElements.combinedCreditTotal) appElements.combinedCreditTotal.textContent = formatCredit(selected + pending);
 }
 
 /* ---------------- My courses schedule (weekly grid) ---------------- */
@@ -2268,14 +2327,16 @@ function isConflictFocusCourse(courseLike, conflict) {
 
 function updateMyCoursesHint() {
   const conflict = appState.scheduleConflict;
+  renderMyCoursesCreditSummary();
+  const creditSummary = myCoursesCreditSummary();
   if (conflict) {
     appElements.myCoursesHint.textContent = conflict.focusSlots.length
-      ? `冲突查看：${conflict.title}；当前教学班使用蓝色高亮，冲突课程使用红色高亮。`
-      : `冲突查看：${conflict.title}；当前教学班的时间地点格式无法解析，暂时无法定位冲突课程。`;
+      ? `${creditSummary}；冲突查看：${conflict.title}；当前教学班使用蓝色高亮，冲突课程使用红色高亮。`
+      : `${creditSummary}；冲突查看：${conflict.title}；当前教学班的时间地点格式无法解析，暂时无法定位冲突课程。`;
     return;
   }
   if (appState.myCoursesLoaded) {
-    appElements.myCoursesHint.textContent = `学校系统当前返回 ${appState.myCourses.length} 门已选课程；虚化块为选课清单中的待选课程。`;
+    appElements.myCoursesHint.textContent = `${creditSummary}；学校系统当前返回 ${appState.myCourses.length} 门已选课程；虚化内容为选课清单中的待抢课程；悬停在卡片上以显示完整课程信息。`;
   }
 }
 
@@ -2285,12 +2346,7 @@ function renderMyCoursesSchedule() {
   const conflict = appState.scheduleConflict;
 
   /* Determine pending (cart) items to show */
-  const enrolledIds = new Set(courses.map((c) => String(c.teaching_class_id || "")));
-  const pendingItems = appState.showCartOnSchedule
-    ? appState.cart.filter(
-        (item) => (item.status || "PENDING") !== "SUCCESS" && !enrolledIds.has(String(item.id)),
-      )
-    : [];
+  const pendingItems = getPendingMyCourseItems();
 
   if (!courses.length && !pendingItems.length && !conflict) {
     const empty = element("div", "empty-state");
@@ -2963,6 +3019,7 @@ appElements.scheduleViewGrid.addEventListener("click", () => switchMyCoursesView
 appElements.scheduleViewList.addEventListener("click", () => switchMyCoursesView("list"));
 appElements.showPendingSwitch.addEventListener("change", () => {
   appState.showCartOnSchedule = appElements.showPendingSwitch.checked;
+  renderMyCourses();
   renderMyCoursesSchedule();
 });
 appElements.openEnrollConfirm.addEventListener("click", () => {

@@ -149,6 +149,14 @@ def test_my_courses_restores_schedule_and_list_views():
     assert "switchMyCoursesView" in script
     assert "renderMyCoursesSchedule" in script
     assert "showCartOnSchedule" in script
+    assert "getPendingMyCourseItems" in script
+    assert "myCoursesCreditSummary" in script
+    assert "renderMyCoursesCreditSummary" in script
+    assert "my-course-pending-badge" in script
+    assert 'id="selectedCreditTotal"' in course
+    assert 'id="pendingCreditTotal"' in course
+    assert 'id="combinedCreditTotal"' in course
+    assert ".my-courses-credit-summary" in styles
     assert 'const block = element("div", `schedule-course${stateClasses ? ` ${stateClasses}` : ""}`);' in script
     assert "虚化块为选课清单中的待选课程" in script
     assert ".schedule-course.is-pending" in styles

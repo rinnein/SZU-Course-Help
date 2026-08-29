@@ -224,6 +224,25 @@
       <div id="myCoursesList" class="my-courses-list" hidden></div>
     </div>
     <div class="dialog-footer">
+      <div id="myCoursesCreditSummary" class="my-courses-credit-summary" aria-label="课程学分统计">
+        <div class="credit-summary-item is-selected">
+          <span>已选课程</span>
+          <strong id="selectedCreditTotal">0</strong>
+          <small>学分</small>
+        </div>
+        <div class="credit-summary-plus" aria-hidden="true">＋</div>
+        <div class="credit-summary-item is-pending">
+          <span>待抢课程</span>
+          <strong id="pendingCreditTotal">0</strong>
+          <small>学分</small>
+        </div>
+        <div class="credit-summary-equals" aria-hidden="true">＝</div>
+        <div class="credit-summary-item is-total">
+          <span>合计</span>
+          <strong id="combinedCreditTotal">0</strong>
+          <small>学分</small>
+        </div>
+      </div>
       <p id="myCoursesHint">这里显示学校已选课程和选课清单中的待选课程。</p>
       <button id="refreshMyCourses" class="button button-secondary button-block" type="button">刷新我的课程</button>
     </div>

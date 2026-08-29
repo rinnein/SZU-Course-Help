@@ -1996,6 +1996,16 @@ dialog::backdrop {
   border-bottom: 0;
 }
 
+.my-course-item.is-pending {
+  opacity: 0.5;
+  border-left: 3px dashed var(--gold);
+  filter: saturate(0.65);
+}
+
+.my-course-item.is-pending:hover {
+  opacity: 0.8;
+}
+
 .my-course-index {
   display: grid;
   place-items: center;
@@ -2014,6 +2024,18 @@ dialog::backdrop {
   font-size: 15px;
   font-weight: 700;
   overflow-wrap: anywhere;
+}
+
+.my-course-pending-badge {
+  display: inline-block;
+  margin-left: 8px;
+  padding: 2px 6px;
+  border-radius: 999px;
+  color: var(--gold);
+  background: var(--gold-tint);
+  font-size: 10px;
+  font-weight: 700;
+  vertical-align: 2px;
 }
 
 .my-course-meta {
@@ -2162,6 +2184,97 @@ dialog::backdrop {
   margin: 0 0 12px;
   color: var(--muted);
   font-size: 12px;
+}
+
+.my-courses-credit-summary {
+  display: flex;
+  align-items: stretch;
+  justify-content: center;
+  gap: 10px;
+  margin: -2px 0 16px;
+  padding: 12px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+}
+
+.credit-summary-item {
+  display: grid;
+  grid-template-columns: auto auto;
+  column-gap: 7px;
+  align-items: baseline;
+  min-width: 90px;
+  padding: 7px 11px;
+  border-radius: var(--radius-xs);
+  background: var(--surface-2);
+}
+
+.credit-summary-item span {
+  grid-column: 1 / -1;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.credit-summary-item strong {
+  color: var(--ink);
+  font-family: var(--font-num);
+  font-size: 24px;
+  line-height: 1;
+}
+
+.credit-summary-item small {
+  color: var(--ink-soft);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.credit-summary-item.is-selected {
+  border-left: 3px solid var(--brand);
+}
+
+.credit-summary-item.is-pending {
+  border-left: 3px dashed var(--gold);
+}
+
+.credit-summary-item.is-total {
+  border: 2px solid var(--brand);
+  background: var(--brand-tint);
+}
+
+.credit-summary-item.is-total strong {
+  color: var(--brand-strong);
+  font-size: 28px;
+}
+
+.credit-summary-plus,
+.credit-summary-equals {
+  display: grid;
+  place-items: center;
+  color: var(--muted);
+  font-size: 22px;
+  font-weight: 700;
+}
+
+@media (max-width: 520px) {
+  .my-courses-credit-summary {
+    gap: 4px;
+    padding: 8px 4px;
+  }
+
+  .credit-summary-item {
+    min-width: 0;
+    flex: 1 1 0;
+    padding: 7px 5px;
+  }
+
+  .credit-summary-item strong {
+    font-size: 20px;
+  }
+
+  .credit-summary-item.is-total strong {
+    font-size: 23px;
+  }
 }
 
 .confirm-content {

@@ -281,6 +281,7 @@ class CartCourse(BaseModel):
     teaching_place: str = Field(default="", max_length=512)
     course_name: str = Field(default="", max_length=256)
     teacher_name: str = Field(default="", max_length=128)
+    credit: str = Field(default="", max_length=32)
     is_choose: str = Field(default="", max_length=8)
     is_conflict: str = Field(default="", max_length=8)
     is_full: str = Field(default="", max_length=8)
@@ -409,6 +410,7 @@ def _cart_from_row(row: dict) -> CartCourse:
         teaching_place=row.get("teaching_place", ""),
         course_name=row.get("course_name", ""),
         teacher_name=row.get("teacher_name", ""),
+        credit=row.get("credit", ""),
         status=row.get("status", ""),
         auto_enabled=bool(row.get("auto_enabled", 1)),
         priority_group=row.get("priority_group", ""),

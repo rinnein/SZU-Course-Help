@@ -37,6 +37,7 @@ class CartCourse(Protocol):
     name: str
     campus_code: str
     campus_name: str
+    credit: str
 
 
 def _default_db_path() -> Path:
@@ -103,7 +104,7 @@ class DatabaseManager:
                 connection.execute(
                     "ALTER TABLE courses ADD COLUMN campus_name TEXT NOT NULL DEFAULT '粤海校区'"
                 )
-            for column in ("teaching_place", "course_name", "teacher_name"):
+            for column in ("teaching_place", "course_name", "teacher_name", "credit"):
                 if column not in columns:
                     connection.execute(f"ALTER TABLE courses ADD COLUMN {column} TEXT NOT NULL DEFAULT ''")
             migrations = {
@@ -131,6 +132,7 @@ class DatabaseManager:
             teaching_place = str(getattr(course, "teaching_place", "") or "")
             course_name = str(getattr(course, "course_name", "") or "")
             teacher_name = str(getattr(course, "teacher_name", "") or "")
+            credit = str(getattr(course, "credit", "") or "")
             auto_enabled = 1 if getattr(course, "auto_enabled", True) else 0
             priority_group = str(getattr(course, "priority_group", "") or "")
             priority_rank = int(getattr(course, "priority_rank", 0) or 0)
@@ -142,10 +144,10 @@ class DatabaseManager:
                     """
                     INSERT INTO courses (
                         id, type, name, campus_code, campus_name, status, updated_at,
-                        teaching_place, course_name, teacher_name, auto_enabled,
+                        teaching_place, course_name, teacher_name, credit, auto_enabled,
                         priority_group, priority_rank, course_number, time_signature
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(id) DO UPDATE SET
                         type = excluded.type,
                         name = excluded.name,
@@ -156,6 +158,7 @@ class DatabaseManager:
                         teaching_place = excluded.teaching_place,
                         course_name = excluded.course_name,
                         teacher_name = excluded.teacher_name,
+                        credit = excluded.credit,
                         auto_enabled = excluded.auto_enabled,
                         priority_group = excluded.priority_group,
                         priority_rank = excluded.priority_rank,
@@ -173,6 +176,7 @@ class DatabaseManager:
                         teaching_place,
                         course_name,
                         teacher_name,
+                        credit,
                         auto_enabled,
                         priority_group,
                         priority_rank,
