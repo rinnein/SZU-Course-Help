@@ -16,6 +16,7 @@
 
 import copy
 import logging
+import math
 import threading
 import time
 from dataclasses import dataclass
@@ -28,11 +29,13 @@ import choose_course
 import config
 import database
 from campus import DEFAULT_CAMPUS_CODE, campus_name
+from course_models import time_signature
 from school_session import is_session_expired_response
 from services import cart_service
 from services.auth_service import (
     attempt_automatic_relogin,
 )
+from services.course_service import query_courses
 
 _task_state_lock = threading.RLock()
 _task_condition = threading.Condition(_task_state_lock)
@@ -45,7 +48,17 @@ _task_state = {
     "paused_at": "",
     "stop_requested": False,
     "stop_reason": "",
+    "mode": "boost",
 }
+_settings = {
+    "boost_interval_ms": 1000,
+    "normal_interval_ms": 10000,
+    "scan_interval_ms": 60000,
+    "switch_enabled": False,
+    "switch_confirmed": False,
+    "switch_threshold": 2,
+}
+_business_failure_counts: dict[str, int] = {}
 logger = logging.getLogger(__name__)
 
 
@@ -58,6 +71,11 @@ class EnrollmentCourse:
     name: str
     campus_code: str = DEFAULT_CAMPUS_CODE
     campus_name: str = ""
+    course_number: str = ""
+    teaching_place: str = ""
+    time_signature: str = ""
+    priority_group: str = ""
+    priority_rank: int = 0
 
 
 class GrabOutcome(StrEnum):
@@ -140,6 +158,10 @@ TERMINAL_ERROR_KEYWORDS = (
 )
 # 连续未知或网络异常达到阈值时触发保护性暂停，不会把课程写成 FAILED。
 MAX_NETWORK_STREAK = 8
+NETWORK_BACKOFF_BASE_MS = 500
+NETWORK_BACKOFF_CAP_MS = 30_000
+UNKNOWN_BACKOFF_STEP_MS = 200
+UNKNOWN_BACKOFF_CAP_MS = 2_000
 # 事件队列上限（仅保留最近的事件）
 MAX_EVENTS = 200
 
@@ -154,6 +176,9 @@ _progress = {
     "finished_at": None,
     "courses": {},  # id -> {"id","name","type","status","attempts","message"}
     "events": [],  # [{"ts","level","message"}]
+    "mode": "boost",
+    "settings": dict(_settings),
+    "retryable_ids": set(),
 }
 
 
@@ -172,11 +197,15 @@ def _reset_progress(courses) -> None:
                 "campus_name": getattr(course, "campus_name", ""),
                 "status": database.STATUS_IN_PROGRESS,
                 "attempts": 0,
+                "failures": 0,
                 "message": "等待抢课",
             }
             for course in courses
         }
         _progress["events"] = []
+        _progress["mode"] = _task_state["mode"]
+        _progress["settings"] = dict(_settings)
+        _progress["retryable_ids"] = set()
 
 
 def _set_progress_finished() -> None:
@@ -228,6 +257,8 @@ def get_enroll_progress() -> dict:
             "finished_at": _progress["finished_at"],
             "courses": courses,
             "events": events,
+            "mode": str(_task_state["mode"]),
+            "settings": dict(_settings),
         }
     total = len(courses)
     success = sum(1 for c in courses if c["status"] == database.STATUS_SUCCESS)
@@ -247,6 +278,7 @@ def get_enroll_progress() -> dict:
 # ====================================================================
 def reserve_enroll_task() -> bool:
     """Atomically reserve the single enrollment worker slot."""
+    global _business_failure_counts
     with _task_condition:
         if _task_state["running"]:
             return False
@@ -260,8 +292,10 @@ def reserve_enroll_task() -> bool:
                 "paused_at": "",
                 "stop_requested": False,
                 "stop_reason": "",
+                "mode": "boost",
             }
         )
+        _business_failure_counts = {}
         return True
 
 
@@ -300,6 +334,8 @@ def get_enroll_task_state() -> dict[str, str | bool]:
             "paused_at": str(_task_state["paused_at"]),
             "stopping": bool(_task_state["stop_requested"]),
             "stopping_reason": str(_task_state["stop_reason"]),
+            "mode": str(_task_state["mode"]),
+            "settings": dict(_settings),
         }
 
 
@@ -359,6 +395,67 @@ def resume_enroll_task() -> tuple[bool, str]:
     return True, "抢课任务已继续"
 
 
+def set_enroll_mode(mode: str) -> bool:
+    """Change the mode used at the next request boundary."""
+    normalized = str(mode or "").strip().lower()
+    if normalized not in {"boost", "normal", "scan"}:
+        return False
+    with _task_condition:
+        _task_state["mode"] = normalized
+        _task_condition.notify_all()
+    with _progress_lock:
+        _progress["mode"] = normalized
+    return True
+
+
+def get_enroll_settings() -> dict:
+    with _task_state_lock:
+        return {**_settings, "mode": _task_state["mode"]}
+
+
+def update_enroll_settings(**values) -> dict:
+    with _task_state_lock:
+        for key in ("boost_interval_ms", "normal_interval_ms", "scan_interval_ms"):
+            if key in values:
+                _settings[key] = max(0, min(300000, int(values[key])))
+        if "switch_enabled" in values:
+            _settings["switch_enabled"] = bool(values["switch_enabled"])
+        if "switch_confirmed" in values:
+            _settings["switch_confirmed"] = bool(values["switch_confirmed"])
+        if "switch_threshold" in values:
+            _settings["switch_threshold"] = max(0, min(1000, int(values["switch_threshold"])))
+        return get_enroll_settings()
+
+
+def _mode_interval_seconds(mode: str) -> float:
+    """Return a mode interval while honoring the legacy zero-delay override."""
+    if int(getattr(config, "delay", 1) or 0) == 0:
+        return 0.0
+    return max(0, int(_settings[f"{mode}_interval_ms"])) / 1000.0
+
+
+def can_switch_course(*, switch_enabled: bool, risk_confirmed: bool, available_slots: int, threshold: int) -> bool:
+    """Return whether explicit user consent and the capacity threshold permit switching."""
+    return bool(switch_enabled and risk_confirmed and available_slots >= max(0, int(threshold)))
+
+
+def withdraw_course(course_id: str, *, available_slots: int, risk_confirmed: bool = False):
+    """Withdraw a selected course only after every automatic-switch safety gate passes."""
+    if not can_switch_course(
+        switch_enabled=_settings["switch_enabled"],
+        risk_confirmed=risk_confirmed,
+        available_slots=available_slots,
+        threshold=_settings["switch_threshold"],
+    ):
+        return False, "自动换课安全条件未满足"
+    response = choose_course.delete_course_selection(str(course_id))
+    text = getattr(response, "text", "") or ""
+    code = _response_code(response)
+    if not (code == "1" or any(word in text for word in ("删除成功", "退选成功", "撤销成功"))):
+        return False, "退选请求未获学校确认"
+    return True, "退选成功"
+
+
 def _wait_until_resumed() -> bool:
     """Block at a request boundary and acknowledge that cart edits are safe."""
     with _task_condition:
@@ -393,6 +490,29 @@ def _wait_between_requests(seconds: float) -> bool:
     return True
 
 
+def is_stop_requested() -> bool:
+    """Return whether the worker should stop at the next request boundary."""
+    with _task_state_lock:
+        return bool(_task_state["stop_requested"])
+
+
+def stop_enroll_task() -> bool:
+    """Request a graceful stop while preserving courses that were not completed."""
+    with _task_condition:
+        if not _task_state["running"]:
+            return False
+        _task_state.update(
+            {
+                "stop_requested": True,
+                "stop_reason": "用户请求停止抢课任务",
+                "paused": False,
+            }
+        )
+        _task_condition.notify_all()
+    _add_event("info", "收到停止请求，抢课任务将在当前请求边界结束")
+    return True
+
+
 def _release_enroll_task() -> None:
     with _task_condition:
         _task_state.update(
@@ -405,6 +525,7 @@ def _release_enroll_task() -> None:
                 "paused_at": "",
                 "stop_requested": False,
                 "stop_reason": "",
+                "mode": "boost",
             }
         )
         _task_condition.notify_all()
@@ -444,6 +565,8 @@ def _classify_response(response) -> str:
     code = _response_code(response)
     status_code = getattr(response, "status_code", None)
 
+    if isinstance(status_code, int) and 500 <= status_code <= 599:
+        return "transient"
     if is_session_expired_response(
         status_code=status_code,
         code=code,
@@ -468,9 +591,123 @@ def _active_course_ids() -> set:
     stored = {item["id"]: item for item in cart_service.get_courses_by_status("")}
     active = set()
     for course_id, row in stored.items():
-        if row.get("status") not in (database.STATUS_SUCCESS, database.STATUS_FAILED):
+        if (
+            row.get("status") not in (database.STATUS_SUCCESS, database.STATUS_FAILED)
+            and row.get("auto_enabled", 1)
+        ):
             active.add(course_id)
     return active
+
+
+def _course_group(course) -> str:
+    explicit_group = str(getattr(course, "priority_group", "") or "").strip()
+    if explicit_group:
+        return explicit_group
+    number = str(getattr(course, "course_number", "") or "").strip()
+    schedule = str(
+        getattr(course, "time_signature", "")
+        or time_signature(getattr(course, "teaching_place", ""))
+        or ""
+    ).strip()
+    if number and schedule:
+        return f"{number}|{schedule}"
+    return number or schedule or str(course.id)
+
+
+def _row_course_group(row: dict) -> str:
+    explicit_group = str(row.get("priority_group") or "").strip()
+    if explicit_group:
+        return explicit_group
+    number = str(row.get("course_number") or "").strip()
+    schedule = str(row.get("time_signature") or time_signature(row.get("teaching_place", ""))).strip()
+    if number and schedule:
+        return f"{number}|{schedule}"
+    return number or schedule or str(row.get("id", ""))
+
+
+def _numeric(value):
+    try:
+        return int(str(value).replace(",", "").strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def _scan_course_available(course) -> int:
+    """Probe catalog pages without submitting a selection request."""
+    try:
+        page = 0
+        while page < 100:
+            success, result, _ = query_courses(course.type, page)
+            if not success:
+                return 0
+            listed_courses = getattr(result, "courses", None)
+            if listed_courses is None:
+                listed_courses = getattr(result, "data_list", None)
+            if listed_courses is None and isinstance(result, dict):
+                listed_courses = result.get("courses") or result.get("dataList") or []
+            for listed in listed_courses:
+                teaching_classes = getattr(listed, "teaching_classes", None)
+                if teaching_classes is None and isinstance(listed, dict):
+                    teaching_classes = listed.get("teaching_classes") or listed.get("tcList") or []
+                for teaching_class in teaching_classes or []:
+                    class_id = getattr(teaching_class, "teaching_class_id", None)
+                    if class_id is None and isinstance(teaching_class, dict):
+                        class_id = teaching_class.get("teaching_class_id") or teaching_class.get("teachingClassID")
+                    if str(class_id or "") != str(course.id):
+                        continue
+                    selected_value = getattr(teaching_class, "number_of_selected", None)
+                    capacity_value = getattr(teaching_class, "class_capacity", None)
+                    if isinstance(teaching_class, dict):
+                        selected_value = teaching_class.get("number_of_selected") or teaching_class.get("numberOfSelected")
+                        capacity_value = teaching_class.get("class_capacity") or teaching_class.get("classCapacity")
+                    selected = _numeric(selected_value)
+                    capacity = _numeric(capacity_value)
+                    if capacity is not None and selected is not None and selected < capacity:
+                        return capacity - selected
+            total_count_value = getattr(result, "total_count", None)
+            if total_count_value is None and isinstance(result, dict):
+                total_count_value = result.get("total_count") or result.get("totalCount")
+            total_count = _numeric(total_count_value) or 0
+            if not listed_courses or page + 1 >= max(1, math.ceil(total_count / 10)):
+                break
+            page += 1
+    except Exception as exc:
+        logger.info("Scan query failed for %s: %s", course.name, exc)
+    return 0
+
+
+def _has_selected_lower_priority(course) -> bool:
+    group = _course_group(course)
+    rank = getattr(course, "priority_rank", 0)
+    return any(
+        _row_course_group(row) == group
+        and int(row.get("priority_rank", 0) or 0) > rank
+        and row.get("status") == database.STATUS_SUCCESS
+        for row in cart_service.get_courses_by_status("")
+    )
+
+
+def _try_priority_switch(course, available_slots: int) -> bool:
+    """Withdraw a lower-priority sibling only after all safety gates pass."""
+    group = _course_group(course)
+    for row in cart_service.get_courses_by_status(database.STATUS_SUCCESS):
+        sibling_group = _row_course_group(row)
+        if sibling_group != group or int(row.get("priority_rank", 0) or 0) <= getattr(course, "priority_rank", 0):
+            continue
+        if not _settings["switch_enabled"] or not _settings["switch_confirmed"]:
+            return False
+        try:
+            ok, message = withdraw_course(row["id"], available_slots=available_slots, risk_confirmed=True)
+        except (requests.RequestException, choose_course.SchoolSessionExpiredError) as exc:
+            _add_event("warn", f"未执行优先级换课：退选请求异常（{type(exc).__name__}）")
+            return False
+        if not ok:
+            _add_event("warn", f"未执行优先级换课：{message}")
+            return False
+        cart_service.update_status(row["id"], database.STATUS_FAILED)
+        _add_event("warn", f"已退选低优先级课程 {row.get('name', row['id'])}，准备抢更高优先级课程")
+        return True
+    return False
 
 
 def remove_cart_course(course_id: str) -> dict[str, bool | str]:
@@ -571,56 +808,57 @@ def remove_cart_course(course_id: str) -> dict[str, bool | str]:
 
 
 def grab_courses(courses: list) -> GrabOutcome:
-    """
-    执行多门课程的轮询抢课循环。
-
-    对活动集中每门课程各发一次请求，根据学校返回结果分类：
-        - 成功        → 标记 SUCCESS，发"已加入我的课程"事件，移出活动集
-        - 容量已满    → 保持 ENROLLING，继续下一轮（一直抢）
-        - 终态失败    → 标记 FAILED，移出活动集
-        - 未到开放时间 → 立即自动暂停，等待用户继续
-        - 会话过期    → 交由上层触发 OCR 自动重登录
-        - 未知返回    → 计入连续未知计数，超阈值保护性暂停
-
-    参数：
-        courses: 具有 id/type/name 属性的课程对象列表
-
-    返回：
-        GrabOutcome，明确区分完成、继续、重登录和暂停。
-    """
+    """Run bounded enrollment rounds using the current mode and priorities."""
     active_ids = _active_course_ids()
     active = [course for course in courses if course.id in active_ids]
-    unknown_streak_limit = max(
-        1,
-        int(config.unknown_response_pause_threshold),
-    )
+    active.sort(key=lambda course: (_course_group(course), getattr(course, "priority_rank", 0), course.id))
+    unknown_streak_limit = max(1, int(config.unknown_response_pause_threshold))
     unknown_streak = {course.id: 0 for course in active}
     network_streak = {course.id: 0 for course in active}
+    business_failures = {
+        course.id: _business_failure_counts.get(course.id, 0)
+        for course in active
+    }
 
     if not active:
         return GrabOutcome.COMPLETED
 
-    max_rounds = max(1, int(config.count))
-    for _ in range(max_rounds):
+    for _ in range(max(1, int(config.count))):
+        if is_stop_requested():
+            return GrabOutcome.COMPLETED
         if not active:
             break
-
         for course in list(active):
+            if is_stop_requested():
+                return GrabOutcome.COMPLETED
             if get_enroll_task_state()["paused"]:
                 return GrabOutcome.PAUSED
+
+            mode = get_enroll_task_state()["mode"]
+            if mode == "scan":
+                _update_course_progress(course.id, message="扫描课程目录，等待课程放课")
+                available_slots = _scan_course_available(course)
+                if available_slots <= 0:
+                    if not _wait_between_requests(_mode_interval_seconds("scan")):
+                        return GrabOutcome.PAUSED
+                    continue
+                if _has_selected_lower_priority(course) and not _try_priority_switch(course, available_slots):
+                    _update_course_progress(
+                        course.id,
+                        message="检测到高优先级课程有容量，但换课安全条件未满足，暂不退选",
+                    )
+                    if not _wait_between_requests(_mode_interval_seconds("scan")):
+                        return GrabOutcome.PAUSED
+                    continue
+                set_enroll_mode("boost")
+                _add_event("info", f"检测到 {course.name} 有可选容量，切换爆发模式")
+
             try:
-                # 发送选课请求（核心接口，不修改）
-                _update_course_progress(course.id, increment_attempts=True)
+                _update_course_progress(course.id, increment_attempts=True, mode=get_enroll_task_state()["mode"])
                 course_campus = str(getattr(course, "campus_code", "") or "").strip()
                 if course_campus:
-                    response = choose_course.submit_course_selection(
-                        course.id,
-                        course.type,
-                        course_campus,
-                    )
+                    response = choose_course.submit_course_selection(course.id, course.type, course_campus)
                 else:
-                    # Compatibility for legacy command-line callers. The request
-                    # function itself defaults these old courses to campus 01.
                     response = choose_course.submit_course_selection(course.id, course.type)
                 network_streak[course.id] = 0
                 action = _classify_response(response)
@@ -634,28 +872,57 @@ def grab_courses(courses: list) -> GrabOutcome:
                     )
                     _add_event("success", f"{course.name} 已加入我的课程")
                     active.remove(course)
-
+                    group = _course_group(course)
+                    for sibling in list(active):
+                        if _course_group(sibling) == group:
+                            cart_service.update_status(sibling.id, database.STATUS_FAILED)
+                            _update_course_progress(
+                                sibling.id,
+                                status=database.STATUS_FAILED,
+                                message="同优选组已有课程抢到，停止尝试",
+                            )
+                            active.remove(sibling)
                 elif action == "retry":
                     reason = _response_message(response)
-                    retry_message = (
-                        "课容量已满，继续尝试"
-                        if any(keyword in reason for keyword in CAPACITY_FULL_KEYWORDS)
-                        else f"学校暂时未受理，继续尝试：{reason[:80] or '请稍后再试'}"
+                    business_failures[course.id] += 1
+                    _business_failure_counts[course.id] = business_failures[course.id]
+                    _update_course_progress(
+                        course.id,
+                        failures=business_failures[course.id],
+                        mode=get_enroll_task_state()["mode"],
+                        message=(
+                            "课容量已满，继续尝试"
+                            if any(keyword in reason for keyword in CAPACITY_FULL_KEYWORDS)
+                            else f"学校暂时未受理，继续尝试：{reason[:80] or '请稍后再试'}"
+                        ),
                     )
-                    _update_course_progress(course.id, message=retry_message)
-                    unknown_streak[course.id] = 0
-
+                    current_mode = get_enroll_task_state()["mode"]
+                    if (
+                        get_enroll_task_state()["running"]
+                        and current_mode == "boost"
+                        and business_failures[course.id] >= 5
+                    ):
+                        set_enroll_mode("normal")
+                        _add_event("warn", f"{course.name} boost 业务失败达到 5 次，降为一般模式")
+                    elif (
+                        get_enroll_task_state()["running"]
+                        and current_mode == "normal"
+                        and business_failures[course.id] >= 10
+                    ):
+                        set_enroll_mode("scan")
+                        _add_event("warn", f"{course.name} 一般模式业务失败达到 10 次，降为扫描模式")
+                    if not _wait_between_requests(_mode_interval_seconds(get_enroll_task_state()["mode"])):
+                        return GrabOutcome.PAUSED
+                    continue
                 elif action == "expired":
                     _add_event("warn", "检测到登录已过期，准备自动重新登录")
                     return GrabOutcome.SESSION_EXPIRED
-
                 elif action == "window_closed":
                     reason = _response_message(response)[:160] or "学校当前未开放选课"
                     message = f"学校提示“{reason}”，任务已自动暂停；开放后可点击继续"
                     _update_course_progress(course.id, message=message)
                     pause_enroll_task(message, source="school_window")
                     return GrabOutcome.PAUSED
-
                 elif action == "terminal":
                     cart_service.update_status(course.id, database.STATUS_FAILED)
                     reason = _response_message(response)[:160]
@@ -666,61 +933,60 @@ def grab_courses(courses: list) -> GrabOutcome:
                     )
                     _add_event("error", f"{course.name} 无法抢到：{reason or '学校返回终态错误'}")
                     active.remove(course)
-
-                else:  # unknown
+                elif action == "transient":
+                    with _progress_lock:
+                        _progress["retryable_ids"].add(course.id)
+                    _update_course_progress(course.id, message="学校系统暂时过载，稍后重试")
+                    if not _wait_between_requests(
+                        max(
+                            _settings[f"{get_enroll_task_state()['mode']}_interval_ms"],
+                            NETWORK_BACKOFF_BASE_MS,
+                        )
+                        / 1000.0
+                    ):
+                        return GrabOutcome.PAUSED
+                    continue
+                else:
                     unknown_streak[course.id] += 1
                     snippet = _response_message(response)[:160]
-                    _update_course_progress(
-                        course.id,
-                        message=(
-                            "学校返回暂时无法识别，准备保护性暂停"
-                            if unknown_streak[course.id] >= unknown_streak_limit
-                            else (
-                                "学校返回暂时无法识别，继续观察"
-                                f"（{unknown_streak[course.id]}/{unknown_streak_limit}）"
-                            )
-                        ),
-                    )
                     if unknown_streak[course.id] >= unknown_streak_limit:
-                        reason = (
-                            f"{course.name} 连续 {unknown_streak_limit} 次收到无法识别的学校返回，"
-                            f"任务已保护性暂停：{snippet or '响应内容为空'}"
-                        )
+                        reason = f"{course.name} 连续 {unknown_streak_limit} 次收到无法识别的学校返回，任务已保护性暂停：{snippet or '响应内容为空'}"
                         _update_course_progress(course.id, message=reason)
                         pause_enroll_task(reason, source="unknown_response")
                         return GrabOutcome.PAUSED
-                    else:
-                        logger.warning(
-                            "Unknown school response for %s: %s",
-                            course.name,
-                            snippet,
-                        )
-
-                if active and not _wait_between_requests(config.delay / 1000.0):
-                    return GrabOutcome.PAUSED
-
+                    backoff_ms = min(UNKNOWN_BACKOFF_STEP_MS * unknown_streak[course.id], UNKNOWN_BACKOFF_CAP_MS)
+                    _update_course_progress(
+                        course.id,
+                        message=f"学校返回暂时无法识别，继续观察（{unknown_streak[course.id]}/{unknown_streak_limit}）",
+                    )
+                    if not _wait_between_requests(
+                        _mode_interval_seconds(get_enroll_task_state()["mode"])
+                        + backoff_ms / 1000.0
+                    ):
+                        return GrabOutcome.PAUSED
+                    continue
             except choose_course.SchoolSessionExpiredError:
                 _add_event("warn", "检测到登录已过期，准备自动重新登录")
                 return GrabOutcome.SESSION_EXPIRED
             except KeyboardInterrupt:
                 logger.info("Enrollment worker interrupted")
                 return GrabOutcome.COMPLETED
-            except requests.RequestException as exc:
-                # 网络抖动等瞬时异常：保持课程活动；连续失败时暂停，避免无休止请求。
+            except (requests.RequestException, ConnectionError) as exc:
+                with _progress_lock:
+                    _progress["retryable_ids"].add(course.id)
                 unknown_streak[course.id] = 0
                 network_streak[course.id] += 1
-                logger.warning("Course request failed for %s: %s", course.name, exc)
-                message = (
-                    f"学校请求异常（{network_streak[course.id]}/{MAX_NETWORK_STREAK}）："
-                    f"{str(exc)[:100] or type(exc).__name__}"
-                )
+                message = f"学校请求异常（{network_streak[course.id]}/{MAX_NETWORK_STREAK}）：{str(exc)[:100] or type(exc).__name__}"
                 _update_course_progress(course.id, message=message)
                 if network_streak[course.id] >= MAX_NETWORK_STREAK:
                     reason = f"{course.name} 连续请求学校失败，任务已保护性暂停"
                     _update_course_progress(course.id, message=reason)
                     pause_enroll_task(reason, source="network_error")
                     return GrabOutcome.PAUSED
-                if not _wait_between_requests(max(config.delay, 350) / 1000.0):
+                backoff_ms = min(NETWORK_BACKOFF_BASE_MS * (2 ** (network_streak[course.id] - 1)), NETWORK_BACKOFF_CAP_MS)
+                if not _wait_between_requests(
+                    max(_mode_interval_seconds(get_enroll_task_state()["mode"]), backoff_ms / 1000.0)
+                ):
                     return GrabOutcome.PAUSED
                 continue
             except Exception as exc:
@@ -728,6 +994,11 @@ def grab_courses(courses: list) -> GrabOutcome:
                 reason = f"{course.name} 抢课任务发生内部异常，已保护性暂停：{type(exc).__name__}"
                 _update_course_progress(course.id, message=reason)
                 pause_enroll_task(reason, source="internal_error")
+                return GrabOutcome.PAUSED
+
+            if active and not _wait_between_requests(
+                _mode_interval_seconds(get_enroll_task_state()["mode"])
+            ):
                 return GrabOutcome.PAUSED
 
     return GrabOutcome.COMPLETED if not active else GrabOutcome.CONTINUE
@@ -780,7 +1051,11 @@ def run_enroll_task(reserved: bool = False):
 
 def _run_enroll_task():
     """Internal worker body; callers must hold the task reservation."""
-    courses_data = cart_service.get_courses_by_status(database.STATUS_NOT_STARTED)
+    courses_data = [
+        item
+        for item in cart_service.get_courses_by_status(database.STATUS_NOT_STARTED)
+        if item.get("auto_enabled", 1)
+    ]
 
     courses = [
         EnrollmentCourse(
@@ -792,9 +1067,17 @@ def _run_enroll_task():
                 item.get("campus_name")
                 or campus_name(item.get("campus_code") or DEFAULT_CAMPUS_CODE)
             ),
+            course_number=str(item.get("course_number") or ""),
+            teaching_place=str(item.get("teaching_place") or ""),
+            time_signature=str(
+                item.get("time_signature") or time_signature(item.get("teaching_place", ""))
+            ),
+            priority_group=str(item.get("priority_group") or ""),
+            priority_rank=int(item.get("priority_rank", 0) or 0),
         )
         for item in courses_data
     ]
+    courses.sort(key=lambda item: (_course_group(item), item.priority_rank, item.id))
 
     if not courses:
         logger.info("No pending cart courses")

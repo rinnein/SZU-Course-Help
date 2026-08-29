@@ -2,15 +2,21 @@
 
 const REQUEST_TIMEOUT_MS = 30000;
 const SESSION_RECOVERY_TIMEOUT_MS = 180000;
+const SESSION_CREDENTIALS_STORAGE_KEY = "szu.loginSessionCredentials.v1";
 const FILTER_PAGE_SIZE = 10;
 const MAX_CATALOG_PAGES = 1000;
-const CATALOG_PAGE_MAX_DELAY_MS = 10000;
-const catalogTiming = globalThis.__CATALOG_TIMING__ || {};
-const CATALOG_TEST_BACKOFF_MS = Number(catalogTiming.throttleBackoffMs) || 0;
-const CATALOG_TEST_BACKOFF_MAX_MS = Number(catalogTiming.throttleBackoffMaxMs) || 0;
+const CATALOG_PAGE_DELAY_MS = 150;
 const SEARCH_DEBOUNCE_MS = 250;
-const TIMETABLE_MIN_ROW_HEIGHT = 64;
+const SESSION_POLL_INTERVAL_MS = 5000;
+const CACHE_REFRESH_INTERVAL_MS = 30000;
 const FILTER_PREFERENCES_KEY = "szu-course-help.course-filters.v1";
+const OFFLINE_CACHE_TYPES = new Set(["TJKC", "FANKC"]);
+
+const enrollModeNames = {
+  boost: "爆发模式",
+  normal: "一般模式",
+  scan: "扫描模式",
+};
 
 const categoryNames = {
   TJKC: "本班推荐",
@@ -42,15 +48,12 @@ const appState = {
   catalogLoadingType: "",
   catalogRequestController: null,
   catalogRequestId: 0,
-  catalogPageDelayMs: 600,
-  catalogThrottleMaxRetries: 3,
-  catalogThrottleBackoffMs: 2000,
   filters: {
     hideConflict: false,
     hideFull: false,
   },
-  cacheMode: false,
   cart: [],
+  cartPreferences: {},
   session: null,
   loadingCourses: false,
   courseRequestController: null,
@@ -59,6 +62,7 @@ const appState = {
   courseCacheMeta: null,
   catalogBlockedCode: "",
   loadingSession: false,
+  sessionTimer: null,
   refreshingPhase: false,
   preselection: false,
   closedPhase: false,
@@ -66,9 +70,22 @@ const appState = {
   myCourses: [],
   myCoursesLoaded: false,
   loadingMyCourses: false,
-  timetable: null,
-  timetableFitFrame: null,
-  timetableResizeTimer: null,
+  cacheMode: false,
+  cacheRefreshTimer: null,
+  enroll: {
+    running: false,
+    paused: false,
+    mode: "boost",
+    boostIntervalMs: 1000,
+    normalIntervalMs: 10000,
+    scanIntervalMs: 60000,
+    swapEnabled: false,
+    swapConfirmed: false,
+    swapThreshold: 5,
+  },
+  myCoursesView: "grid",
+  showCartOnSchedule: true,
+  scheduleConflict: null,
   switchingCampus: false,
   progress: null,
   progressTimer: null,
@@ -79,6 +96,7 @@ const appState = {
   recoveryHideTimer: null,
   recoveryDismissedAt: "",
   lastReloginStatus: "idle",
+  reloginRequestPending: false,
 };
 
 const appElements = {
@@ -122,19 +140,20 @@ const appElements = {
   sessionLoginLink: document.querySelector("#sessionDialog a[href^='/login']"),
   brandLink: document.querySelector(".topbar .brand-lockup"),
   logout: document.querySelector("#logoutButton"),
-  openSchoolOfficial: document.querySelector("#openSchoolOfficial"),
+  openSchoolRaw: document.querySelector("#openSchoolRaw"),
   toastRegion: document.querySelector("#toastRegion"),
   openMyCourses: document.querySelector("#openMyCourses"),
   myCoursesDialog: document.querySelector("#myCoursesDialog"),
   myCoursesList: document.querySelector("#myCoursesList"),
   myCoursesHint: document.querySelector("#myCoursesHint"),
+  selectedCreditTotal: document.querySelector("#selectedCreditTotal"),
+  pendingCreditTotal: document.querySelector("#pendingCreditTotal"),
+  combinedCreditTotal: document.querySelector("#combinedCreditTotal"),
   refreshMyCourses: document.querySelector("#refreshMyCourses"),
-  openTimetable: document.querySelector("#openTimetable"),
-  timetableDialog: document.querySelector("#timetableDialog"),
-  timetableContent: document.querySelector("#timetableContent"),
-  timetableSummary: document.querySelector("#timetableSummary"),
-  timetableHint: document.querySelector("#timetableHint"),
-  refreshTimetable: document.querySelector("#refreshTimetable"),
+  myCoursesScheduleWrap: document.querySelector("#myCoursesScheduleWrap"),
+  scheduleViewGrid: document.querySelector("#scheduleViewGrid"),
+  scheduleViewList: document.querySelector("#scheduleViewList"),
+  showPendingSwitch: document.querySelector("#showPendingSwitch"),
   enrollProgress: document.querySelector("#enrollProgress"),
   progressCounts: document.querySelector("#progressCounts"),
   progressBarFill: document.querySelector("#progressBarFill"),
@@ -142,6 +161,19 @@ const appElements = {
   progressState: document.querySelector("#progressState"),
   progressNotice: document.querySelector("#progressNotice"),
   taskControlButton: document.querySelector("#taskControlButton"),
+  enrollModeLabel: document.querySelector("#enrollModeLabel"),
+  enrollRuntimeStatus: document.querySelector("#enrollRuntimeStatus"),
+  enrollControlHint: document.querySelector("#enrollControlHint"),
+  pauseEnroll: document.querySelector("#pauseEnroll"),
+  resumeEnroll: document.querySelector("#resumeEnroll"),
+  stopEnroll: document.querySelector("#stopEnroll"),
+  modeButtons: document.querySelectorAll("[data-enroll-mode]"),
+  boostInterval: document.querySelector("#boostInterval"),
+  normalInterval: document.querySelector("#normalInterval"),
+  scanInterval: document.querySelector("#scanInterval"),
+  swapCourseSwitch: document.querySelector("#swapCourseSwitch"),
+  swapRiskConfirm: document.querySelector("#swapRiskConfirm"),
+  swapThreshold: document.querySelector("#swapThreshold"),
 };
 
 class ApiError extends Error {
@@ -163,13 +195,93 @@ class SessionExpiredError extends ApiError {
   }
 }
 
-function versionedPage(path) {
-  const queryToken = new URLSearchParams(window.location.search).get("ui") || "";
-  const token = queryToken || appState.session?.ui_cache_token || "";
-  if (!token) return path;
+function cleanPagePath(path) {
   const url = new URL(path, window.location.origin);
-  url.searchParams.set("ui", token);
-  return `${url.pathname}${url.search}`;
+  url.searchParams.delete("ui");
+  return `${url.pathname}${url.search}${url.hash}`;
+}
+
+function stripUiQuery() {
+  if (!window.history?.replaceState || !window.location?.href) return;
+  const url = new URL(window.location.href);
+  if (!url.searchParams.has("ui")) return;
+  url.searchParams.delete("ui");
+  const search = url.searchParams.toString();
+  window.history.replaceState(
+    null,
+    "",
+    `${url.pathname}${search ? `?${search}` : ""}${url.hash}`,
+  );
+}
+
+function courseRequestUrl(courseType, page, pageSize = 10, { cacheMode = appState.cacheMode } = {}) {
+  const params = new URLSearchParams({
+    type: String(courseType || ""),
+    page: String(page),
+    page_size: String(pageSize),
+  });
+  if (cacheMode) params.set("cache_mode", "true");
+  return `/api/school/courses?${params.toString()}`;
+}
+
+function cacheTimestampLabel(timestamp) {
+  const value = Number(timestamp);
+  if (!Number.isFinite(value) || value <= 0) return "时间未知";
+  return new Date(value * 1000).toLocaleString("zh-CN", { hour12: false });
+}
+
+function courseSummary(totalCount, courseCount, metadata = {}) {
+  const base = `共 ${totalCount} 门课程，本页 ${courseCount} 门`;
+  if (!metadata.cached) return base;
+  return `缓存课程：${base}（最近更新 ${cacheTimestampLabel(metadata.cached_at)}）`;
+}
+
+function clearCacheRefreshTimer() {
+  if (appState.cacheRefreshTimer) {
+    window.clearInterval(appState.cacheRefreshTimer);
+    appState.cacheRefreshTimer = null;
+  }
+}
+
+function isOfflineCacheType(type = appState.type) {
+  return OFFLINE_CACHE_TYPES.has(String(type || "").toUpperCase());
+}
+
+function setCacheMode(enabled, { load = true } = {}) {
+  const wasEnabled = appState.cacheMode;
+  appState.cacheMode = Boolean(enabled);
+  if (appElements.cacheModeSwitch) appElements.cacheModeSwitch.checked = appState.cacheMode;
+  if (!appState.session?.logged_in) {
+    clearCacheRefreshTimer();
+    if (appState.cacheMode && load && isOfflineCacheType() && !wasEnabled) {
+      loadCourses({ cacheOnly: true });
+    }
+    return;
+  }
+  if (!appState.cacheMode) {
+    clearCacheRefreshTimer();
+    if (wasEnabled && appState.session?.logged_in) {
+      if (isFilterActive()) {
+        runSearchFetch({ force: true, preserveExisting: true, forceLive: true });
+      } else {
+        loadCourses({ preserveExisting: true, forceLive: true });
+      }
+    }
+    return;
+  }
+  if (!appState.cacheRefreshTimer) {
+    appState.cacheRefreshTimer = window.setInterval(
+      refreshCoursesFromNetwork,
+      CACHE_REFRESH_INTERVAL_MS,
+    );
+  }
+  if (!wasEnabled && appState.session?.logged_in) {
+    if (isFilterActive()) {
+      runSearchFetch({ force: true, preserveExisting: true });
+    } else {
+      loadCourses({ preserveExisting: true });
+    }
+  }
 }
 
 function isAbortError(error) {
@@ -194,33 +306,230 @@ function element(tag, className = "", text = "") {
 }
 
 function numericValue(value, fallback = 0) {
-  const text = String(value ?? "").replace(/,/g, "").trim();
-  if (!text) return fallback;
-  const number = Number(text);
+  const number = Number(String(value ?? "").replace(/,/g, "").trim());
   return Number.isFinite(number) ? number : fallback;
 }
 
-function flagEnabled(value) {
-  const normalized = String(value ?? "").trim().toLowerCase();
-  return value === true || normalized === "1" || normalized === "true" || normalized === "yes";
+function intervalSecondsToMilliseconds(value, fallbackMilliseconds) {
+  const seconds = numericValue(value, numericValue(fallbackMilliseconds, 0) / 1000);
+  return Math.max(0, Math.round(seconds * 1000));
+}
+
+function intervalMillisecondsToSeconds(value, fallbackMilliseconds) {
+  const milliseconds = numericValue(value, fallbackMilliseconds);
+  return Math.max(0, Math.round(milliseconds / 1000));
+}
+
+function settingPayload() {
+  return {
+    boost_interval_ms: intervalSecondsToMilliseconds(appElements.boostInterval?.value, appState.enroll.boostIntervalMs),
+    normal_interval_ms: intervalSecondsToMilliseconds(appElements.normalInterval?.value, appState.enroll.normalIntervalMs),
+    scan_interval_ms: intervalSecondsToMilliseconds(appElements.scanInterval?.value, appState.enroll.scanIntervalMs),
+    switch_enabled: Boolean(appElements.swapCourseSwitch?.checked),
+    switch_confirmed: Boolean(appElements.swapRiskConfirm?.checked),
+    switch_threshold: numericValue(appElements.swapThreshold?.value, appState.enroll.swapThreshold),
+  };
+}
+
+function applyEnrollSettings(data = {}) {
+  const source = data.settings || data;
+  const mode = source.mode || data.mode || data.current_mode;
+  if (["boost", "normal", "scan"].includes(mode)) appState.enroll.mode = mode;
+  appState.enroll.running = Boolean(data.running ?? data.task_running ?? appState.enroll.running);
+  appState.enroll.paused = Boolean(data.paused ?? data.task_paused ?? appState.enroll.paused);
+  appState.enroll.boostIntervalMs = numericValue(source.boost_interval_ms, appState.enroll.boostIntervalMs);
+  appState.enroll.normalIntervalMs = numericValue(source.normal_interval_ms, appState.enroll.normalIntervalMs);
+  appState.enroll.scanIntervalMs = numericValue(source.scan_interval_ms, appState.enroll.scanIntervalMs);
+  appState.enroll.swapEnabled = Boolean(source.switch_enabled ?? source.swap_enabled ?? appState.enroll.swapEnabled);
+  appState.enroll.swapConfirmed = Boolean(source.switch_confirmed ?? source.swap_confirmed ?? appState.enroll.swapConfirmed);
+  appState.enroll.swapThreshold = numericValue(source.switch_threshold ?? source.swap_threshold, appState.enroll.swapThreshold);
+  if (appElements.boostInterval) appElements.boostInterval.value = String(intervalMillisecondsToSeconds(appState.enroll.boostIntervalMs, 1000));
+  if (appElements.normalInterval) appElements.normalInterval.value = String(intervalMillisecondsToSeconds(appState.enroll.normalIntervalMs, 10000));
+  if (appElements.scanInterval) appElements.scanInterval.value = String(Math.max(1, intervalMillisecondsToSeconds(appState.enroll.scanIntervalMs, 60000)));
+  if (appElements.swapCourseSwitch) appElements.swapCourseSwitch.checked = appState.enroll.swapEnabled;
+  if (appElements.swapRiskConfirm) appElements.swapRiskConfirm.checked = appState.enroll.swapConfirmed;
+  if (appElements.swapThreshold) appElements.swapThreshold.value = String(appState.enroll.swapThreshold);
+  renderEnrollControls();
+}
+
+function planErrorMessage(error) {
+  if (error.status === 404) return "当前后端尚未支持这项抢课控制接口。";
+  if (error.status >= 500) return "后端暂时不可用，已有设置仍保留，请稍后重试。";
+  return error.message || "抢课设置暂时没有生效。";
+}
+
+async function planApi(path, options = {}) {
+  const data = await api(path, options);
+  if (data?.is_error || data?.success === false) {
+    throw new ApiError(data.message || "后端没有接受这项抢课设置", {
+      code: data.error_code || "PLAN_API_REJECTED",
+      payload: data,
+    });
+  }
+  return data;
+}
+
+function renderEnrollControls() {
+  const state = appState.enroll;
+  const running = Boolean(state.running || appState.session?.task_running);
+  const paused = Boolean(state.paused || appState.session?.task_paused);
+  const mode = state.mode || "boost";
+  if (appElements.enrollModeLabel) {
+    appElements.enrollModeLabel.textContent = `${enrollModeNames[mode] || mode} · ${running ? (paused ? "已暂停" : "运行中") : "未运行"}`;
+  }
+  if (appElements.enrollRuntimeStatus) {
+    appElements.enrollRuntimeStatus.textContent = running ? (paused ? "已暂停" : "抢课中") : "未运行";
+    appElements.enrollRuntimeStatus.className = `status-pill ${running ? (paused ? "status-warning" : "status-success") : "status-neutral"}`;
+  }
+  if (appElements.enrollControlHint) {
+    appElements.enrollControlHint.textContent = paused
+      ? "任务已暂停，恢复后会保留当前课程进度和失败次数。"
+      : "爆发模式业务失败 5 次降为一般模式，一般模式失败 10 次降为扫描模式；网络异常和 5xx 不计失败。";
+  }
+  if (appElements.pauseEnroll) appElements.pauseEnroll.disabled = !running || paused;
+  if (appElements.resumeEnroll) appElements.resumeEnroll.disabled = !running || !paused;
+  if (appElements.stopEnroll) appElements.stopEnroll.disabled = !running || Boolean(appState.session?.task_stopping);
+  for (const button of appElements.modeButtons || []) {
+    const active = button.dataset.enrollMode === mode;
+    button.classList.toggle("is-active", active);
+    button.setAttribute("aria-pressed", active ? "true" : "false");
+  }
+}
+
+async function updateEnrollMode(mode) {
+  if (!["boost", "normal", "scan"].includes(mode)) return;
+  const previous = appState.enroll.mode;
+  const previousSettings = {
+    boostIntervalMs: appState.enroll.boostIntervalMs,
+    normalIntervalMs: appState.enroll.normalIntervalMs,
+    scanIntervalMs: appState.enroll.scanIntervalMs,
+    swapEnabled: appState.enroll.swapEnabled,
+    swapConfirmed: appState.enroll.swapConfirmed,
+    swapThreshold: appState.enroll.swapThreshold,
+  };
+  appState.enroll.mode = mode;
+  renderEnrollControls();
+  try {
+    const data = await planApi("/api/enroll/mode", {
+      method: "POST",
+      body: JSON.stringify({ mode }),
+    });
+    // A mode response must not replace the user's interval/risk settings with
+    // missing values. The server now returns a full snapshot, while this
+    // fallback keeps older backends from clearing the current form.
+    applyEnrollSettings({
+      ...data,
+      mode,
+      boost_interval_ms: data.settings?.boost_interval_ms ?? previousSettings.boostIntervalMs,
+      normal_interval_ms: data.settings?.normal_interval_ms ?? previousSettings.normalIntervalMs,
+      scan_interval_ms: data.settings?.scan_interval_ms ?? previousSettings.scanIntervalMs,
+      switch_enabled: data.settings?.switch_enabled ?? previousSettings.swapEnabled,
+      switch_confirmed: data.settings?.switch_confirmed ?? previousSettings.swapConfirmed,
+      switch_threshold: data.settings?.switch_threshold ?? previousSettings.swapThreshold,
+    });
+    showToast(`已切换为${enrollModeNames[mode]}`, false, true);
+  } catch (error) {
+    appState.enroll.mode = previous;
+    renderEnrollControls();
+    showToast(planErrorMessage(error), true);
+  }
+}
+
+async function toggleEnrollPause(paused) {
+  try {
+    const data = await planApi(paused ? "/api/enroll/pause" : "/api/enroll/resume", { method: "POST" });
+    appState.enroll.running = true;
+    appState.enroll.paused = paused;
+    applyEnrollSettings({ ...data, running: true, paused });
+    await loadEnrollProgress();
+    showToast(paused ? "已请求暂停抢课，等待当前请求结束" : "抢课已恢复", false, true);
+  } catch (error) {
+    showToast(planErrorMessage(error), true);
+  }
+}
+
+async function saveEnrollSettings() {
+  const payload = settingPayload();
+  try {
+    const data = await planApi("/api/enroll/settings", {
+      method: "PATCH",
+      body: JSON.stringify(payload),
+    });
+    applyEnrollSettings(data);
+    showToast("抢课设置已保存", false, true);
+  } catch (error) {
+    showToast(planErrorMessage(error), true);
+  }
+}
+
+function preferenceFor(item) {
+  const saved = appState.cartPreferences[String(item.id)] || {};
+  const fallbackGroup = [item.course_number, item.time_signature]
+    .filter(Boolean)
+    .join("|") || item.course_number || "未分组课程";
+  const storedGroup = saved.priorityGroup ?? item.priority_group;
+  return {
+    autoEnabled: saved.autoEnabled ?? saved.auto_enabled ?? item.auto_enabled ?? item.autoEnabled ?? true,
+    priorityGroup: String(storedGroup || fallbackGroup),
+    priorityRank: numericValue(saved.priorityRank ?? saved.priority_rank ?? item.priority_rank ?? item.priorityRank, 0),
+  };
+}
+
+function ensureCartPreferenceRanks() {
+  const nextRanks = new Map();
+  let changed = false;
+  for (const item of appState.cart) {
+    const preference = preferenceFor(item);
+    const hasRank = appState.cartPreferences[String(item.id)]?.priorityRank != null
+      || item.priority_rank != null;
+    if (hasRank) continue;
+    const rank = nextRanks.get(preference.priorityGroup) || 0;
+    nextRanks.set(preference.priorityGroup, rank + 1);
+    appState.cartPreferences[String(item.id)] = { ...preference, priorityRank: rank };
+    changed = true;
+  }
+  if (changed) {
+    try {
+      window.localStorage?.setItem("szu-course-help.cart-preferences.v1", JSON.stringify(appState.cartPreferences));
+    } catch {}
+  }
+}
+
+function updateLocalCartPreference(item, values) {
+  const current = preferenceFor(item);
+  const normalized = {
+    ...current,
+    ...(values.auto_enabled !== undefined || values.autoEnabled !== undefined
+      ? { autoEnabled: Boolean(values.auto_enabled ?? values.autoEnabled) }
+      : {}),
+    ...(values.priority_group !== undefined || values.priorityGroup !== undefined
+      ? { priorityGroup: String(values.priority_group ?? values.priorityGroup ?? "") }
+      : {}),
+    ...(values.priority_rank !== undefined || values.priorityRank !== undefined
+      ? { priorityRank: numericValue(values.priority_rank ?? values.priorityRank, current.priorityRank) }
+      : {}),
+  };
+  appState.cartPreferences[String(item.id)] = normalized;
+  try {
+    window.localStorage?.setItem("szu-course-help.cart-preferences.v1", JSON.stringify(appState.cartPreferences));
+  } catch {}
 }
 
 function classIsFull(classInfo) {
-  if (flagEnabled(classInfo.is_full)) return true;
+  if (String(classInfo.is_full || "") === "1") return true;
   const selected = numericValue(classInfo.number_of_selected, NaN);
   const capacity = numericValue(classInfo.class_capacity, NaN);
-  return Number.isFinite(selected)
-    && Number.isFinite(capacity)
-    && capacity > 0
-    && selected >= capacity;
+  return Number.isFinite(selected) && Number.isFinite(capacity) && selected >= capacity;
 }
 
 function classIsSelected(classInfo) {
-  return flagEnabled(classInfo.is_choose);
+  return String(classInfo.is_choose || "") === "1" || classInfo.is_choose === true;
 }
 
 function classHasConflict(classInfo) {
-  return flagEnabled(classInfo.is_conflict) || flagEnabled(classInfo.conflict);
+  return String(classInfo.is_conflict || "") === "1"
+    || classInfo.is_conflict === true
+    || String(classInfo.conflict || "") === "1";
 }
 
 function readFilterPreferences() {
@@ -239,7 +548,7 @@ function saveFilterPreferences() {
   try {
     window.localStorage?.setItem(FILTER_PREFERENCES_KEY, JSON.stringify(appState.filters));
   } catch {
-    // Storage restrictions must never break course rendering.
+    // Private browsing or a full storage quota should not break filtering.
   }
 }
 
@@ -251,53 +560,6 @@ function visibleTeachingClasses(course) {
     if (appState.filters.hideFull && classIsFull(classInfo)) return false;
     return true;
   });
-}
-
-function courseRequestUrl(courseType, page, pageSize = 10, cacheMode = appState.cacheMode) {
-  const params = new URLSearchParams({
-    type: String(courseType || ""),
-    page: String(page),
-    page_size: String(pageSize),
-  });
-  if (cacheMode) params.set("cache_mode", "true");
-  return `/api/school/courses?${params.toString()}`;
-}
-
-function cacheTimestampLabel(timestamp) {
-  const value = Number(timestamp);
-  if (!Number.isFinite(value) || value <= 0) return "时间未知";
-  return new Date(value * 1000).toLocaleString("zh-CN", { hour12: false });
-}
-
-function courseSummary(totalCount, courseCount, metadata = {}) {
-  const base = `共 ${totalCount} 门课程，本页 ${courseCount} 门`;
-  if (!metadata.cached) return base;
-  const stale = metadata.cache_stale ? "，可能已过期" : "";
-  return `只读缓存：${base}（更新于 ${cacheTimestampLabel(metadata.cached_at)}${stale}）`;
-}
-
-async function setCacheMode(enabled) {
-  const nextValue = Boolean(enabled);
-  if (nextValue && !appState.session?.logged_in) {
-    appElements.cacheModeSwitch.checked = false;
-    showToast("请先登录，再查看当前学号对应的课程缓存", true);
-    return;
-  }
-  if (appState.cacheMode === nextValue) return;
-  appState.cacheMode = nextValue;
-  appElements.cacheModeSwitch.checked = nextValue;
-  appState.page = 1;
-  appState.searchPage = 1;
-  appState.courseDataKey = "";
-  appState.courseCacheMeta = null;
-  appState.courses = [];
-  appState.totalCount = 0;
-  invalidateCatalogCaches();
-  if (nextValue) {
-    showToast("已切换到只读缓存，缓存课程不能加入抢课清单");
-  }
-  if (isFilterActive()) await runSearchFetch({ force: true });
-  else await loadCourses();
 }
 
 function campusOptions(session = appState.session) {
@@ -372,7 +634,7 @@ async function switchCampus(nextCode) {
     appElements.courseSearch.value = "";
     applySessionData(session);
     showToast(session.message || `已切换到${session.campus_name || "新校区"}`, false, true);
-    if (courseCatalogBlocked() && !appState.cacheMode) renderCourseAvailabilityState();
+    if (courseCatalogBlocked()) renderCourseAvailabilityState();
     else await loadCourses();
   } catch (error) {
     appElements.campusSelect.value = previousCode;
@@ -469,8 +731,58 @@ function showToast(message, error = false, success = false) {
 
 function showSessionDialog(message) {
   appElements.sessionMessage.textContent = message;
-  appElements.sessionLoginLink.href = versionedPage("/login");
+  appElements.sessionLoginLink.href = cleanPagePath("/login");
   if (!appElements.sessionDialog.open) appElements.sessionDialog.showModal();
+}
+
+async function loadBrowserRecoveryCredentials() {
+  try {
+    const raw = window.sessionStorage?.getItem(SESSION_CREDENTIALS_STORAGE_KEY);
+    if (!raw) return null;
+    const data = JSON.parse(raw);
+    const studentId = typeof data?.student_id === "string" ? data.student_id : "";
+    const blob = typeof data?.blob === "string" ? data.blob : "";
+    const backend = ["auto", "primary", "webvpn"].includes(data?.backend)
+      ? data.backend
+      : "auto";
+    if (!studentId || !blob || !window.crypto?.subtle) return null;
+    const [ivPart, dataPart] = blob.split(".");
+    if (!ivPart || !dataPart) return null;
+    const decode = (value) => {
+      const binary = window.atob(value);
+      const bytes = new Uint8Array(binary.length);
+      for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+      return bytes;
+    };
+    const encoder = new TextEncoder();
+    const baseKey = await window.crypto.subtle.importKey(
+      "raw",
+      encoder.encode(`${window.location.origin}|${studentId}`),
+      { name: "PBKDF2" },
+      false,
+      ["deriveKey"],
+    );
+    const key = await window.crypto.subtle.deriveKey(
+      {
+        name: "PBKDF2",
+        salt: encoder.encode("szu-course-help/salt-v1"),
+        iterations: 100000,
+        hash: "SHA-256",
+      },
+      baseKey,
+      { name: "AES-GCM", length: 256 },
+      false,
+      ["decrypt"],
+    );
+    const plain = await window.crypto.subtle.decrypt(
+      { name: "AES-GCM", iv: decode(ivPart) },
+      key,
+      decode(dataPart),
+    );
+    return { student_id: studentId, password: new TextDecoder().decode(plain), backend };
+  } catch {
+    return null;
+  }
 }
 
 function hideSessionDialog() {
@@ -487,7 +799,7 @@ function renderSessionRecovery(session, previousStatus = "idle") {
   const taskPaused = Boolean(session?.task_paused);
   const taskRunning = Boolean(session?.task_running);
   const finishedAt = String(session?.relogin_finished_at || "success");
-  appElements.recoveryLoginLink.href = versionedPage("/login");
+  appElements.recoveryLoginLink.href = cleanPagePath("/login");
 
   if (status === "idle") {
     hideRecoveryBanner();
@@ -540,13 +852,20 @@ function renderSessionRecovery(session, previousStatus = "idle") {
   }
   appElements.sessionRecoveryBanner.hidden = false;
   appElements.sessionRecoveryBanner.className = "session-recovery-banner is-error";
+  const failureCount = Number(session.relogin_failure_count || 0);
+  const maxRetries = Number(session.relogin_max_retries || 5);
+  const retryAfter = Number(session.relogin_retry_after || 0);
+  const recoveryExhausted = failureCount >= maxRetries;
   appElements.recoveryTitle.textContent = taskRunning && !taskPaused
     ? "自动重新登录暂未成功"
     : "自动重新登录失败";
+  const retryHint = recoveryExhausted
+    ? "自动重登录已停止，请手动登录。"
+    : `后台将在${retryAfter > 0 ? `${retryAfter}秒后` : "稍后"}继续尝试。`;
   appElements.recoveryDetail.textContent = taskRunning && !taskPaused
-    ? `${session.relogin_message || "OCR 暂未识别成功"}；后台仍会按策略继续尝试。`
+    ? `${session.relogin_message || "OCR 暂未识别成功"}；${retryHint}`
     : `${session.relogin_message || "无法恢复学校会话"}；请手动登录后返回清单继续任务。`;
-  appElements.recoveryLoginLink.hidden = taskRunning && !taskPaused;
+  appElements.recoveryLoginLink.hidden = taskRunning && !taskPaused && !recoveryExhausted;
 }
 
 function renderLoading() {
@@ -591,6 +910,7 @@ function renderCourseAvailabilityState(message = "") {
   appState.courses = [];
   appState.totalCount = 0;
   appState.courseDataKey = "";
+  appState.courseCacheMeta = null;
   appState.searchKeyword = "";
   appState.searchResults = [];
   appState.searchPage = 1;
@@ -678,18 +998,6 @@ function applySessionData(session) {
   const previousReloginStatus = appState.lastReloginStatus;
   const previousCatalogScope = catalogScopeKey(appState.session);
   const nextCatalogScope = catalogScopeKey(session);
-  const configuredPageDelay = Number(session?.catalog_page_delay_ms);
-  if (Number.isFinite(configuredPageDelay) && configuredPageDelay >= 100 && configuredPageDelay <= 10000) {
-    appState.catalogPageDelayMs = configuredPageDelay;
-  }
-  const configuredRetryLimit = Number(session?.catalog_throttle_max_retries);
-  if (Number.isInteger(configuredRetryLimit) && configuredRetryLimit >= 1 && configuredRetryLimit <= 10) {
-    appState.catalogThrottleMaxRetries = configuredRetryLimit;
-  }
-  const configuredBackoff = Number(session?.catalog_throttle_backoff_ms);
-  if (Number.isFinite(configuredBackoff) && configuredBackoff >= 250 && configuredBackoff <= 30000) {
-    appState.catalogThrottleBackoffMs = configuredBackoff;
-  }
   const reloginCompleted = Boolean(appState.session)
     && String(session.relogin_status || "idle") === "success"
     && previousReloginStatus !== "success";
@@ -705,23 +1013,78 @@ function applySessionData(session) {
     appState.courseCacheMeta = null;
   }
   appState.session = session;
-  if (!session.logged_in && appState.cacheMode) {
-    appState.cacheMode = false;
-    appElements.cacheModeSwitch.checked = false;
-  }
+  if (!session?.logged_in && appState.cacheMode) clearCacheRefreshTimer();
   renderCampusOptions(session);
   appState.lastReloginStatus = String(session.relogin_status || "idle");
+  const reloginAvailable = !session.logged_in
+    && !session.relogin_in_progress
+    && Number(session.relogin_failure_count || 0)
+      < Number(session.relogin_max_retries || 5);
   appElements.studentLabel.textContent = session.relogin_in_progress
     ? "正在恢复登录"
     : session.logged_in
       ? `学号 ${session.student_id}`
       : "未登录";
+  appElements.studentLabel.disabled = !reloginAvailable;
+  appElements.studentLabel.classList.toggle("is-actionable", reloginAvailable);
+  appElements.studentLabel.title = reloginAvailable
+    ? "点击立即尝试自动重新登录"
+    : session.logged_in
+      ? "当前已登录"
+      : "自动重登录暂不可用，请稍候或手动登录";
   renderSessionRecovery(session, previousReloginStatus);
   if (session.logged_in && !session.relogin_in_progress) hideSessionDialog();
   updateTaskIndicator();
   setPhasePresentation();
   if (session.task_running) startProgressPolling();
   return catalogContextChanged;
+}
+
+async function requestAutomaticRelogin(options = {}) {
+  const automatic = Boolean(options?.automatic);
+  const suppliedCredentials = options?.credentials || null;
+  if (!appState.session || appState.session.logged_in || appState.session.relogin_in_progress) return;
+  if (appState.reloginRequestPending) return;
+  if (!automatic && appElements.studentLabel.disabled) return;
+  appState.reloginRequestPending = true;
+  appElements.studentLabel.disabled = true;
+  appElements.studentLabel.classList.remove("is-actionable");
+  appElements.studentLabel.textContent = "正在恢复登录";
+  try {
+    const credentials = suppliedCredentials || await loadBrowserRecoveryCredentials();
+    if (!credentials) {
+      if (automatic) return;
+      throw new ApiError("当前浏览器会话没有可用的自动登录凭据，请返回登录页重新登录", {
+        code: "BROWSER_CREDENTIALS_UNAVAILABLE",
+        retryable: false,
+      });
+    }
+    const session = await api("/api/session/recover", {
+      method: "POST",
+      body: JSON.stringify(credentials),
+      timeoutMs: SESSION_RECOVERY_TIMEOUT_MS,
+    });
+    applySessionData(session);
+    showToast(session.message || "已开始自动重新登录，请稍候", false, true);
+  } catch (error) {
+    if (!(error instanceof SessionExpiredError)) showToast(error.message, true);
+    await loadSession(false, false);
+  } finally {
+    appState.reloginRequestPending = false;
+    if (appState.session) applySessionData(appState.session);
+  }
+}
+
+async function maybeStartAutomaticRelogin() {
+  const session = appState.session;
+  if (!session || session.logged_in || session.relogin_in_progress) return;
+  if (session.relogin_status === "failed") return;
+  if (Number(session.relogin_failure_count || 0) >= Number(session.relogin_max_retries || 5)) return;
+  if (appState.reloginRequestPending) return;
+
+  const credentials = await loadBrowserRecoveryCredentials();
+  if (!credentials || appState.session !== session) return;
+  void requestAutomaticRelogin({ automatic: true, credentials });
 }
 
 function cartEditStateKey() {
@@ -787,6 +1150,7 @@ async function loadSession(showDialog = true, refreshOnCatalogChange = true) {
   try {
     const session = await api("/api/session");
     const catalogContextChanged = applySessionData(session);
+    void maybeStartAutomaticRelogin();
     if (
       !appState.session.logged_in
       && !appState.session.relogin_in_progress
@@ -802,10 +1166,14 @@ async function loadSession(showDialog = true, refreshOnCatalogChange = true) {
       if (!appState.session.logged_in) {
         appState.searchKeyword = "";
         appElements.courseSearch.value = "";
-        appElements.courseSearch.disabled = true;
-        renderState("登录状态已失效", "请返回登录页完成登录后再读取课程目录。");
-        updatePagination();
-      } else if (courseCatalogBlocked() && !appState.cacheMode) {
+        if (isOfflineCacheType()) {
+          await loadCourses({ cacheOnly: true });
+        } else {
+          appElements.courseSearch.disabled = true;
+          renderState("登录状态已失效", "请返回登录页完成登录后再读取课程目录。");
+          updatePagination();
+        }
+      } else if (courseCatalogBlocked()) {
         renderCourseAvailabilityState();
       } else if (refreshOnCatalogChange) {
         if (!appState.session.task_running) {
@@ -859,21 +1227,24 @@ function appendClassRow(container, course, classInfo) {
 
   const actions = element("div", "class-actions");
   const [tagText, tagClass] = classTag(classInfo);
-  actions.append(element("span", `class-tag ${tagClass}`, tagText));
+  const statusTag = classHasConflict(classInfo) && !classIsSelected(classInfo)
+    ? element("button", `class-tag ${tagClass} class-tag-button`, tagText)
+    : element("span", `class-tag ${tagClass}`, tagText);
+  if (statusTag.tagName === "BUTTON") {
+    statusTag.type = "button";
+    statusTag.title = "查看冲突课表";
+    statusTag.addEventListener("click", () => openConflictTimetable(course, classInfo));
+  }
+  actions.append(statusTag);
 
-  const cacheReadOnly = appState.cacheMode || Boolean(appState.courseCacheMeta?.cached);
   const blocked = classIsSelected(classInfo) || classHasConflict(classInfo);
   const addButton = element(
     "button",
     "button button-secondary",
-    cacheReadOnly
-      ? "缓存只读"
-      : blocked
-        ? (classIsSelected(classInfo) ? "已选" : "不可加入")
-        : (classIsFull(classInfo) ? "加入候补" : "加入清单"),
+    blocked ? (classIsSelected(classInfo) ? "已选" : "不可加入") : (classIsFull(classInfo) ? "加入候补" : "加入清单"),
   );
   addButton.type = "button";
-  addButton.disabled = cacheReadOnly || blocked || Boolean(appState.session?.task_running);
+  addButton.disabled = blocked || Boolean(appState.session?.task_running);
   addButton.addEventListener("click", async () => {
     addButton.disabled = true;
     try {
@@ -885,6 +1256,11 @@ function appendClassRow(container, course, classInfo) {
           name: `${course.course_name || "未命名课程"} (${classInfo.teacher_name || "教师待定"})`,
           campus_code: String(appState.session?.campus_code || "01"),
           campus_name: String(appState.session?.campus_name || course.campus_name || ""),
+          teaching_place: String(classInfo.teaching_place || ""),
+          course_name: String(course.course_name || ""),
+          teacher_name: String(classInfo.teacher_name || ""),
+          credit: String(course.credit || ""),
+          auto_enabled: true,
           is_choose: String(classInfo.is_choose || ""),
           is_conflict: String(classInfo.is_conflict || ""),
           is_full: String(classInfo.is_full || ""),
@@ -896,7 +1272,7 @@ function appendClassRow(container, course, classInfo) {
     } catch (error) {
       if (!(error instanceof SessionExpiredError)) showToast(error.message, true);
     } finally {
-      addButton.disabled = cacheReadOnly || blocked || Boolean(appState.session?.task_running);
+      addButton.disabled = blocked || Boolean(appState.session?.task_running);
     }
   });
   actions.append(addButton);
@@ -938,8 +1314,6 @@ function renderCourseList(courses) {
           course.course_nature_name,
           course.department_name,
           course.credit ? `${course.credit} 学分` : "",
-          course.campus_name,
-          course.sport_name,
         ]
           .filter(Boolean)
           .join(" · ") || "课程信息待定",
@@ -947,15 +1321,7 @@ function renderCourseList(courses) {
     );
     const side = element("div", "course-summary-side");
     const visibleClasses = visibleTeachingClasses(course);
-    side.append(
-      element(
-        "span",
-        "",
-        visibleClasses.length === (course.tcList || []).length
-          ? `${visibleClasses.length} 个教学班`
-          : `${visibleClasses.length} / ${(course.tcList || []).length} 个教学班`,
-      ),
-    );
+    side.append(element("span", "", `${visibleClasses.length} / ${(course.tcList || []).length} 个教学班`));
     side.append(element("i", "course-chevron"));
     summary.append(main, side);
 
@@ -988,7 +1354,7 @@ function applyCourseFilter() {
     appState.searchPage * FILTER_PAGE_SIZE,
   );
   const prefix = cache.cached
-    ? `只读缓存（更新于 ${cacheTimestampLabel(cache.cachedAt)}）：`
+    ? `缓存课程（最近更新 ${cacheTimestampLabel(cache.cachedAt)}）：`
     : "";
   appElements.courseSummary.textContent = results.length
     ? `${prefix}匹配 ${results.length} 门课程（全部 ${cache.totalCount} 门），本页 ${pageItems.length} 门`
@@ -1089,8 +1455,8 @@ function invalidateCatalogCaches() {
   appState.searchPage = 1;
 }
 
-function waitForCatalogDelay(delayMs, signal) {
-  if (delayMs <= 0) return Promise.resolve();
+function waitForCatalogPageDelay(signal) {
+  if (CATALOG_PAGE_DELAY_MS <= 0) return Promise.resolve();
   return new Promise((resolve, reject) => {
     if (signal?.aborted) {
       reject(new DOMException("Catalog request aborted", "AbortError"));
@@ -1103,13 +1469,14 @@ function waitForCatalogDelay(delayMs, signal) {
     const timer = window.setTimeout(() => {
       signal?.removeEventListener("abort", onAbort);
       resolve();
-    }, delayMs);
+    }, CATALOG_PAGE_DELAY_MS);
     signal?.addEventListener("abort", onAbort, { once: true });
   });
 }
 
-async function fetchFullCatalog({ force = false } = {}) {
+async function fetchFullCatalog({ force = false, preserveExisting = false, forceLive = false } = {}) {
   const type = appState.type;
+  const offlineCache = !appState.session?.logged_in && isOfflineCacheType();
   const scopeKey = catalogScopeKey();
   const existing = appState.catalogCaches[type];
   if (existing?.complete && existing.scopeKey === scopeKey && !force) return true;
@@ -1128,62 +1495,52 @@ async function fetchFullCatalog({ force = false } = {}) {
     totalCount: 0,
     complete: false,
     scopeKey,
+    cached: true,
+    cachedAt: 0,
   };
-  appState.catalogCaches[type] = cache;
+  if (!preserveExisting) appState.catalogCaches[type] = cache;
 
-  const updateProgress = (message = "") => {
-    appElements.courseSummary.textContent = message
-      || (cache.totalCount
-        ? `正在加载${appState.cacheMode ? "缓存" : "全部"}课程 ${cache.courses.length} / ${cache.totalCount} 门`
-        : `正在加载${appState.cacheMode ? "课程缓存" : "全部课程"}`);
+  const updateProgress = () => {
+    if (!preserveExisting) {
+      appElements.courseSummary.textContent = cache.totalCount
+        ? `正在加载全部课程 ${cache.courses.length} / ${cache.totalCount} 门`
+        : "正在加载全部课程";
+    }
   };
-  let pacingDelayMs = appState.catalogPageDelayMs;
-  const maximumPacingDelayMs = Math.min(
-    Math.max(appState.catalogPageDelayMs * 4, 2400),
-    CATALOG_PAGE_MAX_DELAY_MS,
-  );
   updateProgress();
-  renderCourses();
+  if (!preserveExisting) renderCourses();
   updatePagination();
 
   try {
     let completed = false;
     let expectedTotalCount = null;
     for (let page = 1; page <= MAX_CATALOG_PAGES; page += 1) {
-      let data = null;
-      for (let attempt = 0; ; attempt += 1) {
-        try {
-          data = await api(
-            courseRequestUrl(type, page, FILTER_PAGE_SIZE),
-            { signal: controller.signal, timeoutMs: SESSION_RECOVERY_TIMEOUT_MS },
-          );
-          if (
-            requestId !== appState.catalogRequestId
-            || scopeKey !== catalogScopeKey()
-          ) return false;
-          break;
-        } catch (error) {
-          if (
-            error?.code !== "SCHOOL_COURSE_THROTTLED"
-            || attempt >= appState.catalogThrottleMaxRetries
-          ) throw error;
-          const serverBackoffMs = Number(error?.payload?.retry_after_ms);
-          const baseBackoffMs = CATALOG_TEST_BACKOFF_MS
-            || (Number.isFinite(serverBackoffMs) && serverBackoffMs > 0
-              ? serverBackoffMs
-              : appState.catalogThrottleBackoffMs);
-          const backoffLimitMs = CATALOG_TEST_BACKOFF_MAX_MS
-            || Math.max(appState.catalogThrottleBackoffMs * 4, baseBackoffMs);
-          const backoffMs = Math.min(baseBackoffMs * (2 ** attempt), backoffLimitMs);
-          pacingDelayMs = Math.min(pacingDelayMs * 2, maximumPacingDelayMs);
-          updateProgress(
-            `学校提示请求过快，${Math.max(1, Math.ceil(backoffMs / 1000))} 秒后自动重试`
-              + `（第 ${attempt + 1} / ${appState.catalogThrottleMaxRetries} 次）`,
-          );
-          await waitForCatalogDelay(backoffMs, controller.signal);
-        }
-      }
+      const data = await api(
+        courseRequestUrl(type, page, FILTER_PAGE_SIZE, {
+          cacheMode: (appState.cacheMode || offlineCache) && !forceLive,
+        }),
+        { signal: controller.signal, timeoutMs: SESSION_RECOVERY_TIMEOUT_MS },
+      );
+      if (
+        requestId !== appState.catalogRequestId
+        || scopeKey !== catalogScopeKey()
+      ) return false;
       const items = Array.isArray(data.courses) ? data.courses : [];
+      if (data.full_catalog) {
+        const reportedTotal = Number(data.total_count);
+        if (!Number.isInteger(reportedTotal) || reportedTotal < items.length) {
+          throw new ApiError("本地课程缓存数据无效，请重新加载", {
+            code: "SCHOOL_RESPONSE_INVALID",
+            retryable: true,
+          });
+        }
+        cache.courses = items;
+        cache.totalCount = reportedTotal;
+        cache.cached = Boolean(data.cached);
+        cache.cachedAt = Number(data.cached_at) || 0;
+        completed = true;
+        break;
+      }
       const reportedTotal = Number(data.total_count);
       if (!Number.isInteger(reportedTotal) || reportedTotal < 0) {
         throw new ApiError("学校返回的课程总数无效，请稍后重新加载", {
@@ -1201,9 +1558,8 @@ async function fetchFullCatalog({ force = false } = {}) {
       }
       cache.totalCount = expectedTotalCount;
       cache.courses.push(...items);
-      cache.cached = Boolean(data.cached);
-      cache.cachedAt = Math.max(Number(cache.cachedAt || 0), Number(data.cached_at || 0));
-      cache.cacheStale = Boolean(cache.cacheStale || data.cache_stale);
+      cache.cached = cache.cached && Boolean(data.cached);
+      cache.cachedAt = Math.max(cache.cachedAt, Number(data.cached_at) || 0);
       updateProgress();
       const totalPages = Math.max(1, Math.ceil(cache.totalCount / FILTER_PAGE_SIZE));
       if (totalPages > MAX_CATALOG_PAGES) {
@@ -1228,7 +1584,7 @@ async function fetchFullCatalog({ force = false } = {}) {
           retryable: true,
         });
       }
-      if (!data.cached) await waitForCatalogDelay(pacingDelayMs, controller.signal);
+      await waitForCatalogPageDelay(controller.signal);
     }
     if (requestId !== appState.catalogRequestId) return false;
     if (!completed) {
@@ -1238,28 +1594,20 @@ async function fetchFullCatalog({ force = false } = {}) {
       });
     }
     cache.complete = true;
-    appState.courseCacheMeta = cache.cached
-      ? {
-        cached: true,
-        cached_at: cache.cachedAt,
-        cache_stale: cache.cacheStale,
-      }
-      : { cached: false };
+    if (preserveExisting) appState.catalogCaches[type] = cache;
     return true;
   } catch (error) {
     if (isAbortError(error) || requestId !== appState.catalogRequestId) return false;
-    delete appState.catalogCaches[type];
+    if (!preserveExisting) delete appState.catalogCaches[type];
     if (error instanceof SessionExpiredError) return false;
     const availabilityError = ["COURSE_WINDOW_CLOSED", "BATCH_UNAVAILABLE"].includes(error.code);
     if (availabilityError) {
+      if (preserveExisting && existing?.complete) return false;
       appState.catalogBlockedCode = error.code;
       setPhasePresentation();
       renderCourseAvailabilityState(error.message);
     } else {
       showToast(`${courseErrorTitle(error)}：${error.message}`, true);
-      // The error view must not inherit the in-flight loading state.
-      appState.loadingCatalog = false;
-      appState.catalogLoadingType = "";
       renderCourses();
       updatePagination();
     }
@@ -1269,19 +1617,24 @@ async function fetchFullCatalog({ force = false } = {}) {
       appState.loadingCatalog = false;
       appState.catalogLoadingType = "";
       appState.catalogRequestController = null;
-      appElements.courseSearch.disabled = courseCatalogBlocked() && !appState.cacheMode;
+      appElements.courseSearch.disabled = courseCatalogBlocked()
+        && !appState.cacheMode
+        && !offlineCache;
       appElements.refreshCourses.disabled = appState.loadingCourses || appState.refreshingPhase;
     }
   }
 }
 
-async function runSearchFetch({ force = false } = {}) {
-  if (!appState.session?.logged_in || (courseCatalogBlocked() && !appState.cacheMode)) return;
-  const ok = await fetchFullCatalog({ force });
+async function runSearchFetch({ force = false, preserveExisting = false, forceLive = false } = {}) {
+  const offlineCache = !appState.session?.logged_in && isOfflineCacheType();
+  if (!appState.session?.logged_in && !offlineCache) return;
+  if (courseCatalogBlocked() && !appState.cacheMode && !forceLive) return;
+  const ok = await fetchFullCatalog({ force, preserveExisting, forceLive });
   if (!ok || !isFilterActive()) return;
   applyCourseFilter();
   renderCourses();
   updatePagination();
+  return ok;
 }
 
 async function handleSearchInput() {
@@ -1313,19 +1666,19 @@ function courseErrorTitle(error) {
     return "暂时无法连接服务";
   }
   if (error.code === "SCHOOL_RESPONSE_INVALID") return "学校数据暂时异常";
-  if (error.code === "SCHOOL_COURSE_THROTTLED") return "学校限制了请求速度";
   if (error.code === "SCHOOL_COURSE_REJECTED") return "学校暂时拒绝了请求";
-  if (error.code === "CATALOG_CACHE_MISS") return "当前范围没有课程缓存";
   if (error.code === "UNSUPPORTED_COURSE_TYPE") return "该目录暂不支持";
   return "课程目录读取失败";
 }
 
 async function loadCourses(options = {}) {
-  if (!appState.session?.logged_in) {
+  const offlineCache = Boolean(options.cacheOnly || (!appState.session?.logged_in && isOfflineCacheType()));
+  if (!appState.session?.logged_in && !offlineCache) {
     renderState("尚未登录", "返回登录页完成学号、密码、卡密和验证码校验。");
     return;
   }
-  if (courseCatalogBlocked() && !appState.cacheMode) {
+  const forceLive = Boolean(options.forceLive);
+  if (courseCatalogBlocked() && !appState.cacheMode && !offlineCache && !forceLive) {
     renderCourseAvailabilityState();
     return;
   }
@@ -1337,7 +1690,7 @@ async function loadCourses(options = {}) {
   const requestId = appState.courseRequestId + 1;
   const requestedType = appState.type;
   const requestedPage = appState.page;
-  const requestedKey = `${appState.cacheMode ? "cache" : "live"}:${requestedType}:${requestedPage}`;
+  const requestedKey = `${requestedType}:${requestedPage}`;
   const preserveExisting = Boolean(options.preserveExisting);
   const hasCurrentResult = appState.courseDataKey === requestedKey;
   appState.courseRequestController = controller;
@@ -1349,45 +1702,61 @@ async function loadCourses(options = {}) {
   appElements.courseTitle.textContent = categoryNames[appState.type] || appState.type;
   appElements.courseSummary.textContent = hasCurrentResult && preserveExisting
     ? "正在刷新，当前仍显示上次成功结果"
-    : appState.cacheMode
-      ? "正在读取当前学号、批次和校区的课程缓存"
-      : "正在读取学校课程数据";
+    : "正在读取学校课程数据";
   if (!hasCurrentResult || !preserveExisting) {
     appState.courses = [];
     appState.totalCount = 0;
     appState.courseDataKey = "";
-    appState.courseCacheMeta = null;
     renderLoading();
   }
   updatePagination();
 
   try {
     const data = await api(
-      courseRequestUrl(requestedType, requestedPage),
+      courseRequestUrl(requestedType, requestedPage, 10, {
+        cacheMode: (appState.cacheMode || offlineCache) && !forceLive,
+      }),
       { signal: controller.signal, timeoutMs: SESSION_RECOVERY_TIMEOUT_MS },
     );
     if (requestId !== appState.courseRequestId) return;
-    appState.courses = Array.isArray(data.courses) ? data.courses : [];
-    appState.totalCount = Number(data.total_count || 0);
+    const allCourses = Array.isArray(data.courses) ? data.courses : [];
+    const courses = data.full_catalog
+      ? allCourses.slice((requestedPage - 1) * 10, requestedPage * 10)
+      : allCourses;
+    if (preserveExisting && !courses.length && hasCurrentResult) {
+      appElements.courseSummary.textContent = "实时刷新返回空列表，仍显示上次成功结果";
+      return;
+    }
+    appState.courses = courses;
+    appState.totalCount = Number(data.total_count || allCourses.length || 0);
     appState.courseDataKey = requestedKey;
-    appState.courseCacheMeta = {
-      cached: Boolean(data.cached),
-      cached_at: Number(data.cached_at || 0),
-      cache_stale: Boolean(data.cache_stale),
-    };
+    appState.courseCacheMeta = data;
     appState.catalogBlockedCode = "";
     appElements.courseSummary.textContent = courseSummary(
       appState.totalCount,
       appState.courses.length,
-      appState.courseCacheMeta,
+      data,
     );
     renderCourses();
   } catch (error) {
     if (isAbortError(error) || requestId !== appState.courseRequestId) return;
-    if (error instanceof SessionExpiredError) return;
+    if (error instanceof SessionExpiredError) {
+      if (offlineCache) {
+        appElements.courseSummary.textContent = "没有找到本地课程缓存";
+        renderState(
+          "暂无离线课程数据",
+          "请先登录并成功加载本班推荐或方案内课程，之后即使学校系统不可用也可以本地查阅。",
+        );
+      }
+      return;
+    }
 
     const availabilityError = ["COURSE_WINDOW_CLOSED", "BATCH_UNAVAILABLE"].includes(error.code);
     if (availabilityError) {
+      if (preserveExisting && hasCurrentResult) {
+        appElements.courseSummary.textContent = "实时刷新暂不可用，仍显示上次成功结果";
+        return;
+      }
       appState.catalogBlockedCode = error.code;
       setPhasePresentation();
       renderCourseAvailabilityState(error.message);
@@ -1403,25 +1772,25 @@ async function loadCourses(options = {}) {
     appState.courses = [];
     appState.totalCount = 0;
     appState.courseDataKey = "";
-    appState.courseCacheMeta = null;
     appElements.courseSummary.textContent = "课程目录暂时不可用";
     renderState(courseErrorTitle(error), error.message, {
       tone: "error",
       note: "登录状态和已加入的本地选课清单不会因本次读取失败而丢失。",
-      actions: appState.cacheMode
-        ? [{ label: "切换到实时数据", handler: () => setCacheMode(false), primary: true }]
-        : error.retryable
-          ? [
-            { label: "重新加载课程", handler: () => loadCourses({ preserveExisting: true }), primary: true },
-            { label: "重新检查开放状态", handler: refreshPhaseAndCourses },
-          ]
-          : [],
+      actions: error.retryable
+        ? [
+          { label: "重新加载课程", handler: () => loadCourses({ preserveExisting: true }), primary: true },
+          { label: "重新检查开放状态", handler: refreshPhaseAndCourses },
+        ]
+        : [],
     });
   } finally {
     if (requestId === appState.courseRequestId) {
       appState.loadingCourses = false;
       appState.courseRequestController = null;
       appElements.refreshCourses.disabled = appState.refreshingPhase || appState.loadingCatalog;
+      appElements.courseSearch.disabled = courseCatalogBlocked()
+        && !appState.cacheMode
+        && !offlineCache;
       updatePagination();
     }
   }
@@ -1444,7 +1813,7 @@ async function refreshPhaseAndCourses() {
     appState.catalogBlockedCode = "";
     applySessionData(session);
     showToast(session.message || "开放状态已更新", false, true);
-    if (courseCatalogBlocked() && !appState.cacheMode) renderCourseAvailabilityState();
+    if (courseCatalogBlocked()) renderCourseAvailabilityState();
     else {
       invalidateCatalogCache(appState.type);
       if (isFilterActive()) await runSearchFetch({ force: true });
@@ -1483,10 +1852,33 @@ async function refreshPhaseAndCourses() {
 async function refreshCurrentView() {
   if (courseCatalogBlocked() && !appState.cacheMode) await refreshPhaseAndCourses();
   else {
-    invalidateCatalogCache(appState.type);
-    if (isFilterActive()) await runSearchFetch({ force: true });
-    else await loadCourses({ preserveExisting: true });
+    if (!appState.cacheMode) invalidateCatalogCache(appState.type);
+    if (isFilterActive()) {
+      await runSearchFetch({ force: true, preserveExisting: true, forceLive: true });
+    } else {
+      await loadCourses({ preserveExisting: true, forceLive: true });
+    }
   }
+}
+
+async function refreshCoursesFromNetwork() {
+  if (
+    !appState.cacheMode
+    || !appState.session?.logged_in
+    || appState.loadingCourses
+    || appState.loadingCatalog
+    || appState.refreshingPhase
+  ) return;
+  if (isFilterActive()) {
+    const ok = await runSearchFetch({ force: true, preserveExisting: true, forceLive: true });
+    if (ok !== false) {
+      applyCourseFilter();
+      renderCourses();
+      updatePagination();
+    }
+    return;
+  }
+  await loadCourses({ preserveExisting: true, forceLive: true });
 }
 
 function syncEnrollControls() {
@@ -1494,8 +1886,11 @@ function syncEnrollControls() {
   const paused = Boolean(appState.session?.task_paused);
   const pauseAcknowledged = Boolean(appState.session?.task_pause_acknowledged);
   const stopping = Boolean(appState.session?.task_stopping);
-  const hasPending = appState.cart.some((item) => (item.status || "PENDING") === "PENDING");
+  const hasPending = appState.cart.some((item) => (
+    (item.status || "PENDING") === "PENDING" && preferenceFor(item).autoEnabled !== false
+  ));
   appElements.openEnrollConfirm.disabled = !appState.grabPhase || running || !hasPending;
+  if (appElements.stopEnroll) appElements.stopEnroll.disabled = !running || stopping;
   if (running && stopping) {
     appElements.cartHint.textContent = appState.session?.task_stopping_reason
       || "待处理课程已清空，后台任务正在结束。";
@@ -1513,13 +1908,112 @@ function syncEnrollControls() {
   } else if (!appState.grabPhase) {
     appElements.cartHint.textContent = "当前批次不允许自动抢课，仅可浏览和整理清单。";
   } else if (!hasPending) {
-    appElements.cartHint.textContent = "清单中没有待启动课程，先从课程目录加入。";
+    const hasDisabledPending = appState.cart.some((item) => (
+      (item.status || "PENDING") === "PENDING" && preferenceFor(item).autoEnabled === false
+    ));
+    appElements.cartHint.textContent = hasDisabledPending
+      ? "待抢课程的“自动抢课”开关均已关闭，请先在清单中开启后再启动。"
+      : "清单中没有待启动课程，先从课程目录加入。";
   } else {
     appElements.cartHint.textContent = "满员课程可以加入清单排队候补；冲突或已选课程不能加入。";
+  }
+  renderEnrollControls();
+}
+
+function cartItemsSorted() {
+  return [...appState.cart].sort((left, right) => {
+    const a = preferenceFor(left);
+    const b = preferenceFor(right);
+    return a.priorityGroup.localeCompare(b.priorityGroup, "zh-CN")
+      || a.priorityRank - b.priorityRank
+      || String(left.name || left.id).localeCompare(String(right.name || right.id), "zh-CN");
+  });
+}
+
+function cartGroups() {
+  const groups = new Map();
+  for (const item of cartItemsSorted()) {
+    const group = preferenceFor(item).priorityGroup;
+    if (!groups.has(group)) groups.set(group, []);
+    groups.get(group).push(item);
+  }
+  return groups;
+}
+
+async function patchCartPreference(item, values) {
+  const previous = preferenceFor(item);
+  updateLocalCartPreference(item, values);
+  renderCart();
+  try {
+    await planApi(`/api/courses/${encodeURIComponent(item.id)}`, {
+      method: "PATCH",
+      body: JSON.stringify(values),
+    });
+  } catch (error) {
+    updateLocalCartPreference(item, previous);
+    renderCart();
+    showToast(planErrorMessage(error), true);
+  }
+}
+
+function makeCartPreferenceControl(item) {
+  const preference = preferenceFor(item);
+  const controls = element("div", "cart-preference-controls");
+  const label = element("label", "switch-row compact-switch");
+  const toggle = element("input");
+  toggle.type = "checkbox";
+  toggle.checked = Boolean(preference.autoEnabled);
+  toggle.setAttribute("aria-label", "自动抢课开关");
+  label.append(toggle, element("span", "", "自动抢课"));
+  toggle.addEventListener("change", () => patchCartPreference(item, { auto_enabled: toggle.checked }));
+
+  const group = element("input", "cart-group-input");
+  group.type = "text";
+  group.value = preference.priorityGroup;
+  group.title = "同一优选组内按优先级尝试，优先级较高者先尝试";
+  group.setAttribute("aria-label", "优选分组");
+  group.addEventListener("change", () => patchCartPreference(item, { priority_group: group.value.trim() || "未分组课程" }));
+
+  const rank = element("span", "cart-rank", `优先级 ${preference.priorityRank + 1}`);
+  const up = element("button", "button button-quiet", "↑");
+  const down = element("button", "button button-quiet", "↓");
+  up.type = "button";
+  down.type = "button";
+  up.title = "提高同组优先级";
+  down.title = "降低同组优先级";
+  up.addEventListener("click", () => moveCartItem(item, -1));
+  down.addEventListener("click", () => moveCartItem(item, 1));
+  controls.append(label, group, rank, up, down);
+  return controls;
+}
+
+async function moveCartItem(item, direction) {
+  const ordered = cartItemsSorted();
+  const currentIndex = ordered.findIndex((candidate) => String(candidate.id) === String(item.id));
+  const targetIndex = currentIndex + direction;
+  if (currentIndex < 0 || targetIndex < 0 || targetIndex >= ordered.length) return;
+  const other = ordered[targetIndex];
+  const currentPreference = preferenceFor(item);
+  const otherPreference = preferenceFor(other);
+  if (currentPreference.priorityGroup !== otherPreference.priorityGroup) {
+    showToast("上下移动只作用于同一优选分组", true);
+    return;
+  }
+  updateLocalCartPreference(item, { priorityRank: otherPreference.priorityRank });
+  updateLocalCartPreference(other, { priorityRank: currentPreference.priorityRank });
+  renderCart();
+  try {
+    await Promise.all([
+      planApi(`/api/courses/${encodeURIComponent(item.id)}`, { method: "PATCH", body: JSON.stringify({ priority_rank: otherPreference.priorityRank }) }),
+      planApi(`/api/courses/${encodeURIComponent(other.id)}`, { method: "PATCH", body: JSON.stringify({ priority_rank: currentPreference.priorityRank }) }),
+    ]);
+  } catch (error) {
+    showToast(planErrorMessage(error), true);
   }
 }
 
 function renderCart() {
+  ensureCartPreferenceRanks();
   appElements.cartCount.textContent = String(appState.cart.length);
   if (!appState.cart.length) {
     const empty = element("div", "empty-state");
@@ -1531,7 +2025,13 @@ function renderCart() {
   }
 
   const fragment = document.createDocumentFragment();
-  for (const item of appState.cart) {
+  for (const [groupName, items] of cartGroups()) {
+    const group = element("section", "cart-priority-group");
+    const heading = element("div", "cart-priority-group-title");
+    heading.append(element("strong", "", groupName));
+    heading.append(element("span", "", `${items.length} 门，按优先级尝试`));
+    group.append(heading);
+    for (const item of items) {
     const row = element("div", "cart-item");
     const copy = element("div");
     copy.append(element("strong", "", item.name || item.id));
@@ -1544,10 +2044,11 @@ function renderCart() {
           .join(" · "),
       ),
     );
+    copy.append(makeCartPreferenceControl(item));
     const actions = element("div", "cart-item-actions");
     const statusClass = item.status === "SUCCESS" ? "status-success" : item.status === "FAILED" ? "status-danger" : item.status === "ENROLLING" ? "status-warning" : "status-neutral";
     actions.append(element("span", `status-pill ${statusClass}`, statusNames[item.status] || "待启动"));
-    if (item.status === "FAILED" && !appState.session?.task_running) {
+    if (item.status === "FAILED" && appState.session?.logged_in && !appState.session?.task_running) {
       const retry = element("button", "button button-secondary", "重新排队");
       retry.type = "button";
       retry.addEventListener("click", async () => {
@@ -1575,9 +2076,12 @@ function renderCart() {
       && Boolean(appState.session?.task_pause_acknowledged)
       && !taskStopping;
     const terminalCourse = ["SUCCESS", "FAILED"].includes(item.status);
-    remove.disabled = taskRunning && (taskStopping || (!terminalCourse && !canEditPausedTask));
+    remove.disabled = !appState.session?.logged_in
+      || (taskRunning && (taskStopping || (!terminalCourse && !canEditPausedTask)));
     if (remove.disabled) {
-      remove.title = taskStopping
+      remove.title = !appState.session?.logged_in
+        ? "未登录时仅可查阅本地选课清单"
+        : taskStopping
         ? "抢课任务正在结束"
         : appState.session?.task_paused
           ? "正在完成当前请求，请等待安全暂停"
@@ -1603,7 +2107,9 @@ function renderCart() {
     });
     actions.append(remove);
     row.append(copy, actions);
-    fragment.append(row);
+    group.append(row);
+    }
+    fragment.append(group);
   }
   appElements.cartList.replaceChildren(fragment);
   syncEnrollControls();
@@ -1613,7 +2119,19 @@ async function loadCart() {
   try {
     const data = await api("/api/courses/dblist?status=");
     appState.cart = Array.isArray(data) ? data : [];
+    // The SQLite response is authoritative. Reconcile old browser cache
+    // entries so a server-side unchecked auto_enabled value is not restored
+    // as checked during the next render.
+    for (const item of appState.cart) {
+      const id = String(item.id);
+      const current = appState.cartPreferences[id] || {};
+      if (item.auto_enabled !== undefined) current.autoEnabled = Boolean(item.auto_enabled);
+      if (item.priority_group !== undefined) current.priorityGroup = String(item.priority_group || "");
+      if (item.priority_rank !== undefined) current.priorityRank = numericValue(item.priority_rank, 0);
+      appState.cartPreferences[id] = current;
+    }
     renderCart();
+    renderMyCoursesSchedule();
   } catch (error) {
     if (!(error instanceof SessionExpiredError)) showToast(error.message, true);
   }
@@ -1623,19 +2141,26 @@ async function loadCart() {
 
 function renderMyCourses() {
   const list = appState.myCourses;
-  if (!list.length) {
+  const pendingItems = getPendingMyCourseItems();
+  const entries = [
+    ...list.map((course) => ({ course, pending: false })),
+    ...pendingItems.map((course) => ({ course, pending: true })),
+  ];
+  if (!entries.length) {
     const empty = element("div", "empty-state");
     empty.append(element("strong", "", "还没有已选课程"));
-    empty.append(element("p", "", "抢到课程后会显示在这里，也可能是学校系统暂未返回数据。"));
+    empty.append(element("p", "", "抢到课程后会显示在这里；选课清单中的待抢课程会以虚化状态显示。"));
     appElements.myCoursesList.replaceChildren(empty);
     return;
   }
   const fragment = document.createDocumentFragment();
-  list.forEach((course, index) => {
-    const row = element("div", "my-course-item");
+  entries.forEach(({ course, pending }, index) => {
+    const row = element("div", `my-course-item${pending ? " is-pending" : ""}`);
     row.append(element("span", "my-course-index", String(index + 1)));
     const body = element("div", "my-course-body");
-    body.append(element("strong", "", course.course_name || "未命名课程"));
+    const title = element("strong", "", course.course_name || course.name || "未命名课程");
+    if (pending) title.append(element("span", "my-course-pending-badge", "待选"));
+    body.append(title);
     const meta = element("div", "my-course-meta");
     if (course.teacher_name) meta.append(element("span", "", `教师 ${course.teacher_name}`));
     if (course.teaching_place) meta.append(element("span", "", course.teaching_place));
@@ -1649,228 +2174,430 @@ function renderMyCourses() {
   appElements.myCoursesList.replaceChildren(fragment);
 }
 
-function fallbackTimetable(courses) {
-  return {
-    day_names: ["周一", "周二", "周三", "周四", "周五", "周六", "周日"],
-    period_count: 14,
-    entries: [],
-    unscheduled: courses.map((course) => ({
-      ...course,
-      reason: "当前服务尚未返回结构化课表，请重启本地程序后刷新",
-    })),
-    total_count: courses.length,
-    scheduled_count: 0,
-    unscheduled_count: courses.length,
-  };
+function getPendingMyCourseItems({ visibleOnly = true } = {}) {
+  const enrolledIds = new Set(
+    appState.myCourses.map((course) => String(course.teaching_class_id || "")),
+  );
+  if (visibleOnly && !appState.showCartOnSchedule) return [];
+  return appState.cart.filter(
+    (item) => (item.status || "PENDING") !== "SUCCESS"
+      && !enrolledIds.has(String(item.id)),
+  );
 }
 
-function timetableEntriesWithLanes(entries) {
-  const laidOut = [];
-  const appendCluster = (cluster) => {
-    if (!cluster.length) return;
-    const laneEnds = [];
-    const assigned = [];
-    for (const entry of cluster) {
-      const start = Number(entry.start_period);
-      let lane = laneEnds.findIndex((end) => end < start);
-      if (lane < 0) lane = laneEnds.length;
-      laneEnds[lane] = Number(entry.end_period);
-      assigned.push({ ...entry, lane });
+function numericCredit(value) {
+  const number = Number.parseFloat(String(value ?? "").replace(/[^0-9.+-]/g, ""));
+  return Number.isFinite(number) && number >= 0 ? number : 0;
+}
+
+function formatCredit(value) {
+  return Number.isInteger(value)
+    ? String(value)
+    : value.toFixed(2).replace(/0+$/, "").replace(/\.$/, "");
+}
+
+function myCoursesCreditSummary() {
+  const selected = appState.myCourses.reduce(
+    (total, course) => total + numericCredit(course.credit),
+    0,
+  );
+  const pending = getPendingMyCourseItems({ visibleOnly: false }).reduce(
+    (total, course) => total + numericCredit(course.credit),
+    0,
+  );
+  return `已选课程 ${formatCredit(selected)} 学分 + 待抢课程 ${formatCredit(pending)} 学分 = 合计 ${formatCredit(selected + pending)} 学分`;
+}
+
+function renderMyCoursesCreditSummary() {
+  const selected = appState.myCourses.reduce(
+    (total, course) => total + numericCredit(course.credit),
+    0,
+  );
+  const pending = getPendingMyCourseItems({ visibleOnly: false }).reduce(
+    (total, course) => total + numericCredit(course.credit),
+    0,
+  );
+  if (appElements.selectedCreditTotal) appElements.selectedCreditTotal.textContent = formatCredit(selected);
+  if (appElements.pendingCreditTotal) appElements.pendingCreditTotal.textContent = formatCredit(pending);
+  if (appElements.combinedCreditTotal) appElements.combinedCreditTotal.textContent = formatCredit(selected + pending);
+}
+
+/* ---------------- My courses schedule (weekly grid) ---------------- */
+
+const SCHEDULE_COLORS = 12;
+const BREAK_PERIODS = [3, 6, 9, 11];
+
+/**
+ * Build a course-color mapping so visually distinct courses stand out.
+ * Keyed by course_name|teacher_name for enrolled courses.
+ */
+function buildScheduleColorMap(courses) {
+  const colorMap = new Map();
+  let nextColor = 0;
+  for (const course of courses) {
+    const key = (course.course_name || "未命名课程") + "|" + (course.teacher_name || "");
+    if (colorMap.has(key)) continue;
+    colorMap.set(key, nextColor % SCHEDULE_COLORS);
+    nextColor += 1;
+  }
+  return colorMap;
+}
+
+/**
+ * Parse a course-like object's teaching_place into schedule slots
+ * and split them into placed (on the standard 14-period grid) and
+ * unplaced (go to the right-side non-standard list).
+ */
+function collectScheduleEntries(courseLike, color, pending, placedSlots, unplaced, state = {}) {
+  const slots = parseScheduleSlots(courseLike.teaching_place || "");
+  let hasPlaced = false;
+  for (const slot of slots) {
+    const ok =
+      slot.dayOfWeek >= 0 && slot.dayOfWeek <= 6 &&
+      slot.startPeriod >= 1 && slot.endPeriod <= MAX_PERIOD &&
+      slot.startPeriod <= slot.endPeriod;
+    if (ok) {
+      placedSlots.push({ course: courseLike, slot, color, pending, ...state });
+      hasPlaced = true;
     }
-    const lanes = Math.max(1, laneEnds.length);
-    laidOut.push(...assigned.map((entry) => ({ ...entry, lanes })));
-  };
-
-  for (let day = 1; day <= 7; day += 1) {
-    const dayEntries = entries
-      .filter((entry) => Number(entry.day) === day)
-      .sort((left, right) => (
-        Number(left.start_period) - Number(right.start_period)
-        || Number(left.end_period) - Number(right.end_period)
-      ));
-    let cluster = [];
-    let clusterEnd = 0;
-    for (const entry of dayEntries) {
-      const start = Number(entry.start_period);
-      const end = Number(entry.end_period);
-      if (cluster.length && start > clusterEnd) {
-        appendCluster(cluster);
-        cluster = [];
-      }
-      cluster.push(entry);
-      clusterEnd = cluster.length === 1 ? end : Math.max(clusterEnd, end);
-    }
-    appendCluster(cluster);
   }
-  return laidOut;
+  if (!hasPlaced) {
+    unplaced.push({
+      course: courseLike,
+      color,
+      pending,
+      ...state,
+      reason: slots.length ? "时间超出标准节次" : "无时间信息",
+    });
+  }
 }
 
-function fitTimetableRows(grid) {
-  if (!grid?.isConnected || !appElements.timetableDialog.open) return;
-  grid.style.setProperty("--timetable-row-height", `${TIMETABLE_MIN_ROW_HEIGHT}px`);
-  grid.getBoundingClientRect();
-
-  let requiredRowHeight = TIMETABLE_MIN_ROW_HEIGHT;
-  for (const block of grid.querySelectorAll(".timetable-course")) {
-    const periodSpan = Math.max(1, Number(block.dataset.periodSpan || 1));
-    requiredRowHeight = Math.max(
-      requiredRowHeight,
-      Math.ceil((block.scrollHeight + 8) / periodSpan),
-    );
+function formatCourseTooltip(course, slot, pending) {
+  const parts = [];
+  parts.push(course.course_name || "未命名课程");
+  if (pending) parts.push("（待选）");
+  if (course.teacher_name) parts.push("教师：" + course.teacher_name);
+  if (slot.weeks) parts.push("周数：" + slot.weeks);
+  if (slot.dayLabel) parts.push("星期：" + slot.dayLabel);
+  parts.push("节次：第" + slot.startPeriod + "-" + slot.endPeriod + "节");
+  if (slot.place) parts.push("地点：" + slot.place);
+  if (course.teaching_place && course.teaching_place !== slot.raw) {
+    parts.push("完整时间地点：" + course.teaching_place);
   }
-  grid.style.setProperty("--timetable-row-height", `${requiredRowHeight}px`);
+  return parts.join("\n");
 }
 
-function scheduleTimetableFit(grid) {
-  if (appState.timetableFitFrame !== null) {
-    window.cancelAnimationFrame(appState.timetableFitFrame);
+function buildCourseBlock(placed) {
+  const stateClasses = [
+    placed.pending ? "is-pending" : "",
+    placed.isFocused ? "is-focused" : "",
+    placed.isConflictHighlight ? "is-conflict-highlight" : "",
+    placed.isContextMuted ? "is-context-muted" : "",
+  ].filter(Boolean).join(" ");
+  const block = element("div", `schedule-course${stateClasses ? ` ${stateClasses}` : ""}`);
+  block.setAttribute("data-color", String(placed.color));
+  block.title = formatCourseTooltip(placed.course, placed.slot, placed.pending);
+  const nameEl = element("strong", "", placed.course.course_name || "未命名课程");
+  block.append(nameEl);
+  if (placed.pending) {
+    block.append(element("span", "schedule-pending-badge", "待选"));
   }
-  appState.timetableFitFrame = window.requestAnimationFrame(() => {
-    appState.timetableFitFrame = null;
-    fitTimetableRows(grid);
-  });
+  if (placed.slot.weeks) {
+    block.append(element("span", "schedule-weeks", placed.slot.weeks));
+  }
+  if (placed.slot.place) {
+    block.append(element("span", "schedule-place", placed.slot.place));
+  }
+  if (placed.course.teacher_name) {
+    block.append(element("span", "schedule-teacher", placed.course.teacher_name));
+  }
+  return block;
 }
 
-function renderTimetable() {
-  const timetable = appState.timetable;
-  if (!timetable) {
-    const empty = element("div", "empty-state");
-    empty.append(element("strong", "", "尚未读取课表"));
-    empty.append(element("p", "", "点击刷新课表，从学校系统读取当前已选课程。"));
-    appElements.timetableContent.replaceChildren(empty);
-    appElements.timetableSummary.textContent = "尚未读取学校课表";
+function scheduleEntriesOverlap(left, right) {
+  return Number(left.dayOfWeek) === Number(right.dayOfWeek)
+    && Number(left.startPeriod) <= Number(right.endPeriod)
+    && Number(right.startPeriod) <= Number(left.endPeriod);
+}
+
+function isConflictFocusCourse(courseLike, conflict) {
+  const focusId = String(conflict?.focusId || "");
+  return Boolean(focusId && String(courseLike.teaching_class_id || courseLike.id || "") === focusId);
+}
+
+function updateMyCoursesHint() {
+  const conflict = appState.scheduleConflict;
+  renderMyCoursesCreditSummary();
+  const creditSummary = myCoursesCreditSummary();
+  if (conflict) {
+    appElements.myCoursesHint.textContent = conflict.focusSlots.length
+      ? `${creditSummary}；冲突查看：${conflict.title}；当前教学班使用蓝色高亮，冲突课程使用红色高亮。`
+      : `${creditSummary}；冲突查看：${conflict.title}；当前教学班的时间地点格式无法解析，暂时无法定位冲突课程。`;
     return;
   }
+  if (appState.myCoursesLoaded) {
+    appElements.myCoursesHint.textContent = `${creditSummary}；学校系统当前返回 ${appState.myCourses.length} 门已选课程；虚化内容为选课清单中的待抢课程；悬停在卡片上以显示完整课程信息。`;
+  }
+}
 
-  const entries = Array.isArray(timetable.entries) ? timetable.entries : [];
-  const unscheduled = Array.isArray(timetable.unscheduled) ? timetable.unscheduled : [];
-  const totalCount = Number(timetable.total_count || appState.myCourses.length || 0);
-  const scheduledCount = Number(timetable.scheduled_count || 0);
-  appElements.timetableSummary.textContent = `${appState.session?.batch_name || "当前批次"} · ${totalCount} 门课程 · ${scheduledCount} 门已排入网格`;
-  appElements.timetableHint.textContent = unscheduled.length
-    ? `另有 ${unscheduled.length} 门课程没有可定位的具体星期与节次，已列在课表下方。`
-    : "课表来自学校系统当前已选课程，不会执行选课或退课操作。";
+function renderMyCoursesSchedule() {
+  const wrap = appElements.myCoursesScheduleWrap;
+  const courses = appState.myCourses;
+  const conflict = appState.scheduleConflict;
 
-  if (!totalCount) {
+  /* Determine pending (cart) items to show */
+  const pendingItems = getPendingMyCourseItems();
+
+  if (!courses.length && !pendingItems.length && !conflict) {
     const empty = element("div", "empty-state");
     empty.append(element("strong", "", "还没有已选课程"));
-    empty.append(element("p", "", "学校系统当前没有返回可放入课表的课程。"));
-    appElements.timetableContent.replaceChildren(empty);
+    empty.append(element("p", "", "抢到课程后会显示在这里，也可能是学校系统暂未返回数据。"));
+    wrap.replaceChildren(empty);
     return;
   }
 
-  const content = document.createDocumentFragment();
-  const scroll = element("div", "timetable-scroll");
-  const grid = element("div", "timetable-grid");
-  grid.setAttribute("role", "grid");
-  grid.setAttribute("aria-label", "周课表，周一至周日，第 1 至 14 节");
+  /* Build color map (enrolled + pending share the same palette space) */
+  const colorMap = buildScheduleColorMap(courses);
+  let pendingColorBase = colorMap.size;
 
-  const corner = element("div", "timetable-corner", "节次");
-  corner.style.gridColumn = "1";
+  const placedSlots = [];
+  const unplaced = [];
+
+  for (const course of courses) {
+    const key = (course.course_name || "未命名课程") + "|" + (course.teacher_name || "");
+    collectScheduleEntries(
+      course,
+      colorMap.get(key) || 0,
+      false,
+      placedSlots,
+      unplaced,
+      { isFocused: isConflictFocusCourse(course, conflict) },
+    );
+  }
+
+  for (const item of pendingItems) {
+    const displayName = item.course_name || item.name || "未命名课程";
+    const teacherName = item.teacher_name || "";
+    const key = displayName + "|" + teacherName;
+    if (!colorMap.has(key)) {
+      colorMap.set(key, pendingColorBase % SCHEDULE_COLORS);
+      pendingColorBase += 1;
+    }
+    collectScheduleEntries(
+      {
+        id: item.id,
+        teaching_class_id: item.id,
+        course_name: displayName,
+        teacher_name: teacherName,
+        teaching_place: item.teaching_place,
+      },
+      colorMap.get(key),
+      true,
+      placedSlots,
+      unplaced,
+      { isFocused: isConflictFocusCourse(item, conflict) },
+    );
+  }
+
+  if (conflict && !placedSlots.some((placed) => placed.isFocused)
+      && !unplaced.some((item) => item.isFocused)) {
+    if (conflict.focusSlots.length) {
+      for (const slot of conflict.focusSlots) {
+        placedSlots.push({
+          course: conflict.course,
+          slot,
+          color: 0,
+          pending: false,
+          isFocused: true,
+        });
+      }
+    } else {
+      unplaced.push({
+        course: conflict.course,
+        color: 0,
+        pending: false,
+        isFocused: true,
+        reason: "当前教学班的时间地点格式无法解析",
+      });
+    }
+  }
+
+  if (conflict) {
+    for (const placed of placedSlots) {
+      placed.isConflictHighlight = !placed.isFocused
+        && conflict.focusSlots.some((focusSlot) => scheduleEntriesOverlap(placed.slot, focusSlot));
+      placed.isContextMuted = !placed.isFocused && !placed.isConflictHighlight;
+    }
+    for (const item of unplaced) {
+      item.isContextMuted = !item.isFocused;
+    }
+  }
+  updateMyCoursesHint();
+
+  /* ---- Build layout ---- */
+  const container = element("div", "schedule-layout");
+
+  /* Left: weekly grid (14 per-period rows) */
+  const gridWrap = element("div", "schedule-grid-wrap");
+
+  const today = new Date().getDay();
+  const todayIndex = today === 0 ? 6 : today - 1;
+
+  const grid = element("div", "schedule-grid");
+  grid.style.gridTemplateColumns = "58px repeat(7, minmax(78px, 1fr))";
+  grid.style.gridTemplateRows = "auto repeat(" + MAX_PERIOD + ", minmax(28px, auto))";
+
+  /* Corner */
+  const corner = element("div", "schedule-corner", "节");
   corner.style.gridRow = "1";
+  corner.style.gridColumn = "1";
   grid.append(corner);
 
-  const dayNames = Array.isArray(timetable.day_names) && timetable.day_names.length === 7
-    ? timetable.day_names
-    : ["周一", "周二", "周三", "周四", "周五", "周六", "周日"];
-  dayNames.forEach((dayName, index) => {
-    const header = element("div", "timetable-day-header", dayName);
-    header.style.gridColumn = String(index + 2);
+  /* Day headers */
+  for (let d = 0; d < 7; d++) {
+    const header = element("div", "schedule-col-header");
+    if (d === todayIndex) header.classList.add("is-today");
+    header.append(element("span", "", DAYS_OF_WEEK[d].label));
     header.style.gridRow = "1";
+    header.style.gridColumn = String(d + 2);
     grid.append(header);
-  });
+  }
 
-  const periodCount = Math.min(14, Math.max(1, Number(timetable.period_count || 14)));
-  for (let period = 1; period <= periodCount; period += 1) {
-    const periodCell = element("div", "timetable-period");
-    const group = period === 1 ? "上午" : period === 6 ? "下午" : period === 11 ? "晚上" : "";
-    if (group) periodCell.append(element("small", "", group));
-    periodCell.append(element("strong", "", String(period)));
-    periodCell.style.gridColumn = "1";
-    periodCell.style.gridRow = String(period + 1);
-    grid.append(periodCell);
-    for (let day = 1; day <= 7; day += 1) {
-      const slot = element(
+  /* Row labels + background cells (one per period) */
+  for (let p = 1; p <= MAX_PERIOD; p++) {
+    const isBreak = BREAK_PERIODS.includes(p);
+    const row = p + 1;
+
+    const label = element("div", "schedule-row-label" + (isBreak ? " is-break" : ""));
+    label.append(element("strong", "", String(p)));
+    label.append(element("small", "", PERIODS[p - 1].timeLabel));
+    label.style.gridRow = String(row);
+    label.style.gridColumn = "1";
+    grid.append(label);
+
+    for (let d = 0; d < 7; d++) {
+      const cell = element("div", "schedule-cell" + (isBreak ? " is-break" : ""));
+      if (d === todayIndex) cell.classList.add("is-today");
+      cell.style.gridRow = String(row);
+      cell.style.gridColumn = String(d + 2);
+      grid.append(cell);
+    }
+  }
+
+  /* Course blocks: group by day|startPeriod|endPeriod, each group spans rows */
+  const stackMap = new Map();
+  for (const placed of placedSlots) {
+    const key = placed.slot.dayOfWeek + "|" + placed.slot.startPeriod + "|" + placed.slot.endPeriod;
+    if (!stackMap.has(key)) stackMap.set(key, []);
+    stackMap.get(key).push(placed);
+  }
+
+  for (const entries of stackMap.values()) {
+    const first = entries[0].slot;
+    const stack = element("div", "schedule-stack");
+    stack.style.gridColumn = String(first.dayOfWeek + 2);
+    stack.style.gridRow = (first.startPeriod + 1) + " / " + (first.endPeriod + 2);
+    for (const placed of entries) {
+      stack.append(buildCourseBlock(placed));
+    }
+    grid.append(stack);
+  }
+
+  gridWrap.append(grid);
+
+  /* Right: non-standard time courses */
+  const nonStandard = element("div", "schedule-nonstandard");
+  nonStandard.append(element("p", "schedule-nonstandard-title", "非标准时间课程"));
+
+  if (unplaced.length) {
+    for (const item of unplaced) {
+      const stateClasses = [
+        item.pending ? "is-pending" : "",
+        item.isFocused ? "is-focused" : "",
+        item.isConflictHighlight ? "is-conflict-highlight" : "",
+        item.isContextMuted ? "is-context-muted" : "",
+      ].filter(Boolean).join(" ");
+      const nsItem = element(
         "div",
-        `timetable-slot${day >= 6 ? " is-weekend" : ""}${period === 6 || period === 11 ? " is-section-start" : ""}`,
+        `schedule-nonstandard-item${stateClasses ? ` ${stateClasses}` : ""}`,
       );
-      slot.style.gridColumn = String(day + 1);
-      slot.style.gridRow = String(period + 1);
-      grid.append(slot);
+      nsItem.setAttribute("data-color", String(item.color));
+      const nsTitleParts = [item.course.course_name || "未命名课程"];
+      if (item.pending) nsTitleParts.push("（待选）");
+      if (item.course.teacher_name) nsTitleParts.push("教师：" + item.course.teacher_name);
+      if (item.course.teaching_place) nsTitleParts.push("时间地点：" + item.course.teaching_place);
+      nsItem.title = nsTitleParts.join("\n");
+      nsItem.append(element("strong", "", item.course.course_name || "未命名课程"));
+      if (item.pending) {
+        nsItem.append(element("span", "schedule-pending-badge", "待选"));
+      }
+      const meta = element("div", "schedule-nonstandard-meta");
+      if (item.course.teacher_name) meta.append(element("span", "", item.course.teacher_name));
+      if (item.course.teaching_place) meta.append(element("span", "", item.course.teaching_place));
+      meta.append(element("span", "", item.reason));
+      nsItem.append(meta);
+      nonStandard.append(nsItem);
     }
-  }
-
-  for (const entry of timetableEntriesWithLanes(entries)) {
-    const start = Math.max(1, Math.min(periodCount, Number(entry.start_period || 1)));
-    const end = Math.max(start, Math.min(periodCount, Number(entry.end_period || start)));
-    const block = element("article", "timetable-course");
-    block.style.gridColumn = String(Number(entry.day) + 1);
-    block.style.gridRow = `${start + 1} / span ${end - start + 1}`;
-    block.style.setProperty("--lane", String(entry.lane || 0));
-    block.style.setProperty("--lanes", String(entry.lanes || 1));
-    block.dataset.periodSpan = String(end - start + 1);
-    block.setAttribute(
-      "aria-label",
-      `${entry.course_name || "未命名课程"}，${entry.day_name || ""}第 ${start} 至 ${end} 节`,
-    );
-    block.title = entry.raw_schedule || entry.course_name || "";
-    block.append(element("strong", "", entry.course_name || "未命名课程"));
-    block.append(
-      element(
-        "span",
-        "",
-        [entry.weeks || "周次待定", `${start}-${end} 节`].filter(Boolean).join(" · "),
-      ),
-    );
-    if (entry.location) block.append(element("span", "", entry.location));
-    if (entry.teacher_name) block.append(element("span", "", entry.teacher_name));
-    grid.append(block);
-  }
-  scroll.append(grid);
-  content.append(scroll);
-
-  const unscheduledSection = element("section", "unscheduled-courses");
-  const unscheduledHeader = element("div", "unscheduled-header");
-  unscheduledHeader.append(element("h3", "", "未提供可排入课表的具体时间"));
-  unscheduledHeader.append(element("span", "", `${unscheduled.length} 门`));
-  unscheduledSection.append(unscheduledHeader);
-  if (!unscheduled.length) {
-    unscheduledSection.append(element("p", "unscheduled-empty", "所有课程均已放入课表网格。"));
   } else {
-    const list = element("div", "unscheduled-list");
-    for (const course of unscheduled) {
-      const row = element("div", "unscheduled-row");
-      const body = element("div");
-      body.append(element("strong", "", course.course_name || "未命名课程"));
-      body.append(
-        element(
-          "span",
-          "",
-          [course.teacher_name, course.teaching_place].filter(Boolean).join(" · ") || "学校暂未提供时间地点",
-        ),
-      );
-      row.append(body, element("span", "unscheduled-reason", course.reason || "未提供具体时间"));
-      list.append(row);
-    }
-    unscheduledSection.append(list);
+    nonStandard.append(element("p", "", "所有课程均在标准时段内。"));
   }
-  content.append(unscheduledSection);
-  appElements.timetableContent.replaceChildren(content);
-  scheduleTimetableFit(grid);
+
+  /* Legend */
+  if (pendingItems.length) {
+    const legend = element("p", "schedule-legend");
+    legend.append(element("i", "legend-dot legend-pending"));
+    legend.append(document.createTextNode("虚化块为选课清单中的待选课程（未实际选上）"));
+    nonStandard.append(legend);
+  }
+
+  container.append(gridWrap, nonStandard);
+  wrap.replaceChildren(container);
 }
 
-function renderTimetableError(message) {
-  const state = element("div", "error-state");
-  state.append(element("strong", "", "课表读取失败"));
-  state.append(element("p", "", message));
-  const actions = element("div", "state-actions");
-  const retry = element("button", "button button-primary", "重新加载课表");
-  retry.type = "button";
-  retry.addEventListener("click", () => loadMyCourses());
-  actions.append(retry);
-  state.append(actions);
-  appElements.timetableContent.replaceChildren(state);
+function switchMyCoursesView(view) {
+  appState.myCoursesView = view;
+  const isGrid = view === "grid";
+  appElements.scheduleViewGrid.classList.toggle("is-active", isGrid);
+  appElements.scheduleViewList.classList.toggle("is-active", !isGrid);
+  appElements.myCoursesScheduleWrap.hidden = !isGrid;
+  appElements.myCoursesList.hidden = isGrid;
+  appElements.myCoursesDialog.classList.toggle("is-wide-schedule", isGrid);
+  if (isGrid) renderMyCoursesSchedule();
+  else renderMyCourses();
 }
+
+function conflictScheduleSlots(classInfo) {
+  return (typeof parseScheduleSlots === "function" ? parseScheduleSlots(classInfo.teaching_place || "") : [])
+    .filter((slot) => (
+      slot.dayOfWeek >= 0
+      && slot.dayOfWeek <= 6
+      && slot.startPeriod >= 1
+      && slot.endPeriod <= MAX_PERIOD
+      && slot.startPeriod <= slot.endPeriod
+    ));
+}
+
+async function openConflictTimetable(course, classInfo) {
+  const focusId = String(classInfo.teaching_class_id || "");
+  const focusCourse = {
+    ...course,
+    id: focusId,
+    teaching_class_id: focusId,
+    teacher_name: classInfo.teacher_name || course.teacher_name || "",
+    teaching_place: classInfo.teaching_place || course.teaching_place || "",
+  };
+  appState.scheduleConflict = {
+    focusId,
+    focusSlots: conflictScheduleSlots(classInfo),
+    course: focusCourse,
+    title: `${course.course_name || "未命名课程"} · ${classInfo.teacher_name || "教师待定"}`,
+  };
+  appElements.myCoursesDialog.showModal();
+  switchMyCoursesView("grid");
+  await loadCart();
+  await loadMyCourses();
+}
+
 
 async function loadMyCourses(silent = false) {
   if (appState.loadingMyCourses) return;
@@ -1881,23 +2608,16 @@ async function loadMyCourses(silent = false) {
   appState.loadingMyCourses = true;
   const preserveExisting = appState.myCoursesLoaded;
   const previousLabel = appElements.refreshMyCourses.textContent;
-  const previousTimetableLabel = appElements.refreshTimetable.textContent;
   appElements.refreshMyCourses.disabled = true;
   appElements.refreshMyCourses.textContent = "刷新中...";
-  appElements.refreshTimetable.disabled = true;
-  appElements.refreshTimetable.textContent = "刷新中...";
   if (!silent && !preserveExisting) {
     const loading = element("div", "empty-state");
     loading.append(element("strong", "", "正在读取已选课程"));
     loading.append(element("p", "", "正在向学校系统查询，请稍候。"));
-    appElements.myCoursesList.replaceChildren(loading);
-    if (appElements.timetableDialog.open) {
-      const timetableLoading = element("div", "empty-state");
-      timetableLoading.append(element("strong", "", "正在读取课表"));
-      timetableLoading.append(element("p", "", "正在向学校系统查询当前已选课程。"));
-      appElements.timetableContent.replaceChildren(timetableLoading);
-      appElements.timetableSummary.textContent = "正在读取学校课表";
-    }
+    const target = appState.myCoursesView === "grid"
+      ? appElements.myCoursesScheduleWrap
+      : appElements.myCoursesList;
+    target.replaceChildren(loading);
   } else if (!silent) {
     appElements.myCoursesHint.textContent = "正在刷新，当前仍显示上次成功结果。";
   }
@@ -1906,18 +2626,13 @@ async function loadMyCourses(silent = false) {
       timeoutMs: SESSION_RECOVERY_TIMEOUT_MS,
     });
     appState.myCourses = Array.isArray(data.courses) ? data.courses : [];
-    appState.timetable = data.timetable && typeof data.timetable === "object"
-      ? data.timetable
-      : fallbackTimetable(appState.myCourses);
     appState.myCoursesLoaded = true;
-    appElements.myCoursesHint.textContent = `学校系统当前返回 ${appState.myCourses.length} 门已选课程。`;
     renderMyCourses();
-    renderTimetable();
+    renderMyCoursesSchedule();
   } catch (error) {
     if (!(error instanceof SessionExpiredError)) {
       if (preserveExisting) {
         appElements.myCoursesHint.textContent = "刷新失败，仍显示上次成功结果。";
-        appElements.timetableHint.textContent = "刷新失败，仍显示上次成功读取的课表。";
         if (!silent) showToast(`已选课程刷新失败：${error.message}`, true);
       } else if (!silent) {
         const errorState = element("div", "error-state");
@@ -1929,16 +2644,16 @@ async function loadMyCourses(silent = false) {
         retry.addEventListener("click", () => loadMyCourses());
         actions.append(retry);
         errorState.append(actions);
-        appElements.myCoursesList.replaceChildren(errorState);
-        if (appElements.timetableDialog.open) renderTimetableError(error.message);
+        const target = appState.myCoursesView === "grid"
+          ? appElements.myCoursesScheduleWrap
+          : appElements.myCoursesList;
+        target.replaceChildren(errorState);
       }
     }
   } finally {
     appState.loadingMyCourses = false;
     appElements.refreshMyCourses.disabled = false;
     appElements.refreshMyCourses.textContent = previousLabel;
-    appElements.refreshTimetable.disabled = false;
-    appElements.refreshTimetable.textContent = previousTimetableLabel;
   }
 }
 
@@ -2028,7 +2743,7 @@ function renderProgress(data) {
         ? pauseAcknowledged ? "已暂停" : "正在暂停"
       : statusNames[course.status] || course.status;
     side.append(element("span", `status-pill ${statusClass}`, statusLabel));
-    side.append(element("span", "p-attempts", `${course.attempts || 0} 次`));
+    side.append(element("span", "p-attempts", `${course.attempts || 0} 次 · 业务失败 ${course.failures || 0} 次`));
     row.append(info, side);
     fragment.append(row);
   }
@@ -2066,6 +2781,46 @@ async function toggleEnrollmentPause() {
   }
 }
 
+async function stopEnrollment() {
+  const taskRunning = Boolean(appState.progress?.running || appState.session?.task_running);
+  if (appState.taskControlPending || !taskRunning) return;
+  if (appState.progress?.stopping || appState.session?.task_stopping) return;
+  appState.taskControlPending = true;
+  if (appState.progress) renderProgress(appState.progress);
+  renderEnrollControls();
+  try {
+    const result = await api("/api/enroll/stop", {
+      method: "POST",
+      timeoutMs: SESSION_RECOVERY_TIMEOUT_MS,
+    });
+    if (appState.session) {
+      appState.session.task_stopping = true;
+      appState.session.task_stopping_reason = "用户请求停止抢课任务";
+    }
+    if (appState.progress) {
+      applyProgressTaskState({
+        ...appState.progress,
+        stopping: true,
+        stopping_reason: "用户请求停止抢课任务",
+      });
+    }
+    showToast(result.message || "已请求停止抢课，等待当前请求结束", false, true);
+    renderProgress(appState.progress);
+    renderEnrollControls();
+    await loadEnrollProgress();
+    await loadSession(false, false);
+  } catch (error) {
+    if (error.requiresManualLogin) showSessionDialog(error.message);
+    else if (!(error instanceof SessionExpiredError)) showToast(error.message, true);
+    await loadEnrollProgress();
+  } finally {
+    appState.taskControlPending = false;
+    if (appState.progress) renderProgress(appState.progress);
+    renderEnrollControls();
+    syncEnrollControls();
+  }
+}
+
 async function loadEnrollProgress() {
   if (appState.loadingProgress) return;
   appState.loadingProgress = true;
@@ -2079,6 +2834,7 @@ async function loadEnrollProgress() {
     appState.loadingProgress = false;
   }
   const cartControlsChanged = applyProgressTaskState(data);
+  applyEnrollSettings(data);
   renderProgress(data);
   updateTaskIndicator();
   setPhasePresentation();
@@ -2106,7 +2862,7 @@ async function loadEnrollProgress() {
     await loadMyCourses(true);
     await loadSession(false, false);
     invalidateCatalogCaches();
-    if (!courseCatalogBlocked() || appState.cacheMode) await refreshCurrentView();
+    if (!courseCatalogBlocked()) await refreshCurrentView();
   }
 }
 
@@ -2120,6 +2876,20 @@ function stopProgressPolling() {
   if (appState.progressTimer) {
     window.clearInterval(appState.progressTimer);
     appState.progressTimer = null;
+  }
+}
+
+function startSessionPolling() {
+  if (appState.sessionTimer) return;
+  appState.sessionTimer = window.setInterval(() => {
+    if (!appState.refreshingPhase) loadSession(false);
+  }, SESSION_POLL_INTERVAL_MS);
+}
+
+function stopSessionPolling() {
+  if (appState.sessionTimer) {
+    window.clearInterval(appState.sessionTimer);
+    appState.sessionTimer = null;
   }
 }
 
@@ -2163,6 +2933,8 @@ appElements.categoryList.addEventListener("click", (event) => {
 });
 
 let searchDebounceTimer = null;
+appElements.filterConflictSwitch.checked = appState.filters.hideConflict;
+appElements.filterFullSwitch.checked = appState.filters.hideFull;
 appElements.courseSearch.addEventListener("input", () => {
   if (searchDebounceTimer) window.clearTimeout(searchDebounceTimer);
   searchDebounceTimer = window.setTimeout(() => {
@@ -2170,8 +2942,6 @@ appElements.courseSearch.addEventListener("input", () => {
     handleSearchInput();
   }, SEARCH_DEBOUNCE_MS);
 });
-appElements.filterConflictSwitch.checked = appState.filters.hideConflict;
-appElements.filterFullSwitch.checked = appState.filters.hideFull;
 appElements.filterConflictSwitch.addEventListener("change", () => {
   appState.filters.hideConflict = appElements.filterConflictSwitch.checked;
   saveFilterPreferences();
@@ -2186,9 +2956,17 @@ appElements.filterFullSwitch.addEventListener("change", () => {
   renderCourses();
   updatePagination();
 });
-appElements.cacheModeSwitch.addEventListener("change", () => {
+appElements.cacheModeSwitch?.addEventListener("change", () => {
   setCacheMode(appElements.cacheModeSwitch.checked);
 });
+appElements.pauseEnroll?.addEventListener("click", () => toggleEnrollPause(true));
+appElements.resumeEnroll?.addEventListener("click", () => toggleEnrollPause(false));
+for (const button of appElements.modeButtons || []) {
+  button.addEventListener("click", () => updateEnrollMode(button.dataset.enrollMode));
+}
+for (const input of [appElements.boostInterval, appElements.normalInterval, appElements.scanInterval, appElements.swapCourseSwitch, appElements.swapRiskConfirm, appElements.swapThreshold]) {
+  input?.addEventListener("change", saveEnrollSettings);
+}
 appElements.campusSelect.addEventListener("change", () => {
   switchCampus(appElements.campusSelect.value);
 });
@@ -2230,39 +3008,20 @@ appElements.openCart.addEventListener("click", async () => {
   appElements.cartDialog.showModal();
 });
 appElements.openMyCourses.addEventListener("click", async () => {
+  appState.scheduleConflict = null;
   appElements.myCoursesDialog.showModal();
+  switchMyCoursesView(appState.myCoursesView);
+  await loadCart();
   await loadMyCourses();
 });
-appElements.openTimetable.addEventListener("click", async () => {
-  appElements.timetableDialog.showModal();
-  renderTimetable();
-  if (!appState.myCoursesLoaded) await loadMyCourses();
-});
-appElements.openSchoolOfficial.addEventListener("click", async () => {
-  appElements.openSchoolOfficial.disabled = true;
-  try {
-    const result = await api("/api/school/open", { method: "POST" });
-    showToast(result.message || "已打开学校官方选课页面", false, true);
-  } catch (error) {
-    if (!(error instanceof SessionExpiredError)) showToast(error.message, true);
-  } finally {
-    appElements.openSchoolOfficial.disabled = false;
-  }
-});
 appElements.refreshMyCourses.addEventListener("click", () => loadMyCourses());
-appElements.refreshTimetable.addEventListener("click", () => loadMyCourses());
-if (typeof window.addEventListener === "function") {
-  window.addEventListener("resize", () => {
-    if (appState.timetableResizeTimer !== null) {
-      window.clearTimeout(appState.timetableResizeTimer);
-    }
-    appState.timetableResizeTimer = window.setTimeout(() => {
-      appState.timetableResizeTimer = null;
-      const grid = appElements.timetableContent.querySelector(".timetable-grid");
-      if (grid) scheduleTimetableFit(grid);
-    }, 120);
-  });
-}
+appElements.scheduleViewGrid.addEventListener("click", () => switchMyCoursesView("grid"));
+appElements.scheduleViewList.addEventListener("click", () => switchMyCoursesView("list"));
+appElements.showPendingSwitch.addEventListener("change", () => {
+  appState.showCartOnSchedule = appElements.showPendingSwitch.checked;
+  renderMyCourses();
+  renderMyCoursesSchedule();
+});
 appElements.openEnrollConfirm.addEventListener("click", () => {
   if (!appState.grabPhase) return;
   appElements.phaseConfirmation.checked = false;
@@ -2275,16 +3034,39 @@ appElements.phaseConfirmation.addEventListener("change", () => {
 });
 appElements.startEnroll.addEventListener("click", startEnrollment);
 appElements.taskControlButton.addEventListener("click", toggleEnrollmentPause);
+appElements.stopEnroll?.addEventListener("click", stopEnrollment);
+appElements.openSchoolRaw?.addEventListener("click", () => {
+  openSchoolRawPage();
+});
+appElements.studentLabel?.addEventListener("click", requestAutomaticRelogin);
 appElements.logout.addEventListener("click", async () => {
   try {
     const result = await api("/api/logout", { method: "POST" });
     if (result.is_error) throw new Error(result.message);
     stopProgressPolling();
-    window.location.assign(versionedPage("/login"));
+    stopSessionPolling();
+    appState.cacheMode = false;
+    clearCacheRefreshTimer();
+    if (appElements.cacheModeSwitch) appElements.cacheModeSwitch.checked = false;
+    try {
+      window.sessionStorage?.removeItem(SESSION_CREDENTIALS_STORAGE_KEY);
+    } catch {}
+    window.location.assign(cleanPagePath("/login"));
   } catch (error) {
     if (!(error instanceof SessionExpiredError)) showToast(error.message, true);
   }
 });
+
+function openSchoolRawPage() {
+  if (!appState.session?.logged_in) {
+    showToast("请先登录，再打开学校原始页面", true);
+    return;
+  }
+  // Same-origin path via the local reverse proxy; reuses the shared school
+  // session, so no second login (which would kick the API session out).
+  const target = `${window.location.origin}/proxy/bkxk.szu.edu.cn/xsxkapp/sys/xsxkapp/*default/index.do`;
+  window.open(target, "_blank", "noopener,noreferrer");
+}
 
 for (const closeButton of document.querySelectorAll("[data-close-dialog]")) {
   closeButton.addEventListener("click", () => {
@@ -2292,16 +3074,29 @@ for (const closeButton of document.querySelectorAll("[data-close-dialog]")) {
   });
 }
 
+window.addEventListener?.("pagehide", clearCacheRefreshTimer);
+
 async function initializeApp() {
-  await loadSession(true);
-  appElements.brandLink.href = versionedPage("/");
-  appElements.sessionLoginLink.href = versionedPage("/login");
+  stripUiQuery();
+  try {
+    const saved = JSON.parse(window.localStorage?.getItem("szu-course-help.cart-preferences.v1") || "null");
+    if (saved && typeof saved === "object") appState.cartPreferences = saved;
+  } catch {}
+  await loadSession(false);
+  if (appState.session?.logged_in) {
+    try { applyEnrollSettings(await planApi("/api/enroll/settings")); } catch (error) {
+      if (error.status !== 404) showToast(`抢课设置读取失败：${planErrorMessage(error)}`, true);
+    }
+  }
+  startSessionPolling();
+  appElements.brandLink.href = cleanPagePath("/");
+  appElements.sessionLoginLink.href = cleanPagePath("/login");
   await loadCart();
-  if (appState.session?.logged_in) await loadCourses();
-  else renderState("尚未登录", "返回登录页完成学号、密码、卡密和验证码校验。");
-  window.setInterval(() => {
-    if (!appState.refreshingPhase && !appState.switchingCampus) loadSession(false);
-  }, 5000);
+  if (appState.session?.logged_in) {
+    await loadCourses();
+  } else {
+    await loadCourses({ cacheOnly: true });
+  }
 }
 
 initializeApp();

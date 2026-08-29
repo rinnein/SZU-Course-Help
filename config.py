@@ -32,6 +32,15 @@ def _bounded_env_int(name: str, default: int, minimum: int, maximum: int) -> int
 # ====================================================================
 SCHOOL_BASE_URL = "http://bkxk.szu.edu.cn/xsxkapp/sys/xsxkapp/"
 
+# Runtime backend selection.  ``auto`` always tries the primary backend first
+# for each request; the active backend is the last backend that completed a
+# request successfully.
+BACKEND_AUTO = "auto"
+BACKEND_PRIMARY = "primary"
+BACKEND_WEBVPN = "webvpn"
+backend_preference = BACKEND_AUTO
+active_backend = BACKEND_PRIMARY
+
 # ====================================================================
 # 用户登录凭据（命令行模式使用，Web UI 模式下由前端传入）
 # ====================================================================
@@ -54,9 +63,8 @@ campus_name = DEFAULT_CAMPUS_NAME
 # ====================================================================
 # 抢课参数
 # ====================================================================
-# 每次抢课请求之间的间隔时间（单位：毫秒）
-# 建议不低于 350ms，过快可能触发服务器风控
-delay: int = 350
+# Legacy fallback interval for callers that do not select a mode.
+delay: int = 1000
 
 # 抢课循环的最大次数（设置足够大以持续抢课）
 count: int = 150000000
@@ -64,6 +72,9 @@ count: int = 150000000
 # 会话过期后，允许"连续"自动重登录失败的最大次数（达到后保护性暂停）。
 # 只要有一次重登录成功，计数即清零，因此长时间的补选/复选阶段可以持续恢复会话。
 relogin_max_retries: int = 5
+
+# 自动重登录失败后的再次尝试间隔。单位为秒。
+relogin_retry_interval_seconds: int = 60
 
 # 每次自动重登录中，OCR 最多尝试的验证码图片数量。
 ocr_relogin_max_attempts: int = 50
@@ -75,37 +86,18 @@ unknown_response_pause_threshold: int = _positive_env_int(
     200,
 )
 
-# Full-catalog search reads school pages sequentially. The browser applies this
-# interval for one tab and the backend enforces it across all concurrent tabs.
+# Full-catalog search pacing and scoped cache settings.
 catalog_page_delay_ms: int = _bounded_env_int(
-    "COURSE_SELECT_CATALOG_PAGE_DELAY_MS",
-    600,
-    minimum=100,
-    maximum=10000,
+    "COURSE_SELECT_CATALOG_PAGE_DELAY_MS", 600, minimum=100, maximum=10000
 )
-
-# Only explicit school throttling responses are retried. These settings control
-# browser-side progress/backoff; the backend pacing gate remains authoritative.
 catalog_throttle_max_retries: int = _bounded_env_int(
-    "COURSE_SELECT_CATALOG_THROTTLE_RETRIES",
-    3,
-    minimum=1,
-    maximum=10,
+    "COURSE_SELECT_CATALOG_THROTTLE_RETRIES", 3, minimum=1, maximum=10
 )
 catalog_throttle_backoff_ms: int = _bounded_env_int(
-    "COURSE_SELECT_CATALOG_THROTTLE_BACKOFF_MS",
-    2000,
-    minimum=250,
-    maximum=30000,
+    "COURSE_SELECT_CATALOG_THROTTLE_BACKOFF_MS", 2000, minimum=250, maximum=30000
 )
-
-# Successful non-empty catalog pages may be viewed later in explicit cache
-# mode. Entries remain account/batch/campus scoped and are never used for writes.
 catalog_cache_ttl_seconds: int = _bounded_env_int(
-    "COURSE_SELECT_CATALOG_CACHE_TTL_SECONDS",
-    21600,
-    minimum=300,
-    maximum=604800,
+    "COURSE_SELECT_CATALOG_CACHE_TTL_SECONDS", 21600, minimum=300, maximum=604800
 )
 
 # ====================================================================
@@ -113,6 +105,11 @@ catalog_cache_ttl_seconds: int = _bounded_env_int(
 # ====================================================================
 # 合并后的完整 Cookie（包含 route、insert_cookie、JSESSIONID、_WEU）
 combined_cookie = ""
+
+# Cookies issued by the WebVPN and CAS hosts are kept separate from the
+# school's own session cookies and are only sent to their matching backend.
+webvpn_cookie = ""
+authserver_cookie = ""
 
 # 登录令牌（服务器返回的 token，用于后续接口鉴权）
 token = ""

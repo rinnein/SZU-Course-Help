@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 import requests
-from fastapi.testclient import TestClient
+from starlette.testclient import TestClient
 
 import app
 import config
@@ -121,6 +121,31 @@ def test_enrolled_endpoint_returns_courses(monkeypatch):
     assert body["courses"][0]["course_name"] == "算法"
 
 
+def test_mode_endpoint_returns_complete_settings_snapshot(monkeypatch):
+    monkeypatch.setitem(enroll_service._settings, "boost_interval_ms", 1200)
+    monkeypatch.setitem(enroll_service._settings, "normal_interval_ms", 12300)
+    monkeypatch.setitem(enroll_service._settings, "scan_interval_ms", 65000)
+    monkeypatch.setitem(enroll_service._settings, "switch_enabled", True)
+    monkeypatch.setitem(enroll_service._settings, "switch_confirmed", True)
+    monkeypatch.setitem(enroll_service._settings, "switch_threshold", 7)
+
+    response = client.post("/api/enroll/mode", json={"mode": "normal"})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["mode"] == "normal"
+    assert body["settings"] == {
+        "boost_interval_ms": 1200,
+        "normal_interval_ms": 12300,
+        "scan_interval_ms": 65000,
+        "switch_enabled": True,
+        "switch_confirmed": True,
+        "switch_threshold": 7,
+        "mode": "normal",
+    }
+    enroll_service._release_enroll_task()
+
+
 # ------------------------------------------------------------------
 # 抢课分类逻辑
 # ------------------------------------------------------------------
@@ -169,6 +194,33 @@ def test_capacity_full_keeps_retrying(tmp_path, monkeypatch):
     # 满员是正常可重试结果，不受旧版 20 次未知返回阈值限制。
     assert len(calls) == 25
     assert db.get_courses_by_status(database.STATUS_IN_PROGRESS)[0]["id"] == "full1"
+
+
+def test_enroll_defaults_and_business_failures_downgrade_modes(tmp_path, monkeypatch):
+    course = _course(id="mode1", name="模式课")
+    db = _prime_cart(monkeypatch, tmp_path, [course])
+    monkeypatch.setattr(config, "count", 5)
+    monkeypatch.setattr(
+        enroll_service.choose_course,
+        "submit_course_selection",
+        lambda *_args: Resp("该课程超过课容量", code="0"),
+    )
+    assert enroll_service.get_enroll_settings()["boost_interval_ms"] == 1000
+    assert enroll_service.get_enroll_settings()["normal_interval_ms"] == 10000
+    assert enroll_service.get_enroll_settings()["scan_interval_ms"] == 60000
+
+    assert enroll_service.reserve_enroll_task()
+    try:
+        enroll_service._reset_progress([course])
+        assert enroll_service.grab_courses([course]) == enroll_service.GrabOutcome.CONTINUE
+        assert enroll_service.get_enroll_task_state()["mode"] == "normal"
+        monkeypatch.setattr(config, "count", 10)
+        assert enroll_service.grab_courses([course]) == enroll_service.GrabOutcome.CONTINUE
+        assert enroll_service.get_enroll_task_state()["mode"] == "scan"
+        row = db.get_courses_by_status(database.STATUS_IN_PROGRESS)[0]
+        assert row["id"] == "mode1"
+    finally:
+        enroll_service._release_enroll_task()
 
 
 def test_transient_rate_limit_takes_priority_over_broad_terminal_wording(tmp_path, monkeypatch):

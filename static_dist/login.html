@@ -6,7 +6,7 @@
   <meta name="color-scheme" content="light">
   <title>登录 | 深大抢课助手</title>
   <link rel="icon" href="/favicon.ico">
-  <link rel="stylesheet" href="/styles.css?build=20260829.1">
+  <link rel="stylesheet" href="/styles.css?build=20260829.2">
 </head>
 <body class="login-page">
   <section class="login-visual" aria-label="深大抢课助手">
@@ -29,7 +29,7 @@
       <header class="login-header">
         <p class="eyebrow">本地安全登录</p>
         <h1>进入抢课工作台</h1>
-        <p>首次登录请按图中提示，依次点击四个汉字。</p>
+        <p>获取验证码后，可点击"自动识别"自动填入，或手动点击四个汉字。</p>
       </header>
 
       <form id="loginForm" class="login-form" novalidate>
@@ -46,10 +46,30 @@
           </span>
         </label>
 
-        <label class="field">
-          <span>Card Key V3</span>
-          <textarea id="cardKey" name="card_key" rows="3" spellcheck="false" autocomplete="off" placeholder="启动终端后生成的学号专属卡密" required></textarea>
+        <label class="remember-row">
+          <input id="rememberCredentials" type="checkbox">
+          <span>记住账号密码（仅保存在本浏览器）</span>
         </label>
+
+        <fieldset class="backend-fieldset">
+          <legend>访问后端</legend>
+          <div class="backend-options">
+            <label class="backend-option">
+              <input type="radio" name="backend" value="auto" checked>
+              <span><strong>自动</strong><small>优先主站，故障时切换 WebVPN</small></span>
+            </label>
+            <label class="backend-option">
+              <input type="radio" name="backend" value="primary">
+              <span><strong>主站</strong><small>仅使用 bkxk.szu.edu.cn</small></span>
+            </label>
+            <label class="backend-option">
+              <input type="radio" name="backend" value="webvpn">
+              <span><strong>WebVPN</strong><small>使用统一认证后的备用入口</small></span>
+            </label>
+          </div>
+          <div id="backendStatus" class="backend-status" role="status" aria-live="polite">当前后端：自动（优先主站）</div>
+          <button id="webvpnAuthButton" class="button button-quiet button-block" type="button" hidden>完成 WebVPN 统一认证</button>
+        </fieldset>
 
         <fieldset class="captcha-fieldset">
           <legend>
@@ -64,8 +84,14 @@
               <span id="captchaStatusDetail">正在准备本地登录环境。</span>
             </div>
           </div>
-          <div class="captcha-actions">
+          <div id="captchaWebvpnAuth" class="captcha-webvpn-auth" hidden>
+            <strong>需要 WebVPN 统一认证</strong>
+            <span>验证码接口正在等待 WebVPN 登录，请先完成统一认证。</span>
+            <button id="captchaWebvpnAuthButton" class="button button-primary" type="button">完成 WebVPN 统一认证</button>
+          </div>
+          <div id="captchaActions" class="captcha-actions">
             <button id="undoPoint" class="button button-quiet" type="button" disabled>撤销一点</button>
+            <button id="solveCaptcha" class="button button-quiet" type="button" disabled>自动识别</button>
             <button id="refreshCaptcha" class="button button-quiet" type="button">刷新验证码</button>
           </div>
         </fieldset>
@@ -76,11 +102,16 @@
         </button>
       </form>
 
-      <p class="privacy-note">密码仅保存在本次进程内存中，用于会话过期后的 OCR 自动重登录。</p>
+      <a class="button button-secondary button-block" href="/offline" target="_blank" rel="noopener">
+        查看本地缓存
+      </a>
+      <p class="offline-note">无需登录即可查阅曾经加载过的课程和本地选课清单。</p>
+
+      <p class="privacy-note">勾选"记住账号密码"后，学号以明文、密码经本机 AES-GCM 加密后保存在本浏览器本地，下次自动解密填充；不勾选则仅保存在本次进程内存中，用于会话过期后的 OCR 自动重登录。</p>
     </div>
   </main>
 
   <noscript>此页面需要启用 JavaScript。</noscript>
-  <script src="/login.js?build=20260829.1" defer></script>
+  <script src="/login.js?build=20260829.2" defer></script>
 </body>
 </html>

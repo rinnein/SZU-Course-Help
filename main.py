@@ -1,40 +1,14 @@
-"""Terminal entry point for the Shenzhen University course helper."""
+"""Terminal entry point for the Shenzhen University course helper.
+
+The student number and Card Key are now entered on the Web login page itself;
+the terminal only boots the local service and opens the browser.
+"""
 
 from __future__ import annotations
 
-import re
 import sys
 
 from logging_config import configure_logging
-from security.key_manager import (
-    KeyManagementError,
-    generate_card_key,
-    get_or_create_key_pair,
-    get_public_key_fingerprint,
-)
-
-STUDENT_ID_PATTERN = re.compile(r"^\d{6,12}$")
-STUDENT_ID_FORMAT_HINT = "纯数字，长度 6 至 12 位"
-
-
-def safe_input(prompt: str) -> str:
-    """Read terminal input while handling Ctrl+C and closed stdin cleanly."""
-    try:
-        return input(prompt).strip()
-    except (KeyboardInterrupt, EOFError):
-        print("\n已取消，程序安全退出。")
-        raise SystemExit(0) from None
-
-
-def confirm_input(prompt: str) -> bool:
-    """Read a strict yes/no answer."""
-    while True:
-        choice = safe_input(prompt).lower()
-        if choice in {"y", "yes"}:
-            return True
-        if choice in {"n", "no"}:
-            return False
-        print("输入无效，请输入 Y 或 N。")
 
 
 def print_separator(char: str = "=", width: int = 64) -> None:
@@ -49,51 +23,13 @@ def print_banner() -> None:
     print_separator()
 
 
-def read_student_id() -> str:
-    """Prompt until a syntactically valid student number is entered."""
-    while True:
-        student_id = safe_input("\n请输入需要生成卡密的学号: ")
-        if STUDENT_ID_PATTERN.fullmatch(student_id):
-            return student_id
-        print(f"学号格式无效，要求为{STUDENT_ID_FORMAT_HINT}。")
-
-
-def issue_card_key() -> tuple[str, str]:
-    """Issue and display one student-bound card key at startup."""
-    student_id = read_student_id()
-    print("\n正在加载本机签名身份并生成卡密...")
-    private_key = get_or_create_key_pair()
-    card_key = generate_card_key(student_id, private_key)
-
-    print()
-    print_separator()
-    print(f"  学号: {student_id}")
-    print(f"  密钥指纹: {get_public_key_fingerprint()}")
-    print("  卡密:")
-    print(f"  {card_key}")
-    print()
-    print("  卡密与该学号绑定，长期有效；旧版 v2 卡密不再兼容。")
-    print_separator()
-    return student_id, card_key
-
-
-def start_course_system(student_id: str, card_key: str) -> None:
-    """Start the local-only FastAPI service and prefill the login screen."""
-    import logic
-
-    print("\n正在检查 OCR 自动重登录环境...")
-    ocr_ready, ocr_message = logic.check_ocr_runtime()
-    if ocr_ready:
-        print(f"OCR 检查通过: {ocr_message}")
-    else:
-        print(f"OCR 检查警告: {ocr_message}")
-        print("手动登录仍可使用，但学校会话过期后需要再次手动登录。")
-
+def start_course_system() -> None:
+    """Start the local-only FastAPI service; the login page issues the card key."""
     import app
 
-    app.configure_runtime_prefill(student_id, card_key)
     print("\n正在启动本地选课界面...")
     print(f"访问地址: {app.get_login_url()}")
+    print("登录时只需填写学号和密码，系统会自动为本机签发并校验 Card Key。")
     print("当前为预选阶段时，请只浏览和整理课程，不要启动抢课。")
     print("保持本终端窗口开启。\n")
     print_separator("-")
@@ -101,19 +37,10 @@ def start_course_system(student_id: str, card_key: str) -> None:
 
 
 def main() -> None:
-    """Generate a card key first, then optionally enter the Web UI."""
+    """Boot the local Web UI; login and Card Key generation happen in the page."""
     configure_logging()
     print_banner()
-    try:
-        student_id, card_key = issue_card_key()
-    except (KeyManagementError, OSError, ValueError) as exc:
-        print(f"\n卡密生成失败: {exc}")
-        raise SystemExit(1) from exc
-
-    if not confirm_input("\n是否进入选课系统？(Y/N): "):
-        print("\n已生成卡密，未启动选课系统。")
-        return
-    start_course_system(student_id, card_key)
+    start_course_system()
 
 
 if __name__ == "__main__":

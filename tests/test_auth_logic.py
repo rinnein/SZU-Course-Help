@@ -65,9 +65,34 @@ def test_ocr_retry_is_bounded(monkeypatch):
 
 def test_ocr_relogin_default_attempt_limit_is_fifty():
     assert config.ocr_relogin_max_attempts == 50
+    assert config.relogin_max_retries == 5
+    assert config.relogin_retry_interval_seconds == 60
     assert logic.verify_vcode.__defaults__ == (50,)
     assert auth_service.attempt_ocr_relogin.__defaults__ == (50,)
     assert auth_service.attempt_automatic_relogin.__defaults__ == (50,)
+
+
+def test_automatic_relogin_uses_login_page_ocr_flow(monkeypatch):
+    monkeypatch.setattr(config, "student_id", "2024110122")
+    monkeypatch.setattr(config, "password", "browser-secret")
+    observed = []
+    monkeypatch.setattr(
+        logic,
+        "verify_vcode_login_flow",
+        lambda max_attempts=50: observed.append(
+            (max_attempts, config.student_id, config.password, config.backend_preference)
+        ) or ("vtoken", "route=a", "encrypted", "1-2,3-4,5-6,7-8"),
+    )
+
+    result = auth_service.attempt_ocr_relogin(
+        max_attempts=7,
+        student_id="2024110122",
+        password="browser-secret",
+        backend="primary",
+    )
+
+    assert result == ("vtoken", "route=a", "encrypted", "1-2,3-4,5-6,7-8")
+    assert observed == [(7, "2024110122", "browser-secret", config.BACKEND_PRIMARY)]
 
 
 def test_school_password_protocol_matches_known_vectors():
@@ -223,6 +248,43 @@ def test_automatic_relogin_updates_runtime_state(monkeypatch):
     assert "password" not in snapshot
 
 
+def test_automatic_relogin_accepts_login_page_backend_and_credentials(monkeypatch):
+    monkeypatch.setattr(config, "student_id", "old-student")
+    monkeypatch.setattr(config, "password", "old-secret")
+    contexts = []
+
+    def fake_ocr(max_attempts, *, student_id=None, password=None, backend=None):
+        contexts.append((student_id, password, backend))
+        assert config.student_id == "2024110122"
+        assert config.password == "browser-secret"
+        assert config.backend_preference == config.BACKEND_PRIMARY
+        return "vtoken", "route=a", "encrypted", "1-2,3-4,5-6,7-8"
+
+    monkeypatch.setattr(auth_service, "attempt_ocr_relogin", fake_ocr)
+    monkeypatch.setattr(
+        auth_service,
+        "perform_school_login",
+        lambda *_args: {
+            "success": True,
+            "cookie": "JSESSIONID=browser",
+            "name": "Tester",
+            "token": "browser-token",
+        },
+    )
+    monkeypatch.setattr(auth_service, "refresh_elective_batch", lambda *_args: None)
+
+    success, error = auth_service.attempt_automatic_relogin(
+        max_attempts=1,
+        student_id="2024110122",
+        password="browser-secret",
+        backend="primary",
+    )
+
+    assert success is True
+    assert error == ""
+    assert contexts == [(None, None, None)]
+
+
 def test_failed_automatic_relogin_invalidates_school_session(monkeypatch):
     monkeypatch.setattr(config, "student_id", "2024110122")
     monkeypatch.setattr(config, "password", "secret")
@@ -246,6 +308,55 @@ def test_failed_automatic_relogin_invalidates_school_session(monkeypatch):
     assert snapshot["relogin_status"] == "failed"
     assert snapshot["relogin_in_progress"] is False
     assert "ocr failed" in snapshot["relogin_message"]
+
+
+def test_automatic_relogin_stops_after_five_failures(monkeypatch):
+    monkeypatch.setattr(config, "student_id", "2024110122")
+    monkeypatch.setattr(config, "password", "secret")
+    monkeypatch.setattr(config, "relogin_retry_interval_seconds", 0)
+    calls = []
+
+    def fail_ocr(max_attempts=config.ocr_relogin_max_attempts):
+        calls.append(max_attempts)
+        raise RuntimeError("ocr failed")
+
+    monkeypatch.setattr(auth_service, "attempt_ocr_relogin", fail_ocr)
+
+    for _ in range(config.relogin_max_retries):
+        success, _ = auth_service.attempt_automatic_relogin(max_attempts=1)
+        assert success is False
+
+    success, error = auth_service.attempt_automatic_relogin(max_attempts=1)
+
+    assert success is False
+    assert "停止后台尝试" in error
+    assert len(calls) == config.relogin_max_retries
+    snapshot = auth_service.get_session_snapshot()
+    assert snapshot["relogin_failure_count"] == config.relogin_max_retries
+    assert snapshot["relogin_retry_after"] == 0
+
+
+def test_automatic_relogin_respects_sixty_second_failure_cooldown(monkeypatch):
+    monkeypatch.setattr(config, "student_id", "2024110122")
+    monkeypatch.setattr(config, "password", "secret")
+    calls = []
+    monkeypatch.setattr(
+        auth_service,
+        "attempt_ocr_relogin",
+        lambda max_attempts=config.ocr_relogin_max_attempts: (
+            calls.append(max_attempts),
+            (_ for _ in ()).throw(RuntimeError("ocr failed")),
+        )[1],
+    )
+
+    first_success, _ = auth_service.attempt_automatic_relogin(max_attempts=1)
+    second_success, second_error = auth_service.attempt_automatic_relogin(max_attempts=1)
+
+    assert first_success is False
+    assert second_success is False
+    assert "秒后重试" in second_error
+    assert calls == [1]
+    assert 0 < auth_service.get_session_snapshot()["relogin_retry_after"] <= 60
 
 
 def test_automatic_relogin_exposes_running_state(monkeypatch):
@@ -345,3 +456,45 @@ def test_batch_refresh_failure_keeps_restored_school_session(monkeypatch):
     assert snapshot["logged_in"] is True
     assert snapshot["relogin_status"] == "success"
     assert "批次暂未刷新" in snapshot["relogin_message"]
+
+
+def test_login_state_persists_and_restores_across_process_state(monkeypatch, tmp_path):
+    monkeypatch.setenv("COURSE_SELECT_DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(config, "student_id", "2024110122")
+    monkeypatch.setattr(config, "password", "secret")
+    monkeypatch.setattr(config, "token", "token")
+    monkeypatch.setattr(config, "combined_cookie", "cookie")
+    monkeypatch.setattr(config, "elective_batch_code", "batch")
+    monkeypatch.setattr(config, "elective_batch_name", "复选阶段")
+
+    auth_service._persist_current_session()
+    persisted = (tmp_path / "session_state.bin").read_bytes()
+    assert b"secret" not in persisted
+    assert b"token" not in persisted
+    config.student_id = ""
+    config.password = ""
+    config.token = ""
+    config.combined_cookie = ""
+    config.elective_batch_code = ""
+    config.elective_batch_name = ""
+
+    assert auth_service.restore_login_state() == "2024110122"
+    assert auth_service.consume_restored_session_validation() is True
+    assert auth_service.consume_restored_session_validation() is False
+    assert config.password == "secret"
+    assert config.token == "token"
+    assert config.combined_cookie == "cookie"
+    assert config.elective_batch_name == "复选阶段"
+
+
+def test_clear_login_state_removes_persisted_session(monkeypatch, tmp_path):
+    monkeypatch.setenv("COURSE_SELECT_DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(config, "student_id", "2024110122")
+    monkeypatch.setattr(config, "password", "secret")
+    monkeypatch.setattr(config, "token", "token")
+    monkeypatch.setattr(config, "combined_cookie", "cookie")
+    auth_service._persist_current_session()
+
+    auth_service.clear_login_state()
+
+    assert not (tmp_path / "session_state.bin").exists()

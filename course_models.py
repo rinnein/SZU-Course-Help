@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import asdict, dataclass
 from typing import Any
 
@@ -32,6 +33,19 @@ def _as_dict_list(value: Any) -> list[dict[str, Any]]:
     return [item for item in value if isinstance(item, dict)]
 
 
+def time_signature(value: Any) -> str:
+    """Normalize the stable day/period portion of a school schedule string."""
+    text = _as_string(value).strip()
+    if not text:
+        return ""
+    match = re.search(r"(星期[一二三四五六日天]|周[一二三四五六日天]).{0,12}?([0-9]+\s*[-至]\s*[0-9]+节?)", text)
+    if match:
+        day = match.group(1).replace("周", "星期")
+        periods = re.sub(r"\s+", "", match.group(2)).replace("至", "-")
+        return f"{day}-{periods}"
+    return re.sub(r"\s+", " ", text)
+
+
 @dataclass(frozen=True, slots=True)
 class TeachingClass:
     """One teaching-class option nested under a school course."""
@@ -59,6 +73,7 @@ class TeachingClass:
     number_of_selected: str
     has_test: str
     remote_teach: str
+    time_signature: str
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> TeachingClass:
@@ -86,6 +101,7 @@ class TeachingClass:
             number_of_selected=_as_string(data.get("numberOfSelected")),
             has_test=_as_string(data.get("hasTest")),
             remote_teach=_as_string(data.get("remoteTeach")),
+            time_signature=time_signature(data.get("teachingPlace")),
         )
 
 
@@ -187,6 +203,7 @@ class TeachingClassView:
     is_conflict: str
     number_of_selected: str
     course_number: str
+    time_signature: str
 
     @classmethod
     def from_school_class(cls, item: TeachingClass) -> TeachingClassView:
@@ -204,6 +221,7 @@ class TeachingClassView:
             is_conflict=item.is_conflict,
             number_of_selected=item.number_of_selected,
             course_number=item.course_number,
+            time_signature=item.time_signature,
         )
 
 

@@ -2,6 +2,122 @@
 
 const REQUEST_TIMEOUT_MS = 30000;
 const CAPTCHA_IMAGE_TIMEOUT_MS = 8000;
+const CREDENTIALS_STORAGE_KEY = "szu.loginCredentials.v1";
+const SESSION_CREDENTIALS_STORAGE_KEY = "szu.loginSessionCredentials.v1";
+
+/* ------------------------------------------------------------------
+   Password obfuscation via Web Crypto AES-GCM.
+   The key is derived (PBKDF2) from the origin + student number so the
+   stored blob is not plaintext and cannot be trivially replayed on another
+   origin.  This is browser-local protection, not a substitute for OS-level
+   credential stores.
+   ------------------------------------------------------------------ */
+
+function _b64encode(bytes) {
+  let binary = "";
+  for (const b of bytes) binary += String.fromCharCode(b);
+  return btoa(binary);
+}
+
+function _b64decode(str) {
+  const binary = atob(str);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return bytes;
+}
+
+async function _deriveKey(studentId) {
+  const enc = new TextEncoder();
+  const baseKey = await crypto.subtle.importKey(
+    "raw",
+    enc.encode(`${window.location.origin}|${studentId}`),
+    { name: "PBKDF2" },
+    false,
+    ["deriveKey"],
+  );
+  return crypto.subtle.deriveKey(
+    {
+      name: "PBKDF2",
+      salt: enc.encode("szu-course-help/salt-v1"),
+      iterations: 100000,
+      hash: "SHA-256",
+    },
+    baseKey,
+    { name: "AES-GCM", length: 256 },
+    false,
+    ["encrypt", "decrypt"],
+  );
+}
+
+async function _encryptPassword(studentId, password) {
+  const key = await _deriveKey(studentId);
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const enc = new TextEncoder();
+  const cipherBuf = await crypto.subtle.encrypt(
+    { name: "AES-GCM", iv },
+    key,
+    enc.encode(password),
+  );
+  return `${_b64encode(iv)}.${_b64encode(new Uint8Array(cipherBuf))}`;
+}
+
+async function _decryptPassword(studentId, blob) {
+  const [ivPart, dataPart] = String(blob).split(".");
+  if (!ivPart || !dataPart) return "";
+  const key = await _deriveKey(studentId);
+  const iv = _b64decode(ivPart);
+  const data = _b64decode(dataPart);
+  const plainBuf = await crypto.subtle.decrypt({ name: "AES-GCM", iv }, key, data);
+  return new TextDecoder().decode(plainBuf);
+}
+
+async function loadSavedCredentials() {
+  try {
+    const raw = localStorage.getItem(CREDENTIALS_STORAGE_KEY);
+    if (!raw) return null;
+    const data = JSON.parse(raw);
+    if (!data || typeof data !== "object") return null;
+    const studentId = typeof data.student_id === "string" ? data.student_id : "";
+    const blob = typeof data.blob === "string" ? data.blob : "";
+    if (!studentId || !blob) return null;
+    const password = await _decryptPassword(studentId, blob);
+    return { student_id: studentId, password };
+  } catch {
+    return null;
+  }
+}
+
+async function saveCredentials(studentId, password) {
+  try {
+    const blob = await _encryptPassword(studentId, password);
+    localStorage.setItem(
+      CREDENTIALS_STORAGE_KEY,
+      JSON.stringify({ student_id: studentId, blob }),
+    );
+  } catch {
+    /* crypto / localStorage 不可用时静默忽略 */
+  }
+}
+
+async function saveSessionCredentials(studentId, password, backend) {
+  try {
+    const blob = await _encryptPassword(studentId, password);
+    window.sessionStorage.setItem(
+      SESSION_CREDENTIALS_STORAGE_KEY,
+      JSON.stringify({ student_id: studentId, backend, blob }),
+    );
+  } catch {
+    /* 当前浏览器不支持会话存储时，不阻断正常登录。 */
+  }
+}
+
+function clearSavedCredentials() {
+  try {
+    localStorage.removeItem(CREDENTIALS_STORAGE_KEY);
+  } catch {
+    /* localStorage 不可用时静默忽略 */
+  }
+}
 
 class ApiError extends Error {
   constructor(message, { status = 0, code = "UNKNOWN_ERROR", retryable = false } = {}) {
@@ -19,8 +135,11 @@ const loginState = {
   captchaFailureMessage: "",
   points: [],
   loadingCaptcha: false,
+  solvingCaptcha: false,
   submitting: false,
-  uiCacheToken: "",
+  backend: "auto",
+  webvpnAuthTimer: 0,
+  webvpnAuthRequested: false,
 };
 
 const loginElements = {
@@ -28,7 +147,7 @@ const loginElements = {
   studentId: document.querySelector("#studentId"),
   password: document.querySelector("#password"),
   passwordToggle: document.querySelector("#passwordToggle"),
-  cardKey: document.querySelector("#cardKey"),
+  rememberCredentials: document.querySelector("#rememberCredentials"),
   phaseNotice: document.querySelector("#phaseNotice"),
   stage: document.querySelector("#captchaStage"),
   image: document.querySelector("#captchaImage"),
@@ -38,14 +157,20 @@ const loginElements = {
   statusDetail: document.querySelector("#captchaStatusDetail"),
   undo: document.querySelector("#undoPoint"),
   refresh: document.querySelector("#refreshCaptcha"),
+  solveCaptcha: document.querySelector("#solveCaptcha"),
   message: document.querySelector("#loginMessage"),
   submit: document.querySelector("#loginButton"),
+  backendStatus: document.querySelector("#backendStatus"),
+  webvpnAuthButton: document.querySelector("#webvpnAuthButton"),
+  captchaWebvpnAuth: document.querySelector("#captchaWebvpnAuth"),
+  captchaWebvpnAuthButton: document.querySelector("#captchaWebvpnAuthButton"),
+  captchaActions: document.querySelector("#captchaActions"),
 };
 
 const captchaStatusCopy = {
   idle: ["准备获取验证码", "正在准备本地登录环境。"],
   loading: ["正在获取验证码", "正在连接学校选课系统，请稍候。"],
-  ready: ["验证码已就绪", "请按顶部提示依次点击四个汉字。"],
+  ready: ["验证码已就绪", "点击“自动识别”自动填入，或按顶部提示依次点击四个汉字。"],
   unavailable: [
     "当前时段暂无验证码",
     "学校当前没有返回登录验证码，请等待选课开放或维护结束后再试。",
@@ -58,33 +183,174 @@ function setLoginMessage(message, success = false) {
   loginElements.message.classList.toggle("is-success", success);
 }
 
+function selectedBackend() {
+  return document.querySelector("input[name='backend']:checked")?.value || "auto";
+}
+
+function setBackendPresentation(payload = {}) {
+  const preference = payload.preference || loginState.backend || "auto";
+  loginState.backend = preference;
+  const preferenceLabel = payload.preference_label || (preference === "auto" ? "自动（优先主站）" : preference === "webvpn" ? "WebVPN 备用" : "主站");
+  const activeLabel = payload.active_backend_label ? `；当前后端：${payload.active_backend_label}` : "";
+  loginElements.backendStatus.textContent = `访问策略：${preferenceLabel}${activeLabel}`;
+  const webvpnReady = Boolean(payload.webvpn_authenticated || payload.authenticated);
+  const authNeeded = Boolean(payload.requires_webvpn_auth) || loginState.webvpnAuthRequested;
+  loginElements.webvpnAuthButton.hidden = (!authNeeded && preference !== "webvpn") || webvpnReady;
+  if (webvpnReady) loginElements.webvpnAuthButton.textContent = "WebVPN 已认证";
+}
+
+async function selectBackend(value) {
+  loginState.backend = value;
+  loginState.webvpnAuthRequested = value === "webvpn";
+  if (value === "webvpn") {
+    // Clear the previous primary-server captcha immediately.  Otherwise the
+    // old image remains visible while the backend-selection request is in
+    // flight and can be mistaken for a WebVPN captcha.
+    loginState.captcha = null;
+    clearCaptchaPoints();
+    clearCaptchaImage();
+    setCaptchaStatus(
+      "webvpn-auth-required",
+      "需要 WebVPN 统一认证",
+      "当前选择 WebVPN，但验证码暂时无法获取，请先完成统一认证。",
+    );
+    setLoginMessage("请先完成 WebVPN 统一认证", false);
+  } else {
+    loginElements.stage.hidden = false;
+    loginElements.captchaWebvpnAuth.hidden = true;
+    loginElements.captchaActions.hidden = false;
+  }
+  try {
+    const payload = await requestJson("/api/backend/select", {
+      method: "POST",
+      body: JSON.stringify({ backend: value }),
+    });
+    setBackendPresentation(payload);
+    if (payload.requires_webvpn_auth) {
+      setCaptchaStatus(
+        "webvpn-auth-required",
+        "需要 WebVPN 统一认证",
+        "当前选择 WebVPN，但验证码暂时无法获取，请先完成统一认证。",
+      );
+      setLoginMessage("请先完成 WebVPN 统一认证", false);
+      return;
+    }
+    await loadCaptcha();
+  } catch (error) {
+    setLoginMessage(error instanceof Error ? error.message : "后端切换失败");
+  }
+}
+
 function updateLoginControls() {
   const captchaReady = loginState.captchaStatus === "ready" && Boolean(loginState.captcha);
-  const busy = loginState.loadingCaptcha || loginState.submitting;
+  const busy = loginState.loadingCaptcha || loginState.submitting || loginState.solvingCaptcha;
   loginElements.refresh.disabled = busy;
   loginElements.undo.disabled = busy || !captchaReady || loginState.points.length === 0;
-  loginElements.submit.disabled = loginState.submitting || !captchaReady;
+  loginElements.solveCaptcha.disabled = busy || !captchaReady;
+  loginElements.submit.disabled = loginState.submitting || loginState.solvingCaptcha || !captchaReady;
+  loginElements.solveCaptcha.textContent = loginState.solvingCaptcha ? "识别中…" : "自动识别";
 }
+
+function isValidStudentId(value) {
+  return /^\d{6,12}$/.test(String(value || "").trim());
+}
+
+async function fetchCardKeyForStudent(studentId) {
+  const result = await requestJson("/api/card_key", {
+    method: "POST",
+    body: JSON.stringify({ student_id: studentId }),
+  });
+  if (!result || typeof result.card_key !== "string" || !result.card_key.startsWith("SZU3.")) {
+    throw new ApiError("本地卡密生成失败，请稍后重试", { code: "CARD_KEY_INVALID_RESPONSE" });
+  }
+  return result.card_key;
+}
+
 
 function setCaptchaStatus(status, title = "", detail = "") {
   const fallback = captchaStatusCopy[status] || captchaStatusCopy.error;
+  const webvpnFallback = status === "webvpn-auth-required"
+    || (loginState.backend === "webvpn" && status !== "ready" && status !== "loading");
   loginState.captchaStatus = status;
   loginElements.stage.dataset.state = status;
+  loginElements.stage.hidden = webvpnFallback;
   loginElements.stage.setAttribute("aria-busy", String(status === "loading"));
   loginElements.stage.setAttribute("aria-disabled", String(status !== "ready"));
+  loginElements.captchaActions.hidden = webvpnFallback;
   loginElements.statusTitle.textContent = title || fallback[0];
   loginElements.statusDetail.textContent = detail || fallback[1];
+  loginElements.captchaWebvpnAuth.hidden = !webvpnFallback && status !== "webvpn-auth-required";
+  if (webvpnFallback) {
+    const detailElement = loginElements.captchaWebvpnAuth.querySelector("span");
+    if (detailElement) {
+      detailElement.textContent = "当前选择 WebVPN，但验证码暂时无法获取。请先完成统一认证后重试。";
+    }
+  }
   loginElements.refresh.textContent = status === "ready" ? "刷新验证码" : "重新获取验证码";
   updateLoginControls();
 }
 
-function versionedPage(path) {
-  const queryToken = new URLSearchParams(window.location.search).get("ui") || "";
-  const token = loginState.uiCacheToken || queryToken;
-  if (!token) return path;
+
+async function solveCaptcha() {
+  if (loginState.solvingCaptcha || loginState.submitting) return;
+  if (!loginState.captcha || loginState.captchaStatus !== "ready") return;
+
+  loginState.solvingCaptcha = true;
+  updateLoginControls();
+  clearCaptchaPoints();
+  setLoginMessage("正在自动识别验证码...", true);
+
+  try {
+    const result = await requestJson("/api/captcha/solve", {
+      method: "POST",
+      body: JSON.stringify({
+        imageUrl: loginState.captcha.imageUrl,
+        vtoken: loginState.captcha.vtoken,
+        cookie: loginState.captcha.cookie,
+      }),
+    });
+    if (result.captcha) {
+      loginState.captcha = result.captcha;
+      await loadCaptchaImage(result.captcha.imageUrl);
+      renderCaptchaPoints();
+    }
+    const points = result.points;
+    if (Array.isArray(points) && points.length === 4) {
+      loginState.points = points.map((p) => {
+        const x = Math.max(0, Math.min(250, Math.round(p[0])));
+        const y = Math.max(0, Math.min(80, Math.round(p[1])));
+        return [x, y];
+      });
+      renderCaptchaPoints();
+      setLoginMessage("已自动识别四个汉字，可直接登录", true);
+    } else {
+      setLoginMessage(result.message || "OCR 未能识别，请手动点击四个汉字");
+    }
+  } catch (error) {
+    setLoginMessage(error instanceof Error ? error.message : "OCR 识别失败，请手动点击");
+  } finally {
+    loginState.solvingCaptcha = false;
+    updateLoginControls();
+  }
+}
+
+function cleanPagePath(path) {
   const url = new URL(path, window.location.origin);
-  url.searchParams.set("ui", token);
-  return `${url.pathname}${url.search}`;
+  url.searchParams.delete("ui");
+  return `${url.pathname}${url.search}${url.hash}`;
+}
+
+function stripUiQuery() {
+  if (!window.history?.replaceState || !window.location?.href) return;
+  const url = new URL(window.location.href);
+  if (!url.searchParams.has("ui")) return;
+  url.searchParams.delete("ui");
+  const search = url.searchParams.toString();
+  window.history.replaceState(
+    null,
+    "",
+    `${url.pathname}${search ? `?${search}` : ""}${url.hash}`,
+  );
 }
 
 async function readJson(response) {
@@ -229,6 +495,14 @@ function describeCaptchaFailure(error) {
       message,
     };
   }
+  if (code === "WEBVPN_AUTH_REQUIRED") {
+    return {
+      status: "webvpn-auth-required",
+      title: "需要 WebVPN 统一认证",
+      detail: "验证码接口需要 WebVPN 登录，请先完成统一认证后再获取验证码。",
+      message,
+    };
+  }
   if (["CAPTCHA_TIMEOUT", "CLIENT_TIMEOUT", "CAPTCHA_IMAGE_TIMEOUT"].includes(code)) {
     return {
       status: "error",
@@ -280,7 +554,7 @@ async function loadCaptcha() {
   setLoginMessage("");
 
   try {
-    const captcha = validateCaptchaPayload(await requestJson(`/api/captcha?t=${Date.now()}`));
+    const captcha = validateCaptchaPayload(await requestJson(`/api/captcha?backend=${encodeURIComponent(loginState.backend)}&t=${Date.now()}`));
     await loadCaptchaImage(captcha.imageUrl);
     loginState.captcha = captcha;
     setCaptchaStatus("ready");
@@ -288,6 +562,9 @@ async function loadCaptcha() {
   } catch (error) {
     loginState.captcha = null;
     clearCaptchaImage();
+    if (loginState.backend === "webvpn" || error?.code === "WEBVPN_AUTH_REQUIRED") {
+      loginElements.webvpnAuthButton.hidden = false;
+    }
     const failure = describeCaptchaFailure(error);
     loginState.captchaFailureMessage = failure.message;
     setCaptchaStatus(failure.status, failure.title, failure.detail);
@@ -296,6 +573,64 @@ async function loadCaptcha() {
   } finally {
     loginState.loadingCaptcha = false;
     updateLoginControls();
+  }
+}
+
+function stopWebvpnAuthPolling() {
+  if (loginState.webvpnAuthTimer) {
+    window.clearTimeout(loginState.webvpnAuthTimer);
+    loginState.webvpnAuthTimer = 0;
+  }
+}
+
+async function pollWebvpnAuth() {
+  stopWebvpnAuthPolling();
+  try {
+    const payload = await requestJson("/api/webvpn/auth/status");
+    setBackendPresentation(payload);
+    if (payload.state === "authenticated" || payload.authenticated) {
+      loginState.webvpnAuthRequested = false;
+      loginElements.webvpnAuthButton.textContent = "WebVPN 已认证";
+      setLoginMessage("WebVPN 统一认证完成，正在刷新验证码。", true);
+      await loadCaptcha();
+      return;
+    }
+    if (payload.state === "error") {
+      loginElements.webvpnAuthButton.textContent = "重新完成 WebVPN 统一认证";
+      setLoginMessage(payload.message || "WebVPN 认证未完成");
+      return;
+    }
+    loginElements.webvpnAuthButton.textContent = "认证进行中…";
+    setLoginMessage(payload.message || "请在新打开的受控浏览器中完成认证");
+    loginState.webvpnAuthTimer = window.setTimeout(pollWebvpnAuth, 1000);
+  } catch (error) {
+    loginState.webvpnAuthTimer = window.setTimeout(pollWebvpnAuth, 2000);
+    setLoginMessage(error instanceof Error ? error.message : "无法读取 WebVPN 认证状态");
+  }
+}
+
+async function startWebvpnAuth() {
+  if (loginState.webvpnAuthTimer) return;
+  loginState.webvpnAuthRequested = true;
+  loginElements.webvpnAuthButton.disabled = true;
+  loginElements.webvpnAuthButton.textContent = "正在打开受控浏览器…";
+  setLoginMessage("正在启动独立认证浏览器，请稍候。", true);
+  try {
+    const payload = await requestJson("/api/webvpn/auth/start", {
+      method: "POST",
+      body: JSON.stringify({}),
+    });
+    setBackendPresentation(payload);
+    if (payload.state === "authenticated" || payload.authenticated) {
+      await loadCaptcha();
+      return;
+    }
+    await pollWebvpnAuth();
+  } catch (error) {
+    loginElements.webvpnAuthButton.textContent = "完成 WebVPN 统一认证";
+    setLoginMessage(error instanceof Error ? error.message : "受控浏览器启动失败");
+  } finally {
+    loginElements.webvpnAuthButton.disabled = false;
   }
 }
 
@@ -322,7 +657,6 @@ async function submitLogin(event) {
 
   const studentId = loginElements.studentId.value.trim();
   const password = loginElements.password.value;
-  const cardKey = loginElements.cardKey.value.trim();
   if (!/^\d{6,12}$/.test(studentId)) {
     setLoginMessage("请输入 6 至 12 位数字学号");
     loginElements.studentId.focus();
@@ -331,11 +665,6 @@ async function submitLogin(event) {
   if (!password) {
     setLoginMessage("请输入选课系统密码");
     loginElements.password.focus();
-    return;
-  }
-  if (!cardKey.startsWith("SZU3.")) {
-    setLoginMessage("请输入终端生成的 Card Key V3");
-    loginElements.cardKey.focus();
     return;
   }
   if (!loginState.captcha || loginState.captchaStatus !== "ready") {
@@ -353,6 +682,7 @@ async function submitLogin(event) {
   setLoginMessage("正在连接学校选课系统...", true);
 
   try {
+    const cardKey = await fetchCardKeyForStudent(studentId);
     const result = await requestJson("/api/login", {
       method: "POST",
       body: JSON.stringify({
@@ -362,10 +692,17 @@ async function submitLogin(event) {
         vtoken: loginState.captcha.vtoken,
         verifyCode: loginState.points,
         cookie: loginState.captcha.cookie,
+        backend: loginState.backend,
       }),
     });
+    if (loginElements.rememberCredentials.checked) {
+      await saveCredentials(studentId, password);
+    } else {
+      clearSavedCredentials();
+    }
+    await saveSessionCredentials(studentId, password, loginState.backend);
     setLoginMessage(result.message || "登录成功", true);
-    window.location.assign(versionedPage("/"));
+    window.location.assign(cleanPagePath("/"));
   } catch (error) {
     const failureMessage = error instanceof Error ? error.message : "登录失败";
     const refreshed = await loadCaptcha();
@@ -383,21 +720,29 @@ async function submitLogin(event) {
 }
 
 async function initializeLogin() {
+  stripUiQuery();
   setCaptchaStatus("idle");
   try {
     const [bootstrap, session] = await Promise.all([
       requestJson("/api/bootstrap"),
       requestJson("/api/session"),
     ]);
-    loginState.uiCacheToken = bootstrap.ui_cache_token || "";
+    setBackendPresentation(bootstrap);
+    const radio = document.querySelector(`input[name='backend'][value='${bootstrap.preference || "auto"}']`);
+    if (radio) radio.checked = true;
     if (session.logged_in) {
-      window.location.replace(versionedPage("/"));
+      window.location.replace(cleanPagePath("/"));
       return;
     }
     loginElements.studentId.value = bootstrap.student_id || "";
-    loginElements.cardKey.value = bootstrap.card_key || "";
     if (bootstrap.phase_notice) {
       loginElements.phaseNotice.textContent = bootstrap.phase_notice;
+    }
+    const saved = await loadSavedCredentials();
+    if (saved) {
+      if (!loginElements.studentId.value) loginElements.studentId.value = saved.student_id;
+      loginElements.password.value = saved.password;
+      loginElements.rememberCredentials.checked = true;
     }
   } catch (error) {
     setLoginMessage(error instanceof Error ? error.message : "本地登录信息加载失败");
@@ -411,6 +756,7 @@ loginElements.undo.addEventListener("click", () => {
   renderCaptchaPoints();
 });
 loginElements.refresh.addEventListener("click", loadCaptcha);
+loginElements.solveCaptcha.addEventListener("click", solveCaptcha);
 loginElements.form.addEventListener("submit", submitLogin);
 loginElements.passwordToggle.addEventListener("click", () => {
   const hidden = loginElements.password.type === "password";
@@ -418,5 +764,12 @@ loginElements.passwordToggle.addEventListener("click", () => {
   loginElements.passwordToggle.textContent = hidden ? "隐藏" : "显示";
   loginElements.passwordToggle.setAttribute("aria-label", hidden ? "隐藏密码" : "显示密码");
 });
+
+for (const radio of document.querySelectorAll("input[name='backend']")) {
+  radio.addEventListener("change", () => selectBackend(radio.value));
+}
+
+loginElements.webvpnAuthButton.addEventListener("click", startWebvpnAuth);
+loginElements.captchaWebvpnAuthButton.addEventListener("click", startWebvpnAuth);
 
 initializeLogin();

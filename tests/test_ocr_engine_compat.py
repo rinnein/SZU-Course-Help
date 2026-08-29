@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 from types import ModuleType
 
+import numpy as np
 import pytest
 
 import logic
@@ -10,10 +11,9 @@ import logic
 
 @pytest.fixture(autouse=True)
 def clear_engine_cache():
-    original_factory = logic._ddddocr_engines
-    original_factory.cache_clear()
+    logic._ddddocr_engines.cache_clear()
     yield
-    original_factory.cache_clear()
+    logic._ddddocr_engines.cache_clear()
 
 
 def test_engine_factory_uses_core_exports_when_top_level_only_has_legacy(monkeypatch):
@@ -74,47 +74,18 @@ def test_engine_factory_adapts_legacy_ddddocr_api(monkeypatch):
     ]
 
 
-def test_ocr_runtime_check_accepts_predict_contract(monkeypatch):
-    class Engine:
+def test_ocr_pipeline_uses_predict_contract(monkeypatch):
+    class Detector:
         def predict(self, image):
-            return image
+            return [[1, 1, 10, 20]]
 
-    monkeypatch.setattr(logic, "_ddddocr_engines", lambda: (Engine(), Engine()))
+    class Recognizer:
+        def predict(self, image):
+            return "候"
 
-    ready, message = logic.check_ocr_runtime()
+    image = np.full((80, 250, 3), 255, dtype=np.uint8)
 
-    assert ready is True
-    assert "已就绪" in message
-
-
-def test_ocr_runtime_check_reports_api_incompatibility(monkeypatch):
-    monkeypatch.setattr(logic, "_ddddocr_engines", lambda: (object(), object()))
-
-    ready, message = logic.check_ocr_runtime()
-
-    assert ready is False
-    assert "predict" in message
-
-
-def test_ocr_runtime_check_reports_import_failure(monkeypatch):
-    def unavailable():
-        raise ImportError("DetectionEngine export missing")
-
-    monkeypatch.setattr(logic, "_ddddocr_engines", unavailable)
-
-    ready, message = logic.check_ocr_runtime()
-
-    assert ready is False
-    assert "版本不兼容" in message
-
-
-def test_ocr_runtime_check_keeps_manual_login_available_on_engine_failure(monkeypatch):
-    def broken_runtime():
-        raise RuntimeError("ONNX provider unavailable")
-
-    monkeypatch.setattr(logic, "_ddddocr_engines", broken_runtime)
-
-    ready, message = logic.check_ocr_runtime()
-
-    assert ready is False
-    assert "ONNX provider unavailable" in message
+    with monkeypatch.context() as patch:
+        patch.setattr(logic, "_ddddocr_engines", lambda: (Detector(), Recognizer()))
+        assert logic._candidate_boxes(image) == [[1, 26, 10, 45]]
+    assert logic._ocr_glyph(Recognizer(), image[2:14, 82:94]) == "候"
