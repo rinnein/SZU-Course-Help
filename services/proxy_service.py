@@ -75,6 +75,7 @@ def _upstream_scheme(host: str, profile=None) -> str:
         return profile.scheme
     return "https"
 
+
 # Content types whose bytes we are allowed to inspect/rewrite.
 _TEXTISH_PREFIXES = (
     "text/html",
@@ -198,7 +199,9 @@ def rewrite_root_relative_refs(value: str, default_host: str) -> str:
     return re.sub(r"([\"'])(/(?!/)[^\"']*)\1", replace, value)
 
 
-_ROOT_RELATIVE_ATTR = re.compile(r'(href|src|action|poster|data|codebase)\s*=\s*["\'](/[^"\']*)["\']')
+_ROOT_RELATIVE_ATTR = re.compile(
+    r'(href|src|action|poster|data|codebase)\s*=\s*["\'](/[^"\']*)["\']'
+)
 
 
 def rewrite_html(html: str, default_host: str = SCHOOL_HOST) -> str:
@@ -226,8 +229,10 @@ def rewrite_text_body(body: bytes, content_type: str, default_host: str = SCHOOL
         return body
     if len(text) > _MAX_REWRITE_BYTES:
         return body
-    rewritten = rewrite_html(text, default_host) if head == "text/html" else rewrite_root_relative_refs(
-        rewrite_link_ref(text, default_host), default_host
+    rewritten = (
+        rewrite_html(text, default_host)
+        if head == "text/html"
+        else rewrite_root_relative_refs(rewrite_link_ref(text, default_host), default_host)
     )
     return rewritten.encode("utf-8")
 
@@ -253,6 +258,7 @@ def inject_shared_session_bootstrap(
     session.  Synchronous XHR is intentional here: it completes before the
     original page's external scripts execute.
     """
+
     def _js_string(value: str) -> str:
         return json.dumps(str(value), ensure_ascii=False).replace("<", "\\u003c")
 
@@ -302,7 +308,7 @@ def inject_shared_session_bootstrap(
     )
     match = re.search(r"<head\b[^>]*>", html, flags=re.IGNORECASE)
     if match:
-        return f"{html[:match.end()]}{bootstrap}{html[match.end():]}"
+        return f"{html[: match.end()]}{bootstrap}{html[match.end() :]}"
     return bootstrap + html
 
 
@@ -352,10 +358,7 @@ def proxy_cookie_headers(proxy_host: str) -> list[str]:
         if value:
             values.append(f"{name}={value}")
     path = _proxy_cookie_path(host)
-    return [
-        f"{value}; Path={path}; SameSite=Lax"
-        for value in values
-    ]
+    return [f"{value}; Path={path}; SameSite=Lax" for value in values]
 
 
 def _append_set_cookie_headers(response: Response, cookie_headers: list[str]) -> Response:
@@ -502,12 +505,19 @@ async def proxy_request(
     for index, candidate in enumerate(candidates):
         upstream_host = (
             route_host
-            if candidate is not None and route_host in backend_service.PROXY_HOSTS
+            if candidate is not None
+            and route_host in backend_service.PROXY_HOSTS
             and route_host != "auto"
-            else candidate.host if candidate is not None else route_host
+            else candidate.host
+            if candidate is not None
+            else route_host
         )
         scheme = _upstream_scheme(upstream_host, candidate)
-        if candidate is not None and candidate.key == config.BACKEND_WEBVPN and not backend_service.has_webvpn_cookies():
+        if (
+            candidate is not None
+            and candidate.key == config.BACKEND_WEBVPN
+            and not backend_service.has_webvpn_cookies()
+        ):
             service = (
                 f"https://{backend_service.WEBVPN_ROOT_HOST}"
                 "/users/auth/cas/callback?url="
@@ -515,8 +525,7 @@ async def proxy_request(
             )
             auth_location = (
                 f"{proxy_prefix(backend_service.AUTHSERVER_HOST)}"
-                "/authserver/login?"
-                + urlencode({"service": service})
+                "/authserver/login?" + urlencode({"service": service})
             )
             return Response(status_code=302, headers={"Location": auth_location})
         upstream_url = f"{scheme}://{upstream_host}{school_path}"
@@ -616,7 +625,9 @@ async def proxy_request(
             await _close_upstream(client, upstream)
             client = None
             upstream = None
-            logger.warning("Proxy backend %s returned %s; trying fallback", upstream_host, status_code)
+            logger.warning(
+                "Proxy backend %s returned %s; trying fallback", upstream_host, status_code
+            )
             continue
         selected_profile = candidate
         selected_host = upstream_host

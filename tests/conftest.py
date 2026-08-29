@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import gc
+
 import pytest
 import requests
 
-from services import course_cache_service
-from services import auth_service
+import database
+from services import auth_service, course_cache_service
 
 
 @pytest.fixture(autouse=True)
@@ -36,3 +38,11 @@ def isolate_relogin_state():
     with auth_service._state_lock:
         auth_service._reset_relogin_state_locked()
     yield
+
+
+@pytest.fixture(autouse=True)
+def close_database_connections():
+    """Close every SQLite manager after each test instead of relying on GC."""
+    yield
+    database.DatabaseManager.close_all()
+    gc.collect()

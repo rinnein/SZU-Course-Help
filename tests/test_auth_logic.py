@@ -79,9 +79,12 @@ def test_automatic_relogin_uses_login_page_ocr_flow(monkeypatch):
     monkeypatch.setattr(
         logic,
         "verify_vcode_login_flow",
-        lambda max_attempts=50: observed.append(
-            (max_attempts, config.student_id, config.password, config.backend_preference)
-        ) or ("vtoken", "route=a", "encrypted", "1-2,3-4,5-6,7-8"),
+        lambda max_attempts=50: (
+            observed.append(
+                (max_attempts, config.student_id, config.password, config.backend_preference)
+            )
+            or ("vtoken", "route=a", "encrypted", "1-2,3-4,5-6,7-8")
+        ),
     )
 
     result = auth_service.attempt_ocr_relogin(

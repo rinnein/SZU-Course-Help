@@ -151,8 +151,7 @@ def _read_websocket_frame(sock: socket.socket) -> tuple[int, bytes]:
     if second & 0x80:
         mask = _recv_exact(sock, 4)
         payload = bytes(
-            value ^ mask[index % 4]
-            for index, value in enumerate(_recv_exact(sock, length))
+            value ^ mask[index % 4] for index, value in enumerate(_recv_exact(sock, length))
         )
     else:
         payload = _recv_exact(sock, length)
@@ -193,7 +192,10 @@ def _cdp_command(websocket_url: str, method: str, params: dict[str, Any] | None 
             if len(response_headers) > 65536:
                 raise ConnectionError("invalid DevTools websocket handshake")
         header_text = bytes(response_headers).split(b"\r\n\r\n", 1)[0].decode("latin1")
-        if " 101 " not in header_text or f"Sec-WebSocket-Accept: {expected_accept}" not in header_text:
+        if (
+            " 101 " not in header_text
+            or f"Sec-WebSocket-Accept: {expected_accept}" not in header_text
+        ):
             raise ConnectionError("DevTools websocket handshake rejected")
         sock.sendall(_websocket_frame(command))
         while True:
@@ -347,10 +349,7 @@ class ControlledBrowserManager:
             websocket_url = self._page_websocket(targets)
             if websocket_url:
                 saved = self._saved_browser_cookies()
-                expected = {
-                    cookie["name"]: (cookie["value"], cookie["domain"])
-                    for cookie in saved
-                }
+                expected = {cookie["name"]: (cookie["value"], cookie["domain"]) for cookie in saved}
                 _cdp_command(
                     websocket_url,
                     "Network.setCookies",
@@ -457,8 +456,7 @@ class ControlledBrowserManager:
                         (
                             str(target.get("webSocketDebuggerUrl", ""))
                             for target in targets
-                            if target.get("type") == "page"
-                            and target.get("webSocketDebuggerUrl")
+                            if target.get("type") == "page" and target.get("webSocketDebuggerUrl")
                         ),
                         "",
                     )
@@ -561,7 +559,9 @@ class ControlledBrowserManager:
             "authenticated": authenticated,
             "message": message or ("WebVPN 已认证" if authenticated else ""),
             "auth_url": auth_url,
-            "elapsed_seconds": round(max(0.0, time.monotonic() - started_at), 1) if started_at else 0,
+            "elapsed_seconds": round(max(0.0, time.monotonic() - started_at), 1)
+            if started_at
+            else 0,
         }
 
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import closing
 from types import SimpleNamespace
 
 import config
@@ -109,7 +110,7 @@ def test_existing_db_migrates_teaching_place_column(tmp_path):
 
     db_path = tmp_path / "legacy.db"
     # Create a legacy table without teaching_place
-    with sqlite3.connect(str(db_path)) as conn:
+    with closing(sqlite3.connect(str(db_path))) as conn, conn:
         conn.execute(
             "CREATE TABLE courses (id TEXT PRIMARY KEY, type TEXT, name TEXT, "
             "status TEXT, created_at TIMESTAMP, updated_at TIMESTAMP)"

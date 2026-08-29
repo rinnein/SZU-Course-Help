@@ -434,7 +434,9 @@ def _mode_interval_seconds(mode: str) -> float:
     return max(0, int(_settings[f"{mode}_interval_ms"])) / 1000.0
 
 
-def can_switch_course(*, switch_enabled: bool, risk_confirmed: bool, available_slots: int, threshold: int) -> bool:
+def can_switch_course(
+    *, switch_enabled: bool, risk_confirmed: bool, available_slots: int, threshold: int
+) -> bool:
     """Return whether explicit user consent and the capacity threshold permit switching."""
     return bool(switch_enabled and risk_confirmed and available_slots >= max(0, int(threshold)))
 
@@ -591,9 +593,8 @@ def _active_course_ids() -> set:
     stored = {item["id"]: item for item in cart_service.get_courses_by_status("")}
     active = set()
     for course_id, row in stored.items():
-        if (
-            row.get("status") not in (database.STATUS_SUCCESS, database.STATUS_FAILED)
-            and row.get("auto_enabled", 1)
+        if row.get("status") not in (database.STATUS_SUCCESS, database.STATUS_FAILED) and row.get(
+            "auto_enabled", 1
         ):
             active.add(course_id)
     return active
@@ -619,7 +620,9 @@ def _row_course_group(row: dict) -> str:
     if explicit_group:
         return explicit_group
     number = str(row.get("course_number") or "").strip()
-    schedule = str(row.get("time_signature") or time_signature(row.get("teaching_place", ""))).strip()
+    schedule = str(
+        row.get("time_signature") or time_signature(row.get("teaching_place", ""))
+    ).strip()
     if number and schedule:
         return f"{number}|{schedule}"
     return number or schedule or str(row.get("id", ""))
@@ -652,14 +655,20 @@ def _scan_course_available(course) -> int:
                 for teaching_class in teaching_classes or []:
                     class_id = getattr(teaching_class, "teaching_class_id", None)
                     if class_id is None and isinstance(teaching_class, dict):
-                        class_id = teaching_class.get("teaching_class_id") or teaching_class.get("teachingClassID")
+                        class_id = teaching_class.get("teaching_class_id") or teaching_class.get(
+                            "teachingClassID"
+                        )
                     if str(class_id or "") != str(course.id):
                         continue
                     selected_value = getattr(teaching_class, "number_of_selected", None)
                     capacity_value = getattr(teaching_class, "class_capacity", None)
                     if isinstance(teaching_class, dict):
-                        selected_value = teaching_class.get("number_of_selected") or teaching_class.get("numberOfSelected")
-                        capacity_value = teaching_class.get("class_capacity") or teaching_class.get("classCapacity")
+                        selected_value = teaching_class.get(
+                            "number_of_selected"
+                        ) or teaching_class.get("numberOfSelected")
+                        capacity_value = teaching_class.get("class_capacity") or teaching_class.get(
+                            "classCapacity"
+                        )
                     selected = _numeric(selected_value)
                     capacity = _numeric(capacity_value)
                     if capacity is not None and selected is not None and selected < capacity:
@@ -692,12 +701,16 @@ def _try_priority_switch(course, available_slots: int) -> bool:
     group = _course_group(course)
     for row in cart_service.get_courses_by_status(database.STATUS_SUCCESS):
         sibling_group = _row_course_group(row)
-        if sibling_group != group or int(row.get("priority_rank", 0) or 0) <= getattr(course, "priority_rank", 0):
+        if sibling_group != group or int(row.get("priority_rank", 0) or 0) <= getattr(
+            course, "priority_rank", 0
+        ):
             continue
         if not _settings["switch_enabled"] or not _settings["switch_confirmed"]:
             return False
         try:
-            ok, message = withdraw_course(row["id"], available_slots=available_slots, risk_confirmed=True)
+            ok, message = withdraw_course(
+                row["id"], available_slots=available_slots, risk_confirmed=True
+            )
         except (requests.RequestException, choose_course.SchoolSessionExpiredError) as exc:
             _add_event("warn", f"未执行优先级换课：退选请求异常（{type(exc).__name__}）")
             return False
@@ -811,14 +824,13 @@ def grab_courses(courses: list) -> GrabOutcome:
     """Run bounded enrollment rounds using the current mode and priorities."""
     active_ids = _active_course_ids()
     active = [course for course in courses if course.id in active_ids]
-    active.sort(key=lambda course: (_course_group(course), getattr(course, "priority_rank", 0), course.id))
+    active.sort(
+        key=lambda course: (_course_group(course), getattr(course, "priority_rank", 0), course.id)
+    )
     unknown_streak_limit = max(1, int(config.unknown_response_pause_threshold))
     unknown_streak = {course.id: 0 for course in active}
     network_streak = {course.id: 0 for course in active}
-    business_failures = {
-        course.id: _business_failure_counts.get(course.id, 0)
-        for course in active
-    }
+    business_failures = {course.id: _business_failure_counts.get(course.id, 0) for course in active}
 
     if not active:
         return GrabOutcome.COMPLETED
@@ -842,7 +854,9 @@ def grab_courses(courses: list) -> GrabOutcome:
                     if not _wait_between_requests(_mode_interval_seconds("scan")):
                         return GrabOutcome.PAUSED
                     continue
-                if _has_selected_lower_priority(course) and not _try_priority_switch(course, available_slots):
+                if _has_selected_lower_priority(course) and not _try_priority_switch(
+                    course, available_slots
+                ):
                     _update_course_progress(
                         course.id,
                         message="检测到高优先级课程有容量，但换课安全条件未满足，暂不退选",
@@ -854,10 +868,14 @@ def grab_courses(courses: list) -> GrabOutcome:
                 _add_event("info", f"检测到 {course.name} 有可选容量，切换爆发模式")
 
             try:
-                _update_course_progress(course.id, increment_attempts=True, mode=get_enroll_task_state()["mode"])
+                _update_course_progress(
+                    course.id, increment_attempts=True, mode=get_enroll_task_state()["mode"]
+                )
                 course_campus = str(getattr(course, "campus_code", "") or "").strip()
                 if course_campus:
-                    response = choose_course.submit_course_selection(course.id, course.type, course_campus)
+                    response = choose_course.submit_course_selection(
+                        course.id, course.type, course_campus
+                    )
                 else:
                     response = choose_course.submit_course_selection(course.id, course.type)
                 network_streak[course.id] = 0
@@ -910,8 +928,12 @@ def grab_courses(courses: list) -> GrabOutcome:
                         and business_failures[course.id] >= 10
                     ):
                         set_enroll_mode("scan")
-                        _add_event("warn", f"{course.name} 一般模式业务失败达到 10 次，降为扫描模式")
-                    if not _wait_between_requests(_mode_interval_seconds(get_enroll_task_state()["mode"])):
+                        _add_event(
+                            "warn", f"{course.name} 一般模式业务失败达到 10 次，降为扫描模式"
+                        )
+                    if not _wait_between_requests(
+                        _mode_interval_seconds(get_enroll_task_state()["mode"])
+                    ):
                         return GrabOutcome.PAUSED
                     continue
                 elif action == "expired":
@@ -954,7 +976,9 @@ def grab_courses(courses: list) -> GrabOutcome:
                         _update_course_progress(course.id, message=reason)
                         pause_enroll_task(reason, source="unknown_response")
                         return GrabOutcome.PAUSED
-                    backoff_ms = min(UNKNOWN_BACKOFF_STEP_MS * unknown_streak[course.id], UNKNOWN_BACKOFF_CAP_MS)
+                    backoff_ms = min(
+                        UNKNOWN_BACKOFF_STEP_MS * unknown_streak[course.id], UNKNOWN_BACKOFF_CAP_MS
+                    )
                     _update_course_progress(
                         course.id,
                         message=f"学校返回暂时无法识别，继续观察（{unknown_streak[course.id]}/{unknown_streak_limit}）",
@@ -983,9 +1007,14 @@ def grab_courses(courses: list) -> GrabOutcome:
                     _update_course_progress(course.id, message=reason)
                     pause_enroll_task(reason, source="network_error")
                     return GrabOutcome.PAUSED
-                backoff_ms = min(NETWORK_BACKOFF_BASE_MS * (2 ** (network_streak[course.id] - 1)), NETWORK_BACKOFF_CAP_MS)
+                backoff_ms = min(
+                    NETWORK_BACKOFF_BASE_MS * (2 ** (network_streak[course.id] - 1)),
+                    NETWORK_BACKOFF_CAP_MS,
+                )
                 if not _wait_between_requests(
-                    max(_mode_interval_seconds(get_enroll_task_state()["mode"]), backoff_ms / 1000.0)
+                    max(
+                        _mode_interval_seconds(get_enroll_task_state()["mode"]), backoff_ms / 1000.0
+                    )
                 ):
                     return GrabOutcome.PAUSED
                 continue

@@ -60,15 +60,29 @@ def _request_headers(combined_cookie: str, token: str) -> dict[str, str]:
     )
 
 
-def _school_request(path: str, *, data=None, params=None, token: str = "", cookie: str | None = None, request_sender=None):
+def _school_request(
+    path: str,
+    *,
+    data=None,
+    params=None,
+    token: str = "",
+    cookie: str | None = None,
+    request_sender=None,
+):
     def sender(**kwargs):
         kwargs.pop("method", None)
         kwargs.pop("json", None)
         return (request_sender or _session.post)(**kwargs)
 
     return backend_service.request_with_failover(
-        "POST", path, sender=sender, data=data, params=params,
-        token=token, cookie=cookie, timeout=REQUEST_TIMEOUT,
+        "POST",
+        path,
+        sender=sender,
+        data=data,
+        params=params,
+        token=token,
+        cookie=cookie,
+        timeout=REQUEST_TIMEOUT,
     )
 
 
@@ -80,7 +94,8 @@ def query_enrolled_courses(
     timestamp = int(time.time() * 1000)
     response = _school_request(
         f"elective/courseResult.do?timestamp={timestamp}&studentCode={config.student_id}",
-        token=token, cookie=combined_cookie,
+        token=token,
+        cookie=combined_cookie,
     )
 
     if is_session_expired_response(

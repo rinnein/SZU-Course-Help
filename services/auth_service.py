@@ -333,9 +333,7 @@ def get_session_snapshot() -> dict[str, str | bool | int]:
             "relogin_max_retries": max(1, int(config.relogin_max_retries)),
             "relogin_retry_after": max(
                 0,
-                math.ceil(
-                    float(_relogin_state["next_retry_at"]) - time.monotonic()
-                ),
+                math.ceil(float(_relogin_state["next_retry_at"]) - time.monotonic()),
             ),
         }
 
@@ -559,8 +557,7 @@ def automatic_relogin_available() -> bool:
             config.student_id
             and config.password
             and not _restored_session_pending_validation
-            and int(_relogin_state["failure_count"])
-            < max(1, int(config.relogin_max_retries))
+            and int(_relogin_state["failure_count"]) < max(1, int(config.relogin_max_retries))
         )
 
 

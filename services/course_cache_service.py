@@ -14,7 +14,9 @@ from typing import Any
 from project_paths import data_dir
 
 _lock = threading.RLock()
-_path = Path(os.getenv("COURSE_SELECT_CACHE_PATH", str(data_dir() / "course_cache.json"))).expanduser()
+_path = Path(
+    os.getenv("COURSE_SELECT_CACHE_PATH", str(data_dir() / "course_cache.json"))
+).expanduser()
 FULL_CATALOG_TYPES = frozenset({"TJKC", "FANKC"})
 
 
@@ -133,7 +135,9 @@ def get_full(course_type: str) -> dict[str, Any] | None:
     }
 
 
-def annotate_live(payload: dict[str, Any], course_type: str, page: int, page_size: int) -> dict[str, Any]:
+def annotate_live(
+    payload: dict[str, Any], course_type: str, page: int, page_size: int
+) -> dict[str, Any]:
     cached = get(course_type, page, page_size)
     return {
         **payload,

@@ -67,7 +67,7 @@ def test_login_and_course_pages_expose_required_controls():
     assert 'href="/offline" target="_blank"' in login
     assert 'id="offlineCourseList"' in offline
     assert f"/offline.js?build={app.UI_ASSET_BUILD}" in offline
-    assert 'cache_mode=true' in offline_script
+    assert "cache_mode=true" in offline_script
     assert f"/course-app.js?build={app.UI_ASSET_BUILD}" in course
     assert 'id="cacheModeSwitch"' in course
     assert "versionedPage" not in login_script
@@ -90,7 +90,7 @@ def test_login_captcha_ui_has_terminal_failure_states():
     assert 'id="captchaActions"' in login
     assert "当前时段暂无验证码" in script
     assert 'code === "CAPTCHA_UNAVAILABLE"' in script
-    assert "loginState.backend === \"webvpn\"" in script
+    assert 'loginState.backend === "webvpn"' in script
     assert "loginState.captcha = null" in script
     assert "当前选择 WebVPN，但验证码暂时无法获取，请先完成统一认证" in script
     assert "loginElements.captchaActions.hidden = webvpnFallback" in script
@@ -157,7 +157,10 @@ def test_my_courses_restores_schedule_and_list_views():
     assert 'id="pendingCreditTotal"' in course
     assert 'id="combinedCreditTotal"' in course
     assert ".my-courses-credit-summary" in styles
-    assert 'const block = element("div", `schedule-course${stateClasses ? ` ${stateClasses}` : ""}`);' in script
+    assert (
+        'const block = element("div", `schedule-course${stateClasses ? ` ${stateClasses}` : ""}`);'
+        in script
+    )
     assert "虚化块为选课清单中的待选课程" in script
     assert ".schedule-course.is-pending" in styles
 
@@ -202,7 +205,7 @@ def test_conflict_timetable_context_is_rendered_and_highlighted():
     assert "is-focused" in script
     assert "scheduleConflict = null" in script
     assert ".schedule-course.is-conflict-highlight" in styles
-    assert "switchMyCoursesView(\"grid\")" in script
+    assert 'switchMyCoursesView("grid")' in script
 
 
 def test_course_search_filters_full_catalog_and_repaginates():
@@ -246,9 +249,9 @@ def test_enrollment_interval_ui_uses_seconds_and_api_uses_milliseconds():
     script = (STATIC / "course-app.js").read_text(encoding="utf-8")
     index = (STATIC / "index.html").read_text(encoding="utf-8")
 
-    assert 'intervalSecondsToMilliseconds' in script
-    assert 'intervalMillisecondsToSeconds' in script
-    assert 'scan_interval_ms: intervalSecondsToMilliseconds' in script
+    assert "intervalSecondsToMilliseconds" in script
+    assert "intervalMillisecondsToSeconds" in script
+    assert "scan_interval_ms: intervalSecondsToMilliseconds" in script
     assert 'id="boostInterval"' in index and 'value="1"' in index
     assert 'id="normalInterval"' in index and 'value="10"' in index
     assert 'id="scanInterval"' in index and 'value="60"' in index

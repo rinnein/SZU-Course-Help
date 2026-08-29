@@ -38,7 +38,9 @@ def time_signature(value: Any) -> str:
     text = _as_string(value).strip()
     if not text:
         return ""
-    match = re.search(r"(星期[一二三四五六日天]|周[一二三四五六日天]).{0,12}?([0-9]+\s*[-至]\s*[0-9]+节?)", text)
+    match = re.search(
+        r"(星期[一二三四五六日天]|周[一二三四五六日天]).{0,12}?([0-9]+\s*[-至]\s*[0-9]+节?)", text
+    )
     if match:
         day = match.group(1).replace("周", "星期")
         periods = re.sub(r"\s+", "", match.group(2)).replace("至", "-")

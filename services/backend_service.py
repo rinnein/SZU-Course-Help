@@ -265,7 +265,9 @@ def request_with_failover(
         if should_fail_over(response):
             mark_failure(profile)
         if should_fail_over(response) and index + 1 < len(profiles):
-            logger.warning("Backend %s returned %s; trying fallback", profile.label, response.status_code)
+            logger.warning(
+                "Backend %s returned %s; trying fallback", profile.label, response.status_code
+            )
             continue
         mark_success(profile)
         return response
@@ -280,7 +282,9 @@ def backend_payload() -> dict[str, Any]:
     remaining = primary_cooldown_remaining()
     return {
         "preference": preference,
-        "preference_label": "自动（优先主站）" if preference == config.BACKEND_AUTO else get_profile(preference).label,
+        "preference_label": "自动（优先主站）"
+        if preference == config.BACKEND_AUTO
+        else get_profile(preference).label,
         "active_backend": profile.key,
         "active_backend_label": profile.label,
         "active_host": profile.host,
@@ -339,9 +343,7 @@ def merge_set_cookie(header_values: list[str], host: str) -> bool:
         return False
     if host in (WEBVPN_HOST, WEBVPN_ROOT_HOST):
         changed = False
-        school_additions = combine_cookie_values_excluding(
-            "", additions, WEBVPN_COOKIE_NAMES
-        )
+        school_additions = combine_cookie_values_excluding("", additions, WEBVPN_COOKIE_NAMES)
         if school_additions:
             config.combined_cookie = combine_cookie_values_excluding(
                 getattr(config, "combined_cookie", ""),

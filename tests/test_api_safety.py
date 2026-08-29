@@ -412,9 +412,7 @@ def test_cache_mode_returns_cached_course_without_school_request(monkeypatch, tm
         lambda *_args: (_ for _ in ()).throw(AssertionError("cache hit must not query school")),
     )
 
-    response = client.get(
-        "/api/school/courses?type=TJKC&page=1&page_size=10&cache_mode=true"
-    )
+    response = client.get("/api/school/courses?type=TJKC&page=1&page_size=10&cache_mode=true")
 
     assert response.status_code == 200
     assert response.json()["cached"] is True
@@ -438,9 +436,7 @@ def test_cache_mode_can_read_full_catalog_without_login(monkeypatch, tmp_path):
         lambda *_args: (_ for _ in ()).throw(AssertionError("offline cache must not query school")),
     )
 
-    response = client.get(
-        "/api/school/courses?type=FANKC&page=99&page_size=10&cache_mode=true"
-    )
+    response = client.get("/api/school/courses?type=FANKC&page=99&page_size=10&cache_mode=true")
 
     assert response.status_code == 200
     assert response.json()["full_catalog"] is True
@@ -464,9 +460,11 @@ def test_full_catalog_refresh_collects_all_pages(monkeypatch, tmp_path):
     monkeypatch.setattr(
         app,
         "query_courses",
-        lambda course_type, page: (True, last_page, "方案内课程")
-        if (course_type, page) == ("FANKC", 1)
-        else (_ for _ in ()).throw(AssertionError("unexpected page")),
+        lambda course_type, page: (
+            (True, last_page, "方案内课程")
+            if (course_type, page) == ("FANKC", 1)
+            else (_ for _ in ()).throw(AssertionError("unexpected page"))
+        ),
     )
 
     app._cache_full_catalog("FANKC", 1, first_page)
@@ -489,13 +487,10 @@ def test_cache_mode_miss_falls_back_to_live_course_request(monkeypatch, tmp_path
     monkeypatch.setattr(
         app,
         "query_courses",
-        lambda course_type, page: observed.append((course_type, page))
-        or (True, payload, "课程"),
+        lambda course_type, page: observed.append((course_type, page)) or (True, payload, "课程"),
     )
 
-    response = client.get(
-        "/api/school/courses?type=TJKC&page=1&page_size=10&cache_mode=true"
-    )
+    response = client.get("/api/school/courses?type=TJKC&page=1&page_size=10&cache_mode=true")
 
     assert response.status_code == 200
     assert response.json()["cached"] is False
@@ -1023,7 +1018,11 @@ def test_click_relogin_endpoint_starts_recovery_immediately(monkeypatch):
     monkeypatch.setattr(config, "student_id", "2024110122")
     monkeypatch.setattr(config, "password", "secret")
     called = []
-    monkeypatch.setattr(app, "start_automatic_relogin", lambda **kwargs: called.append(kwargs) or (True, "正在自动重新登录，请稍候"))
+    monkeypatch.setattr(
+        app,
+        "start_automatic_relogin",
+        lambda **kwargs: called.append(kwargs) or (True, "正在自动重新登录，请稍候"),
+    )
 
     response = client.post(
         "/api/session/recover",
@@ -1036,7 +1035,9 @@ def test_click_relogin_endpoint_starts_recovery_immediately(monkeypatch):
 
 
 def test_click_relogin_requires_webvpn_auth_for_webvpn_backend(monkeypatch):
-    monkeypatch.setattr(app, "start_automatic_relogin", lambda **kwargs: (False, "请先完成 WebVPN 统一认证"))
+    monkeypatch.setattr(
+        app, "start_automatic_relogin", lambda **kwargs: (False, "请先完成 WebVPN 统一认证")
+    )
 
     response = client.post(
         "/api/session/recover",
@@ -1049,7 +1050,9 @@ def test_click_relogin_requires_webvpn_auth_for_webvpn_backend(monkeypatch):
 
 
 def test_relogin_endpoint_accepts_bodyless_local_request(monkeypatch):
-    monkeypatch.setattr(app, "start_automatic_relogin", lambda: (False, "没有可用于自动重登录的内存凭据"))
+    monkeypatch.setattr(
+        app, "start_automatic_relogin", lambda: (False, "没有可用于自动重登录的内存凭据")
+    )
 
     response = client.post("/api/session/recover")
 

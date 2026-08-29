@@ -52,9 +52,7 @@ class TestLinkRewrite:
         )
 
     def test_other_host_untouched(self):
-        assert proxy_service.rewrite_link_ref("http://example.com/x") == (
-            "http://example.com/x"
-        )
+        assert proxy_service.rewrite_link_ref("http://example.com/x") == ("http://example.com/x")
 
     def test_root_relative_redirect_is_rewritten(self):
         assert proxy_service.rewrite_proxy_path("/xsxkapp/login.do") == (
@@ -105,10 +103,10 @@ class TestLinkRewrite:
 
     def test_html_bootstraps_shared_browser_session(self):
         out = proxy_service.inject_shared_session_bootstrap(
-            "<html><head><title>x</title></head></html>", "tok\"en", "2024110122"
+            "<html><head><title>x</title></head></html>", 'tok"en', "2024110122"
         )
         assert "sessionStorage.setItem('token'" in out
-        assert "tok\\\"en" in out
+        assert 'tok\\"en' in out
         assert "studentInfo" in out
         assert "currentBatch" in out
         assert "currentCampus" in out
@@ -152,7 +150,11 @@ class TestUpstreamHeaders:
             "webvpn_cookie",
             "_webvpn_key=key; webvpn_username=user; webvpn_username_NS_Sig=sig",
         )
-        monkeypatch.setattr(config, "combined_cookie", "route=route1; insert_cookie=insert1; JSESSIONID=session1; _WEU=weu1")
+        monkeypatch.setattr(
+            config,
+            "combined_cookie",
+            "route=route1; insert_cookie=insert1; JSESSIONID=session1; _WEU=weu1",
+        )
 
         headers = proxy_service.proxy_cookie_headers(proxy_service.backend_service.WEBVPN_HOST)
 
@@ -456,9 +458,7 @@ class TestProxyRequest:
         assert "_webvpn_key=key" in clients[1].sent["headers"]["Cookie"]
         assert clients[1].sent["url"].startswith("https://bkxk.webvpn.szu.edu.cn/")
         assert clients[1].sent["headers"]["Origin"] == "https://bkxk.webvpn.szu.edu.cn"
-        assert clients[1].sent["headers"]["Referer"].startswith(
-            "https://bkxk.webvpn.szu.edu.cn/"
-        )
+        assert clients[1].sent["headers"]["Referer"].startswith("https://bkxk.webvpn.szu.edu.cn/")
 
     def test_webvpn_proxy_sends_school_and_webvpn_cookies_and_mirrors_them(self, monkeypatch):
         set_logged_session(
@@ -607,9 +607,7 @@ class TestProxyRequest:
         fake = FakeResponse(
             headers={
                 "Content-Type": "text/plain",
-                "Set-Cookie": (
-                    "JSESSIONID=new; Path=/; Expires=Wed, 09 Jun 2027 10:18:14 GMT"
-                ),
+                "Set-Cookie": ("JSESSIONID=new; Path=/; Expires=Wed, 09 Jun 2027 10:18:14 GMT"),
             },
             text="ok",
         )

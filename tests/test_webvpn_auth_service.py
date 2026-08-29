@@ -28,9 +28,12 @@ def test_extract_webvpn_cookie_header_filters_names_and_domains():
 
 
 def test_extract_webvpn_cookie_header_requires_all_three_cookies():
-    assert webvpn_auth_service.extract_webvpn_cookie_header(
-        [{"name": "_webvpn_key", "value": "key", "domain": "webvpn.szu.edu.cn"}]
-    ) == ""
+    assert (
+        webvpn_auth_service.extract_webvpn_cookie_header(
+            [{"name": "_webvpn_key", "value": "key", "domain": "webvpn.szu.edu.cn"}]
+        )
+        == ""
+    )
 
 
 def test_controlled_browser_profile_is_persistent(monkeypatch, tmp_path):
@@ -54,7 +57,9 @@ def test_controlled_browser_profile_is_persistent(monkeypatch, tmp_path):
         def wait(self, timeout):
             return None
 
-    monkeypatch.setattr(webvpn_auth_service.subprocess, "Popen", lambda *args, **kwargs: FakeProcess())
+    monkeypatch.setattr(
+        webvpn_auth_service.subprocess, "Popen", lambda *args, **kwargs: FakeProcess()
+    )
     monkeypatch.setattr(webvpn_auth_service, "_open_devtools_page", lambda *args, **kwargs: {})
     monkeypatch.setattr(manager, "_inject_cookies_and_navigate", lambda url: None)
     monkeypatch.setattr(webvpn_auth_service.backend_service, "has_webvpn_cookies", lambda: False)
@@ -83,8 +88,11 @@ def test_saved_cookies_are_injected_before_webvpn_navigation(monkeypatch):
     monkeypatch.setattr(
         webvpn_auth_service,
         "_read_http_json",
-        lambda *args, **kwargs: [{"type": "page", "webSocketDebuggerUrl": "ws://127.0.0.1:1/devtools"}],
+        lambda *args, **kwargs: [
+            {"type": "page", "webSocketDebuggerUrl": "ws://127.0.0.1:1/devtools"}
+        ],
     )
+
     def fake_cdp(ws, method, params=None):
         commands.append((method, params))
         if method == "Network.setCookies":

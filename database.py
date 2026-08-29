@@ -6,9 +6,11 @@ import logging
 import os
 import sqlite3
 import threading
+from contextlib import suppress
 from datetime import datetime
 from pathlib import Path
 from typing import Protocol
+from weakref import WeakSet
 
 from campus import DEFAULT_CAMPUS_CODE, get_campus
 from project_paths import data_dir
@@ -50,12 +52,21 @@ def _default_db_path() -> Path:
 class DatabaseManager:
     """Small, thread-friendly SQLite repository for cart courses."""
 
+    _instances: WeakSet[DatabaseManager] = WeakSet()
+
     def __init__(self, db_path: str | Path | None = None) -> None:
         self.db_path = str(Path(db_path).resolve() if db_path else _default_db_path())
         Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
         self._connection: sqlite3.Connection | None = None
+        self._instances.add(self)
         self.init_database()
+
+    @classmethod
+    def close_all(cls) -> None:
+        """Close all live managers, primarily for orderly test/process cleanup."""
+        for manager in list(cls._instances):
+            manager.close()
 
     def _connect(self) -> sqlite3.Connection:
         """Return the shared, thread-safe connection.
@@ -72,6 +83,27 @@ class DatabaseManager:
             connection.execute("PRAGMA busy_timeout = 10000")
             self._connection = connection
         return self._connection
+
+    def close(self) -> None:
+        """Close the shared connection when this manager is no longer needed."""
+        with self._lock:
+            if self._connection is not None:
+                self._connection.close()
+                self._connection = None
+
+    def __enter__(self) -> DatabaseManager:
+        return self
+
+    def __exit__(self, _exc_type, _exc_value, _traceback) -> None:
+        self.close()
+
+    def __del__(self) -> None:
+        """Best-effort cleanup for managers created outside a context manager."""
+        connection = self._connection
+        if connection is not None:
+            with suppress(sqlite3.Error):
+                connection.close()
+            self._connection = None
 
     def init_database(self) -> None:
         """Create the cart table when it does not already exist."""
@@ -106,7 +138,9 @@ class DatabaseManager:
                 )
             for column in ("teaching_place", "course_name", "teacher_name", "credit"):
                 if column not in columns:
-                    connection.execute(f"ALTER TABLE courses ADD COLUMN {column} TEXT NOT NULL DEFAULT ''")
+                    connection.execute(
+                        f"ALTER TABLE courses ADD COLUMN {column} TEXT NOT NULL DEFAULT ''"
+                    )
             migrations = {
                 "auto_enabled": "ALTER TABLE courses ADD COLUMN auto_enabled INTEGER NOT NULL DEFAULT 1",
                 "priority_group": "ALTER TABLE courses ADD COLUMN priority_group TEXT NOT NULL DEFAULT ''",

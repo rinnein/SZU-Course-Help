@@ -22,6 +22,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from starlette.responses import FileResponse, JSONResponse
 
 import config
+import database
 import logic
 from campus import (
     DEFAULT_CAMPUS_CODE,
@@ -38,7 +39,6 @@ from security.key_manager import (
     get_or_create_key_pair,
 )
 from services import backend_service, cart_service, proxy_service, webvpn_auth_service
-from services.webvpn_auth_service import ControlledBrowserUnavailableError
 from services.auth_service import (
     LOGIN_ERROR_MSG,
     attempt_automatic_relogin,
@@ -82,14 +82,15 @@ from services.enroll_service import (
     is_enroll_task_running,
     pause_enroll_task,
     remove_cart_course,
-    set_enroll_mode,
     resume_enroll_task,
+    set_enroll_mode,
     start_enroll_worker,
     stop_enroll_task,
     update_enroll_settings,
 )
 from services.proxy_service import SCHOOL_HOST, clear_proxy_cookie_mirror
 from services.timetable_service import build_timetable
+from services.webvpn_auth_service import ControlledBrowserUnavailableError
 
 proxy_request = proxy_service.proxy_request
 
@@ -363,6 +364,7 @@ async def startup_runtime_services() -> None:
 
 async def shutdown_runtime_services() -> None:
     webvpn_auth_service.close_auth()
+    database.DatabaseManager.close_all()
 
 
 @asynccontextmanager
@@ -1036,7 +1038,9 @@ def _cache_full_catalog(course_type: str, requested_page: int, first_payload: di
         else:
             success, data, _ = query_courses(normalized_type, page - 1)
             if not success:
-                logger.info("Full %s catalog cache refresh stopped on page %s", normalized_type, page)
+                logger.info(
+                    "Full %s catalog cache refresh stopped on page %s", normalized_type, page
+                )
                 return
             content = data.to_api_dict() if hasattr(data, "to_api_dict") else data
         if not isinstance(content, dict) or not isinstance(content.get("courses"), list):
@@ -1084,9 +1088,7 @@ def _schedule_full_catalog_cache_refresh(
         if course_type in _full_catalog_refreshing:
             return
         _full_catalog_refreshing.add(course_type)
-    asyncio.create_task(
-        _run_full_catalog_cache_refresh(course_type, requested_page, first_payload)
-    )
+    asyncio.create_task(_run_full_catalog_cache_refresh(course_type, requested_page, first_payload))
 
 
 @app.get("/api/school/courses")
@@ -1386,7 +1388,9 @@ async def api_cart_preferences(course_id: str, payload: dict):
     allowed = {"auto_enabled", "priority_group", "priority_rank"}
     values = {key: payload[key] for key in allowed if key in payload}
     if not values or not cart_service.update_course_preferences(course_id, **values):
-        return _api_error(400, "课程偏好无效或课程不存在", "INVALID_COURSE_PREFERENCE", retryable=False)
+        return _api_error(
+            400, "课程偏好无效或课程不存在", "INVALID_COURSE_PREFERENCE", retryable=False
+        )
     return {"success": True, "message": "课程偏好已更新"}
 
 
@@ -1448,10 +1452,7 @@ async def api_start_enroll(
             status_code=400,
             content={"message": "请确认当前为复选、正选或补选阶段", "is_error": True},
         )
-    if not any(
-        row.get("auto_enabled", 1)
-        for row in cart_service.get_courses_by_status("PENDING")
-    ):
+    if not any(row.get("auto_enabled", 1) for row in cart_service.get_courses_by_status("PENDING")):
         return JSONResponse(
             status_code=400,
             content={

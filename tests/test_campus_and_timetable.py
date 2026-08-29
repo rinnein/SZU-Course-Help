@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from contextlib import closing
 from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
@@ -93,7 +94,7 @@ def test_manual_login_adopts_school_campus_but_later_refresh_preserves_switch(mo
 
 def test_old_cart_database_is_migrated_with_safe_default_campus(tmp_path):
     db_path = tmp_path / "legacy.db"
-    with sqlite3.connect(db_path) as connection:
+    with closing(sqlite3.connect(db_path)) as connection, connection:
         connection.execute(
             """
             CREATE TABLE courses (
