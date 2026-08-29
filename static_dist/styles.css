@@ -745,7 +745,8 @@ a {
   font-weight: 700;
 }
 
-.cart-label-short {
+.cart-label-short,
+.school-label-short {
   display: none;
 }
 
@@ -1059,6 +1060,46 @@ a {
   display: flex;
   align-items: center;
   gap: 9px;
+  flex-wrap: wrap;
+}
+
+.course-view-options {
+  min-height: 42px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+}
+
+.filter-switch {
+  min-height: 32px;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 0 9px;
+  border-radius: var(--radius-xs);
+  color: var(--ink-soft);
+  background: transparent;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 650;
+  white-space: nowrap;
+}
+
+.filter-switch:has(input:checked) {
+  color: var(--brand);
+  background: var(--surface);
+  box-shadow: var(--shadow-xs);
+}
+
+.filter-switch input {
+  width: 15px;
+  height: 15px;
+  margin: 0;
+  accent-color: var(--brand);
 }
 
 .campus-field {
@@ -1209,6 +1250,17 @@ a {
 
 .class-list {
   padding: 0 14px 14px;
+}
+
+.filtered-empty {
+  margin: 8px 0 0;
+  padding: 18px;
+  border: 1px dashed var(--line-strong);
+  border-radius: var(--radius-sm);
+  color: var(--muted);
+  background: var(--surface-2);
+  text-align: center;
+  font-size: 13px;
 }
 
 .class-row {
@@ -2128,16 +2180,17 @@ dialog::backdrop {
 
   .topbar-actions {
     display: grid;
-    grid-template-columns: repeat(4, minmax(0, 1fr));
-    gap: 6px;
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+    gap: 4px;
     width: 100%;
   }
 
   .topbar-actions .button {
     min-width: 0;
+    height: 36px;
     min-height: 36px;
-    padding: 7px 8px;
-    font-size: 11.5px;
+    padding: 5px 4px;
+    font-size: 11px;
     white-space: nowrap;
   }
 
@@ -2145,11 +2198,13 @@ dialog::backdrop {
     margin-left: 2px;
   }
 
-  .cart-label-long {
+  .cart-label-long,
+  .school-label-long {
     display: none;
   }
 
-  .cart-label-short {
+  .cart-label-short,
+  .school-label-short {
     display: inline;
   }
 
@@ -2225,6 +2280,16 @@ dialog::backdrop {
 
   .search-field input {
     width: 100%;
+  }
+
+  .course-view-options {
+    flex: 1 1 100%;
+    justify-content: stretch;
+  }
+
+  .filter-switch {
+    flex: 1 1 0;
+    justify-content: center;
   }
 
   .timetable-content {

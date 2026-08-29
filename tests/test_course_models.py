@@ -16,8 +16,16 @@ def test_captured_school_course_responses_parse_into_frontend_models():
         assert not frontend.is_error
         assert frontend.total_count >= len(frontend.courses)
         assert all(course.course_name for course in frontend.courses)
+        assert all(hasattr(course, "credit") for course in frontend.courses)
+        assert all(hasattr(course, "course_type_name") for course in frontend.courses)
+        assert all(hasattr(course, "course_nature_name") for course in frontend.courses)
         assert all(
             class_info.teaching_class_id
+            for course in frontend.courses
+            for class_info in course.teaching_classes
+        )
+        assert all(
+            hasattr(class_info, "course_number")
             for course in frontend.courses
             for class_info in course.teaching_classes
         )

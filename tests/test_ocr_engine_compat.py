@@ -10,9 +10,10 @@ import logic
 
 @pytest.fixture(autouse=True)
 def clear_engine_cache():
-    logic._ddddocr_engines.cache_clear()
+    original_factory = logic._ddddocr_engines
+    original_factory.cache_clear()
     yield
-    logic._ddddocr_engines.cache_clear()
+    original_factory.cache_clear()
 
 
 def test_engine_factory_uses_core_exports_when_top_level_only_has_legacy(monkeypatch):
@@ -71,3 +72,49 @@ def test_engine_factory_adapts_legacy_ddddocr_api(monkeypatch):
         {"det": True, "ocr": False, "show_ad": False},
         {"ocr": True, "det": False, "beta": True, "show_ad": False},
     ]
+
+
+def test_ocr_runtime_check_accepts_predict_contract(monkeypatch):
+    class Engine:
+        def predict(self, image):
+            return image
+
+    monkeypatch.setattr(logic, "_ddddocr_engines", lambda: (Engine(), Engine()))
+
+    ready, message = logic.check_ocr_runtime()
+
+    assert ready is True
+    assert "已就绪" in message
+
+
+def test_ocr_runtime_check_reports_api_incompatibility(monkeypatch):
+    monkeypatch.setattr(logic, "_ddddocr_engines", lambda: (object(), object()))
+
+    ready, message = logic.check_ocr_runtime()
+
+    assert ready is False
+    assert "predict" in message
+
+
+def test_ocr_runtime_check_reports_import_failure(monkeypatch):
+    def unavailable():
+        raise ImportError("DetectionEngine export missing")
+
+    monkeypatch.setattr(logic, "_ddddocr_engines", unavailable)
+
+    ready, message = logic.check_ocr_runtime()
+
+    assert ready is False
+    assert "版本不兼容" in message
+
+
+def test_ocr_runtime_check_keeps_manual_login_available_on_engine_failure(monkeypatch):
+    def broken_runtime():
+        raise RuntimeError("ONNX provider unavailable")
+
+    monkeypatch.setattr(logic, "_ddddocr_engines", broken_runtime)
+
+    ready, message = logic.check_ocr_runtime()
+
+    assert ready is False
+    assert "ONNX provider unavailable" in message

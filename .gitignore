@@ -34,6 +34,7 @@ CourseEnroll/
 *.sqlite3
 
 *.log
+course_catalog_cache_v2.json
 .server.pid
 
 # Captcha/OCR working files may contain session-derived data.

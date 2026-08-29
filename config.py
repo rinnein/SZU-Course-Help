@@ -22,6 +22,11 @@ def _positive_env_int(name: str, default: int) -> int:
     return value if value > 0 else default
 
 
+def _bounded_env_int(name: str, default: int, minimum: int, maximum: int) -> int:
+    """Read a positive integer setting clamped into an inclusive range."""
+    return max(minimum, min(_positive_env_int(name, default), maximum))
+
+
 # ====================================================================
 # 选课系统基础 URL（深圳大学本科选课系统）
 # ====================================================================
@@ -68,6 +73,39 @@ ocr_relogin_max_attempts: int = 50
 unknown_response_pause_threshold: int = _positive_env_int(
     "COURSE_SELECT_UNKNOWN_RESPONSE_LIMIT",
     200,
+)
+
+# Full-catalog search reads school pages sequentially. The browser applies this
+# interval for one tab and the backend enforces it across all concurrent tabs.
+catalog_page_delay_ms: int = _bounded_env_int(
+    "COURSE_SELECT_CATALOG_PAGE_DELAY_MS",
+    600,
+    minimum=100,
+    maximum=10000,
+)
+
+# Only explicit school throttling responses are retried. These settings control
+# browser-side progress/backoff; the backend pacing gate remains authoritative.
+catalog_throttle_max_retries: int = _bounded_env_int(
+    "COURSE_SELECT_CATALOG_THROTTLE_RETRIES",
+    3,
+    minimum=1,
+    maximum=10,
+)
+catalog_throttle_backoff_ms: int = _bounded_env_int(
+    "COURSE_SELECT_CATALOG_THROTTLE_BACKOFF_MS",
+    2000,
+    minimum=250,
+    maximum=30000,
+)
+
+# Successful non-empty catalog pages may be viewed later in explicit cache
+# mode. Entries remain account/batch/campus scoped and are never used for writes.
+catalog_cache_ttl_seconds: int = _bounded_env_int(
+    "COURSE_SELECT_CATALOG_CACHE_TTL_SECONDS",
+    21600,
+    minimum=300,
+    maximum=604800,
 )
 
 # ====================================================================

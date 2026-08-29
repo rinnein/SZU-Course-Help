@@ -37,6 +37,66 @@ def test_health_and_static_login_page():
     assert bootstrap["ui_asset_build"] == app.UI_ASSET_BUILD
 
 
+def test_unsafe_pr4_routes_are_not_exposed():
+    paths = {route.path for route in app.app.routes}
+
+    assert "/api/card_key" not in paths
+    assert not any(path == "/proxy" or path.startswith("/proxy/") for path in paths)
+
+
+def test_api_rejects_untrusted_browser_origins_before_route_execution(monkeypatch):
+    monkeypatch.setattr(
+        app.logic,
+        "fetch_vtoken_and_image",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("route must not execute")),
+    )
+
+    response = client.get(
+        "/api/captcha",
+        headers={"Origin": "https://attacker.invalid", "Sec-Fetch-Site": "cross-site"},
+    )
+
+    assert response.status_code == 403
+    assert response.json()["error_code"] == "UNTRUSTED_ORIGIN"
+
+
+def test_api_accepts_current_local_origin():
+    response = client.get(
+        "/api/health",
+        headers={"Origin": f"http://127.0.0.1:{app.SERVER_PORT}"},
+    )
+    assert response.status_code == 200
+
+
+def test_official_school_page_uses_external_public_url_without_secrets(monkeypatch):
+    opened = []
+    monkeypatch.setattr(app.webbrowser, "open_new_tab", lambda url: opened.append(url) or True)
+    monkeypatch.setattr(config, "token", "secret-token")
+    monkeypatch.setattr(config, "combined_cookie", "secret-cookie")
+
+    response = client.post("/api/school/open")
+
+    assert response.status_code == 200
+    assert opened == [app.OFFICIAL_SCHOOL_HOME_URL]
+    assert "secret-token" not in opened[0]
+    assert "secret-cookie" not in opened[0]
+    assert "/proxy/" not in opened[0]
+
+
+def test_official_school_page_reports_browser_launch_failure(monkeypatch):
+    monkeypatch.setattr(
+        app.webbrowser,
+        "open_new_tab",
+        lambda _url: (_ for _ in ()).throw(RuntimeError("no browser")),
+    )
+
+    response = client.post("/api/school/open")
+
+    assert response.status_code == 503
+    assert response.json()["error_code"] == "BROWSER_OPEN_FAILED"
+    assert response.json()["url"] == app.OFFICIAL_SCHOOL_HOME_URL
+
+
 def test_captcha_api_reports_closed_window_without_generic_502(monkeypatch):
     monkeypatch.setattr(
         app.logic,
@@ -135,6 +195,29 @@ def test_session_uses_backend_phase_classification(monkeypatch):
     body = client.get("/api/session").json()
     assert body["phase"] == config.PHASE_PRESELECTION
     assert body["automatic_enroll_allowed"] is False
+
+
+def test_session_exposes_bounded_catalog_pacing_settings(monkeypatch):
+    set_logged_session(monkeypatch)
+    monkeypatch.setattr(config, "catalog_page_delay_ms", 800)
+    monkeypatch.setattr(config, "catalog_throttle_max_retries", 4)
+    monkeypatch.setattr(config, "catalog_throttle_backoff_ms", 2500)
+
+    body = client.get("/api/session").json()
+
+    assert body["catalog_page_delay_ms"] == 800
+    assert body["catalog_throttle_max_retries"] == 4
+    assert body["catalog_throttle_backoff_ms"] == 2500
+
+
+def test_catalog_pacing_environment_values_are_bounded(monkeypatch):
+    monkeypatch.setenv("TEST_SETTING", "50")
+    assert config._bounded_env_int("TEST_SETTING", 600, 100, 10000) == 100
+    monkeypatch.setenv("TEST_SETTING", "20000")
+    assert config._bounded_env_int("TEST_SETTING", 600, 100, 10000) == 10000
+    for raw in ("", "invalid", "0", "-1"):
+        monkeypatch.setenv("TEST_SETTING", raw)
+        assert config._bounded_env_int("TEST_SETTING", 600, 100, 10000) == 600
 
     monkeypatch.setattr(config, "elective_batch_name", "补选阶段")
     body = client.get("/api/session").json()
@@ -265,6 +348,122 @@ def test_course_api_reports_retryable_school_timeout(monkeypatch):
     assert response.status_code == 504
     assert response.json()["error_code"] == "SCHOOL_TIMEOUT"
     assert response.json()["retryable"] is True
+
+
+def test_course_api_returns_precise_throttle_contract(monkeypatch):
+    set_logged_session(monkeypatch)
+    monkeypatch.setattr(config, "catalog_throttle_backoff_ms", 2300)
+    monkeypatch.setattr(
+        app,
+        "query_courses",
+        lambda *_args: (False, app.COURSE_QUERY_THROTTLED, "本班课程(推荐)"),
+    )
+
+    response = client.get("/api/school/courses?type=TJKC&page=1&page_size=10")
+
+    assert response.status_code == 429
+    assert response.json()["error_code"] == "SCHOOL_COURSE_THROTTLED"
+    assert response.json()["retryable"] is True
+    assert response.json()["retry_after_ms"] == 2300
+
+
+def test_course_cache_api_is_read_only_and_exactly_scoped(monkeypatch):
+    set_logged_session(monkeypatch, batch_code="batch-a", batch_name="补选阶段")
+    monkeypatch.setattr(config, "campus_code", "01")
+    monkeypatch.setattr(config, "campus_name", "粤海校区")
+
+    payload = {
+        "total_count": 1,
+        "courses": [
+            {
+                "course_name": "缓存测试课程",
+                "course_number": "TEST001",
+                "tcList": [],
+            }
+        ],
+        "msg": "",
+        "is_error": False,
+    }
+    monkeypatch.setattr(app, "query_courses", lambda *_args: (True, payload, "本班课程"))
+
+    live = client.get("/api/school/courses?type=TJKC&page=1&page_size=10")
+    assert live.status_code == 200
+    assert live.json()["cached"] is False
+    assert live.json()["has_cache"] is True
+
+    monkeypatch.setattr(
+        app,
+        "query_courses",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("cache mode must not query school")),
+    )
+    cached = client.get("/api/school/courses?type=TJKC&page=1&page_size=10&cache_mode=true")
+    assert cached.status_code == 200
+    assert cached.json()["cached"] is True
+    assert cached.json()["cache_read_only"] is True
+
+    monkeypatch.setattr(config, "campus_code", "02")
+    monkeypatch.setattr(config, "campus_name", "丽湖校区")
+    other_campus = client.get("/api/school/courses?type=TJKC&page=1&page_size=10&cache_mode=true")
+    assert other_campus.status_code == 404
+    assert other_campus.json()["error_code"] == "CATALOG_CACHE_MISS"
+
+
+def test_course_response_is_not_cached_when_scope_changes_mid_request(monkeypatch):
+    set_logged_session(monkeypatch, batch_code="batch-a", batch_name="补选阶段")
+    monkeypatch.setattr(config, "campus_code", "01")
+    payload = {
+        "total_count": 1,
+        "courses": [{"course_name": "切换中的课程", "tcList": []}],
+        "msg": "",
+        "is_error": False,
+    }
+
+    def query_then_switch_scope(*_args):
+        config.campus_code = "02"
+        config.campus_name = "丽湖校区"
+        return True, payload, "本班课程"
+
+    monkeypatch.setattr(app, "query_courses", query_then_switch_scope)
+    response = client.get("/api/school/courses?type=TJKC&page=1&page_size=10")
+
+    assert response.status_code == 200
+    assert "has_cache" not in response.json()
+    old_scope = app.course_cache_service.CatalogCacheScope(
+        "2024110122",
+        "batch-a",
+        "01",
+    )
+    new_scope = app.course_cache_service.CatalogCacheScope(
+        "2024110122",
+        "batch-a",
+        "02",
+    )
+    assert app.course_cache_service.has_page(old_scope, "TJKC", 1, 10) is False
+    assert app.course_cache_service.has_page(new_scope, "TJKC", 1, 10) is False
+
+
+def test_closed_phase_can_read_exact_cache_without_school_request(monkeypatch):
+    set_logged_session(monkeypatch, batch_code="batch-a", batch_name="补选阶段")
+    monkeypatch.setattr(config, "campus_code", "01")
+    payload = {
+        "total_count": 1,
+        "courses": [{"course_name": "关闭前课程", "tcList": []}],
+        "msg": "",
+        "is_error": False,
+    }
+    monkeypatch.setattr(app, "query_courses", lambda *_args: (True, payload, "本班课程"))
+    assert client.get("/api/school/courses?type=TJKC&page=1&page_size=10").status_code == 200
+
+    monkeypatch.setattr(config, "elective_batch_name", "补选已结束")
+    monkeypatch.setattr(
+        app,
+        "query_courses",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("closed cache must stay local")),
+    )
+    response = client.get("/api/school/courses?type=TJKC&page=1&page_size=10&cache_mode=true")
+
+    assert response.status_code == 200
+    assert response.json()["cached"] is True
 
 
 def test_course_api_rejects_zero_ui_page():

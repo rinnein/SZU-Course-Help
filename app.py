@@ -29,7 +29,7 @@ from campus import (
 from card_key import verify_card_key
 from logging_config import configure_logging
 from project_paths import resource_path
-from services import cart_service
+from services import cart_service, course_cache_service
 from services.auth_service import (
     LOGIN_ERROR_MSG,
     attempt_automatic_relogin,
@@ -46,6 +46,7 @@ from services.auth_service import (
 from services.cache_service import get_no_cache_headers
 from services.course_service import (
     COURSE_QUERY_REJECTED,
+    COURSE_QUERY_THROTTLED,
     COURSE_RESPONSE_INVALID,
     COURSE_WINDOW_CLOSED,
     SESSION_EXPIRED,
@@ -67,7 +68,7 @@ from services.timetable_service import build_timetable
 
 SERVER_HOST = "127.0.0.1"
 DEFAULT_SERVER_PORT = 8000
-UI_ASSET_BUILD = "20260828.6"
+UI_ASSET_BUILD = "20260829.1"
 UI_CACHE_TOKEN = secrets.token_urlsafe(8)
 logger = logging.getLogger(__name__)
 
@@ -97,21 +98,41 @@ def _find_available_port(preferred: int, attempts: int = 20) -> int:
 
 
 SERVER_PORT = _find_available_port(_preferred_port())
+LOCAL_UI_ORIGINS = frozenset(
+    {
+        f"http://127.0.0.1:{SERVER_PORT}",
+        f"http://localhost:{SERVER_PORT}",
+    }
+)
+OFFICIAL_SCHOOL_HOME_URL = f"{config.SCHOOL_BASE_URL}*default/index.do"
 
 _runtime_prefill = {"student_id": "", "card_key": ""}
 
 
-app = FastAPI(title="深大抢课助手 API", version="3.4.0")
+app = FastAPI(title="深大抢课助手 API", version="3.5.0")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        f"http://127.0.0.1:{SERVER_PORT}",
-        f"http://localhost:{SERVER_PORT}",
-    ],
+    allow_origins=sorted(LOCAL_UI_ORIGINS),
     allow_credentials=True,
     allow_methods=["GET", "POST"],
     allow_headers=["Content-Type"],
 )
+
+
+@app.middleware("http")
+async def enforce_local_api_origin(request, call_next):
+    """Reject browser cross-site access before any local API route executes."""
+    if request.url.path.startswith("/api/"):
+        origin = str(request.headers.get("origin") or "").rstrip("/")
+        fetch_site = str(request.headers.get("sec-fetch-site") or "").lower()
+        if (origin and origin not in LOCAL_UI_ORIGINS) or fetch_site == "cross-site":
+            return _api_error(
+                403,
+                "本地 API 拒绝了来自其他站点的请求",
+                "UNTRUSTED_ORIGIN",
+                retryable=False,
+            )
+    return await call_next(request)
 
 
 class LoginRequest(BaseModel):
@@ -270,6 +291,9 @@ def _session_payload() -> dict:
         "task_paused_at": task_state["paused_at"],
         "task_stopping": task_state["stopping"],
         "task_stopping_reason": task_state["stopping_reason"],
+        "catalog_page_delay_ms": int(config.catalog_page_delay_ms),
+        "catalog_throttle_max_retries": int(config.catalog_throttle_max_retries),
+        "catalog_throttle_backoff_ms": int(config.catalog_throttle_backoff_ms),
         "ui_cache_token": UI_CACHE_TOKEN,
         "campus_options": campus_options_payload(),
     }
@@ -534,6 +558,7 @@ async def api_school_courses(
     ),
     page: int = Query(default=1, ge=1, le=10000),
     page_size: int = Query(default=10, ge=1, le=100),
+    cache_mode: bool = Query(default=False),
 ):
     if not config.token or not config.combined_cookie:
         return _not_logged_in_response()
@@ -555,6 +580,30 @@ async def api_school_courses(
 
     snapshot = get_session_snapshot()
     phase = config.classify_elective_phase(str(snapshot["batch_name"]))
+    try:
+        cache_scope = course_cache_service.scope_from_snapshot(snapshot)
+    except ValueError:
+        cache_scope = None
+    if cache_mode:
+        cached = (
+            course_cache_service.get_page(
+                cache_scope,
+                normalized_type,
+                page,
+                page_size,
+                allow_stale=True,
+            )
+            if cache_scope is not None
+            else None
+        )
+        if cached is None:
+            return _api_error(
+                404,
+                "当前学号、批次和校区没有这一页的课程缓存，请切换回实时数据。",
+                "CATALOG_CACHE_MISS",
+                retryable=False,
+            )
+        return JSONResponse(content=cached, headers=get_no_cache_headers())
     if phase == config.PHASE_CLOSED:
         return _api_error(
             409,
@@ -600,6 +649,29 @@ async def api_school_courses(
             )
         if success:
             content = data.to_api_dict() if hasattr(data, "to_api_dict") else data
+            latest_snapshot = get_session_snapshot()
+            try:
+                latest_scope = course_cache_service.scope_from_snapshot(latest_snapshot)
+            except ValueError:
+                latest_scope = None
+            if latest_scope is not None and latest_scope == cache_scope:
+                course_cache_service.put_page(
+                    latest_scope,
+                    normalized_type,
+                    page,
+                    page_size,
+                    content,
+                )
+                content = {
+                    **content,
+                    "cached": False,
+                    "has_cache": course_cache_service.has_page(
+                        latest_scope,
+                        normalized_type,
+                        page,
+                        page_size,
+                    ),
+                }
             return JSONResponse(content=content, headers=get_no_cache_headers())
         failure_map = {
             COURSE_WINDOW_CLOSED: (
@@ -611,6 +683,11 @@ async def api_school_courses(
                 502,
                 "学校暂时拒绝了课程目录请求，请稍后刷新；本地清单不受影响。",
                 "SCHOOL_COURSE_REJECTED",
+            ),
+            COURSE_QUERY_THROTTLED: (
+                429,
+                "学校提示课程目录请求过快，程序将降低速度后重试。",
+                "SCHOOL_COURSE_THROTTLED",
             ),
             COURSE_RESPONSE_INVALID: (
                 502,
@@ -627,6 +704,11 @@ async def api_school_courses(
             message,
             error_code,
             retryable=True,
+            **(
+                {"retry_after_ms": int(config.catalog_throttle_backoff_ms)}
+                if data == COURSE_QUERY_THROTTLED
+                else {}
+            ),
         )
     except requests.Timeout:
         logger.warning("Course-list endpoint timed out")
@@ -1007,6 +1089,32 @@ async def api_health():
         "timestamp": datetime.now().astimezone().isoformat(),
         "version": app.version,
     }
+
+
+@app.post("/api/school/open")
+async def api_open_official_school_page():
+    """Open the public school entry without exposing local session secrets."""
+    try:
+        opened = await asyncio.to_thread(webbrowser.open_new_tab, OFFICIAL_SCHOOL_HOME_URL)
+    except Exception as exc:
+        logger.warning("Unable to open official school page: %s", exc)
+        opened = False
+    if not opened:
+        return _api_error(
+            503,
+            "系统浏览器未能自动打开，请手动访问深圳大学本科选课系统",
+            "BROWSER_OPEN_FAILED",
+            retryable=True,
+            url=OFFICIAL_SCHOOL_HOME_URL,
+        )
+    return JSONResponse(
+        content={
+            "message": "已在系统浏览器打开学校官方选课页面",
+            "is_error": False,
+            "url": OFFICIAL_SCHOOL_HOME_URL,
+        },
+        headers=get_no_cache_headers(),
+    )
 
 
 def _safe_static_file(relative_path: str) -> Path | None:

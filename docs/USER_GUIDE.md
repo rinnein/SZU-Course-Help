@@ -1,4 +1,4 @@
-# 深大抢课助手 3.4.0 使用手册
+# 深大抢课助手 3.5.0 使用手册
 
 - 适用项目：SZU Course Help
 - 适用人群：希望直接下载并运行、不熟悉 Python 或命令行的用户
@@ -11,10 +11,10 @@
 
 打开 GitHub Releases 页面，在最新版本底部的 Assets 中按系统下载：
 
-- Windows 10/11 64 位：`SZU-Course-Help-v3.4.0-windows-x64.zip`
-- macOS Apple 芯片：`SZU-Course-Help-v3.4.0-macos-arm64.zip`
-- macOS Intel 芯片：`SZU-Course-Help-v3.4.0-macos-x64.zip`
-- Linux 64 位：`SZU-Course-Help-v3.4.0-linux-x64.zip`
+- Windows 10/11 64 位：`SZU-Course-Help-v3.5.0-windows-x64.zip`
+- macOS Apple 芯片：`SZU-Course-Help-v3.5.0-macos-arm64.zip`
+- macOS Intel 芯片：`SZU-Course-Help-v3.5.0-macos-x64.zip`
+- Linux 64 位：`SZU-Course-Help-v3.5.0-linux-x64.zip`
 - 源码仅供开发者使用，普通用户不要下载 Source code 压缩包。
 
 下载后必须先完整解压。不要在压缩包预览窗口内直接运行程序，也不要只把主程序单独拖出来，否则 OCR 模型和依赖文件可能丢失。
@@ -215,11 +215,11 @@ Card Key 只在本机验证，不会发送给学校。学校密码只保存在�
 
 ### 暂停或失败后无法移除课程
 
-先确认页面状态。显示“正在暂停”时，程序正在等待当前学校请求结束；变为“已暂停”后，活动课程的“移除”会自动启用。已停止课程可以直接移除，无需暂停其他课程。如果按钮仍是旧状态，请确认使用的是 v3.4.0 或更新版本，并重新打开本次终端输出的页面地址。
+先确认页面状态。显示“正在暂停”时，程序正在等待当前学校请求结束；变为“已暂停”后，活动课程的“移除”会自动启用。已停止课程可以直接移除，无需暂停其他课程。如果按钮仍是旧状态，请确认使用的是 v3.5.0 或更新版本，并重新打开本次终端输出的页面地址。
 
 ### 自动重新登录显示“OCR 依赖不可用”
 
-先确认使用的是 v3.4.0 或更新版本。本版本兼容 `ddddocr 1.6.1` 在不同平台上的新旧导出方式，官方 Release 也会在每个平台打包前真实初始化 OCR 引擎。源码运行请使用文档指定的 Python 3.13，并重新执行 `python -m pip install -r requirements.txt`；不要混用其他项目的虚拟环境。仍然失败时请保留完整终端日志，并在反馈前删除其中的学号、密码、Cookie、token 和本机路径等敏感信息。
+先确认使用的是 v3.5.0 或更新版本。本版本兼容 `ddddocr 1.6.1` 在不同平台上的新旧导出方式，官方 Release 也会在每个平台打包前真实初始化 OCR 引擎。源码运行请使用文档指定的 Python 3.13，并重新执行 `python -m pip install -r requirements.txt`；不要混用其他项目的虚拟环境。仍然失败时请保留完整终端日志，并在反馈前删除其中的学号、密码、Cookie、token 和本机路径等敏感信息。
 
 ### 杀毒软件提示未知程序
 
@@ -267,4 +267,4 @@ python -m pytest -q
 
 ---
 
-版本：3.4.0 · 许可证：MIT License · 问题反馈：https://github.com/Weeye-hua/SZU-Course-Help/issues
+版本：3.5.0 · 许可证：MIT License · 问题反馈：https://github.com/Weeye-hua/SZU-Course-Help/issues

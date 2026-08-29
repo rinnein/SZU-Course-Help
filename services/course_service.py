@@ -22,10 +22,12 @@ from course_list import (
 )
 from course_models import CoursesResponse
 from school_session import is_session_expired_response
+from services.catalog_pacing import pace_catalog_request
 
 logger = logging.getLogger(__name__)
 SESSION_EXPIRED = "SESSION_EXPIRED"
 COURSE_QUERY_REJECTED = "COURSE_QUERY_REJECTED"
+COURSE_QUERY_THROTTLED = "COURSE_QUERY_THROTTLED"
 COURSE_RESPONSE_INVALID = "COURSE_RESPONSE_INVALID"
 COURSE_WINDOW_CLOSED = "COURSE_WINDOW_CLOSED"
 
@@ -38,6 +40,21 @@ COURSE_WINDOW_CLOSED_KEYWORDS = (
     "已结束",
     "已截止",
     "暂停选课",
+)
+
+COURSE_THROTTLE_KEYWORDS = (
+    "请求过快",
+    "请求太快",
+    "请求过于频繁",
+    "请求频繁",
+    "操作过于频繁",
+    "操作频繁",
+    "访问过于频繁",
+    "访问频繁",
+    "提交过于频繁",
+    "提交频繁",
+    "too many requests",
+    "rate limit",
 )
 
 CourseQuery = Callable[[int], CoursesResponse | CourseQueryFailure]
@@ -73,6 +90,11 @@ def _looks_like_closed_window(message: str) -> bool:
     return any(keyword in normalized for keyword in COURSE_WINDOW_CLOSED_KEYWORDS)
 
 
+def _looks_like_throttling(message: str) -> bool:
+    normalized = str(message or "").strip().lower()
+    return any(keyword in normalized for keyword in COURSE_THROTTLE_KEYWORDS)
+
+
 def query_courses(course_type: str, page: int) -> tuple[bool, Any, str]:
     """Query one zero-based page and normalize school failures."""
     normalized_type = str(course_type or "").strip().upper()
@@ -84,6 +106,7 @@ def query_courses(course_type: str, page: int) -> tuple[bool, Any, str]:
         return False, get_unsupported_message(normalized_type), ""
 
     type_name, query_function = COURSE_TYPE_MAP[normalized_type]
+    pace_catalog_request()
     result = query_function(page)
 
     if isinstance(result, CoursesResponse):
@@ -108,6 +131,11 @@ def query_courses(course_type: str, page: int) -> tuple[bool, Any, str]:
         )
         if _looks_like_closed_window(result.msg):
             return False, COURSE_WINDOW_CLOSED, type_name
+        normalized_code = str(result.code or "").strip().lower()
+        if normalized_code in {"429", "too_many_requests", "rate_limit"} or _looks_like_throttling(
+            result.msg
+        ):
+            return False, COURSE_QUERY_THROTTLED, type_name
         return False, COURSE_QUERY_REJECTED, type_name
 
     if is_session_expired_response(
@@ -120,6 +148,10 @@ def query_courses(course_type: str, page: int) -> tuple[bool, Any, str]:
             result.status_code,
         )
         return False, SESSION_EXPIRED, type_name
+
+    if result.status_code == 429 or _looks_like_throttling(result.text):
+        logger.info("School throttled course query %s", type_name)
+        return False, COURSE_QUERY_THROTTLED, type_name
 
     logger.warning(
         "Course query %s returned malformed data: HTTP=%s error=%s",
@@ -174,6 +206,7 @@ def get_enrolled_courses() -> tuple[bool, list[dict[str, str]] | str]:
 __all__ = [
     "COURSE_TYPE_MAP",
     "COURSE_QUERY_REJECTED",
+    "COURSE_QUERY_THROTTLED",
     "COURSE_RESPONSE_INVALID",
     "COURSE_WINDOW_CLOSED",
     "SESSION_EXPIRED",

@@ -6,7 +6,7 @@
   <meta name="color-scheme" content="light">
   <title>抢课工作台 | 深大抢课助手</title>
   <link rel="icon" href="/favicon.ico">
-  <link rel="stylesheet" href="/styles.css?build=20260828.6">
+  <link rel="stylesheet" href="/styles.css?build=20260829.1">
 </head>
 <body class="app-page">
   <header class="topbar">
@@ -22,6 +22,9 @@
       <span id="studentLabel" class="student-label">未登录</span>
       <button id="openTimetable" class="button button-quiet" type="button">查看课表</button>
       <button id="openMyCourses" class="button button-quiet" type="button">我的课程</button>
+      <button id="openSchoolOfficial" class="button button-quiet" type="button">
+        <span class="school-label-long">学校系统</span><span class="school-label-short">学校</span>
+      </button>
       <button id="openCart" class="button button-secondary cart-button" type="button">
         <span class="cart-label-long">选课清单</span><span class="cart-label-short">清单</span>
         <span id="cartCount" class="count-badge">0</span>
@@ -90,6 +93,20 @@
             <span class="sr-only">搜索全部课程</span>
             <input id="courseSearch" type="search" placeholder="搜索全部课程" autocomplete="off">
           </label>
+          <div class="course-view-options" aria-label="教学班筛选">
+            <label class="filter-switch">
+              <input id="filterConflictSwitch" type="checkbox">
+              <span>隐藏冲突</span>
+            </label>
+            <label class="filter-switch">
+              <input id="filterFullSwitch" type="checkbox">
+              <span>隐藏已满</span>
+            </label>
+            <label class="filter-switch">
+              <input id="cacheModeSwitch" type="checkbox">
+              <span>使用缓存</span>
+            </label>
+          </div>
           <button id="refreshCourses" class="button button-secondary" type="button">刷新课程</button>
         </div>
       </header>
@@ -205,6 +222,6 @@
   </dialog>
 
   <div id="toastRegion" class="toast-region" aria-live="polite" aria-atomic="true"></div>
-  <script src="/course-app.js?build=20260828.6" defer></script>
+  <script src="/course-app.js?build=20260829.1" defer></script>
 </body>
 </html>

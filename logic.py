@@ -391,6 +391,22 @@ def _ddddocr_engines():
     return DetectionEngine(), OCREngine(beta=True)
 
 
+def check_ocr_runtime() -> tuple[bool, str]:
+    """Initialize OCR early and verify the adapter contract used by relogin."""
+    try:
+        detector, recognizer = _ddddocr_engines()
+    except Exception as exc:
+        return False, f"OCR 依赖不可用或版本不兼容: {exc}"
+    missing = [
+        name
+        for name, engine in (("检测", detector), ("识别", recognizer))
+        if not callable(getattr(engine, "predict", None))
+    ]
+    if missing:
+        return False, f"OCR {'/'.join(missing)}引擎缺少 predict 接口"
+    return True, "OCR 检测与识别引擎已就绪"
+
+
 def recognize_captcha_centers() -> list[list[int]]:
     """Recognize the four captcha targets and return click coordinates."""
     import cv2

@@ -75,6 +75,14 @@ def test_login_captcha_ui_has_terminal_failure_states():
     assert "重新获取验证码" in script
 
 
+def test_login_page_never_persists_school_password_in_browser_storage():
+    script = (STATIC / "login.js").read_text(encoding="utf-8")
+
+    assert "localStorage" not in script
+    assert "sessionStorage" not in script
+    assert "rememberPassword" not in script
+
+
 def test_course_page_exposes_pause_and_relogin_states():
     script = (STATIC / "course-app.js").read_text(encoding="utf-8")
 
@@ -132,6 +140,54 @@ def test_course_search_filters_full_catalog_and_repaginates():
     assert "invalidateCatalogCache" in script
     assert "scopeKey !== catalogScopeKey()" in script
     # 多页读取有节流和明确上限，不能把截断响应当作完整目录。
-    assert "CATALOG_PAGE_DELAY_MS" in script
+    assert "appState.catalogPageDelayMs" in script
     assert 'code: "CATALOG_PAGE_LIMIT"' in script
     assert "cache.courses.length !== cache.totalCount" in script
+
+
+def test_course_catalog_retries_only_precise_throttle_errors():
+    script = (STATIC / "course-app.js").read_text(encoding="utf-8")
+
+    assert "catalog_page_delay_ms" in script
+    assert "catalog_throttle_max_retries" in script
+    assert "catalog_throttle_backoff_ms" in script
+    assert 'error?.code !== "SCHOOL_COURSE_THROTTLED"' in script
+    assert 'error?.code !== "SCHOOL_COURSE_REJECTED"' not in script
+    assert "waitForCatalogDelay(pacingDelayMs, controller.signal)" in script
+    assert "学校提示请求过快" in script
+
+
+def test_course_filters_are_persistent_and_keep_selected_classes_visible():
+    html = (STATIC / "index.html").read_text(encoding="utf-8")
+    script = (STATIC / "course-app.js").read_text(encoding="utf-8")
+
+    assert 'id="filterConflictSwitch"' in html
+    assert 'id="filterFullSwitch"' in html
+    assert 'id="cacheModeSwitch"' in html
+    assert "FILTER_PREFERENCES_KEY" in script
+    assert "visibleTeachingClasses" in script
+    assert "if (classIsSelected(classInfo)) return true" in script
+    assert "details.open" not in script
+
+
+def test_cached_courses_are_explicitly_read_only_and_scope_aware():
+    script = (STATIC / "course-app.js").read_text(encoding="utf-8")
+
+    assert 'params.set("cache_mode", "true")' in script
+    assert 'cacheReadOnly\n      ? "缓存只读"' in script
+    assert "cacheReadOnly || blocked" in script
+    assert "缓存课程不能加入抢课清单" in script
+
+
+def test_official_school_button_never_uses_a_local_reverse_proxy():
+    html = (STATIC / "index.html").read_text(encoding="utf-8")
+    script = (STATIC / "course-app.js").read_text(encoding="utf-8")
+
+    assert 'id="openSchoolOfficial"' in html
+    assert 'class="school-label-short">学校</span>' in html
+    assert "grid-template-columns: repeat(5, minmax(0, 1fr))" in (STATIC / "styles.css").read_text(
+        encoding="utf-8"
+    )
+    assert 'api("/api/school/open", { method: "POST" })' in script
+    assert "/proxy/" not in html
+    assert "/proxy/" not in script

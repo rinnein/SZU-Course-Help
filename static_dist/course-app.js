@@ -4,9 +4,13 @@ const REQUEST_TIMEOUT_MS = 30000;
 const SESSION_RECOVERY_TIMEOUT_MS = 180000;
 const FILTER_PAGE_SIZE = 10;
 const MAX_CATALOG_PAGES = 1000;
-const CATALOG_PAGE_DELAY_MS = 150;
+const CATALOG_PAGE_MAX_DELAY_MS = 10000;
+const catalogTiming = globalThis.__CATALOG_TIMING__ || {};
+const CATALOG_TEST_BACKOFF_MS = Number(catalogTiming.throttleBackoffMs) || 0;
+const CATALOG_TEST_BACKOFF_MAX_MS = Number(catalogTiming.throttleBackoffMaxMs) || 0;
 const SEARCH_DEBOUNCE_MS = 250;
 const TIMETABLE_MIN_ROW_HEIGHT = 64;
+const FILTER_PREFERENCES_KEY = "szu-course-help.course-filters.v1";
 
 const categoryNames = {
   TJKC: "本班推荐",
@@ -38,12 +42,21 @@ const appState = {
   catalogLoadingType: "",
   catalogRequestController: null,
   catalogRequestId: 0,
+  catalogPageDelayMs: 600,
+  catalogThrottleMaxRetries: 3,
+  catalogThrottleBackoffMs: 2000,
+  filters: {
+    hideConflict: false,
+    hideFull: false,
+  },
+  cacheMode: false,
   cart: [],
   session: null,
   loadingCourses: false,
   courseRequestController: null,
   courseRequestId: 0,
   courseDataKey: "",
+  courseCacheMeta: null,
   catalogBlockedCode: "",
   loadingSession: false,
   refreshingPhase: false,
@@ -85,6 +98,9 @@ const appElements = {
   courseTitle: document.querySelector("#courseTitle"),
   courseSummary: document.querySelector("#courseSummary"),
   courseSearch: document.querySelector("#courseSearch"),
+  filterConflictSwitch: document.querySelector("#filterConflictSwitch"),
+  filterFullSwitch: document.querySelector("#filterFullSwitch"),
+  cacheModeSwitch: document.querySelector("#cacheModeSwitch"),
   refreshCourses: document.querySelector("#refreshCourses"),
   campusSelect: document.querySelector("#campusSelect"),
   courseList: document.querySelector("#courseList"),
@@ -106,6 +122,7 @@ const appElements = {
   sessionLoginLink: document.querySelector("#sessionDialog a[href^='/login']"),
   brandLink: document.querySelector(".topbar .brand-lockup"),
   logout: document.querySelector("#logoutButton"),
+  openSchoolOfficial: document.querySelector("#openSchoolOfficial"),
   toastRegion: document.querySelector("#toastRegion"),
   openMyCourses: document.querySelector("#openMyCourses"),
   myCoursesDialog: document.querySelector("#myCoursesDialog"),
@@ -174,6 +191,113 @@ function element(tag, className = "", text = "") {
   if (className) node.className = className;
   if (text !== "") node.textContent = text;
   return node;
+}
+
+function numericValue(value, fallback = 0) {
+  const text = String(value ?? "").replace(/,/g, "").trim();
+  if (!text) return fallback;
+  const number = Number(text);
+  return Number.isFinite(number) ? number : fallback;
+}
+
+function flagEnabled(value) {
+  const normalized = String(value ?? "").trim().toLowerCase();
+  return value === true || normalized === "1" || normalized === "true" || normalized === "yes";
+}
+
+function classIsFull(classInfo) {
+  if (flagEnabled(classInfo.is_full)) return true;
+  const selected = numericValue(classInfo.number_of_selected, NaN);
+  const capacity = numericValue(classInfo.class_capacity, NaN);
+  return Number.isFinite(selected)
+    && Number.isFinite(capacity)
+    && capacity > 0
+    && selected >= capacity;
+}
+
+function classIsSelected(classInfo) {
+  return flagEnabled(classInfo.is_choose);
+}
+
+function classHasConflict(classInfo) {
+  return flagEnabled(classInfo.is_conflict) || flagEnabled(classInfo.conflict);
+}
+
+function readFilterPreferences() {
+  try {
+    const saved = JSON.parse(window.localStorage?.getItem(FILTER_PREFERENCES_KEY) || "null");
+    return {
+      hideConflict: saved?.hideConflict === true,
+      hideFull: saved?.hideFull === true,
+    };
+  } catch {
+    return { hideConflict: false, hideFull: false };
+  }
+}
+
+function saveFilterPreferences() {
+  try {
+    window.localStorage?.setItem(FILTER_PREFERENCES_KEY, JSON.stringify(appState.filters));
+  } catch {
+    // Storage restrictions must never break course rendering.
+  }
+}
+
+function visibleTeachingClasses(course) {
+  const classes = Array.isArray(course.tcList) ? course.tcList : [];
+  return classes.filter((classInfo) => {
+    if (classIsSelected(classInfo)) return true;
+    if (appState.filters.hideConflict && classHasConflict(classInfo)) return false;
+    if (appState.filters.hideFull && classIsFull(classInfo)) return false;
+    return true;
+  });
+}
+
+function courseRequestUrl(courseType, page, pageSize = 10, cacheMode = appState.cacheMode) {
+  const params = new URLSearchParams({
+    type: String(courseType || ""),
+    page: String(page),
+    page_size: String(pageSize),
+  });
+  if (cacheMode) params.set("cache_mode", "true");
+  return `/api/school/courses?${params.toString()}`;
+}
+
+function cacheTimestampLabel(timestamp) {
+  const value = Number(timestamp);
+  if (!Number.isFinite(value) || value <= 0) return "时间未知";
+  return new Date(value * 1000).toLocaleString("zh-CN", { hour12: false });
+}
+
+function courseSummary(totalCount, courseCount, metadata = {}) {
+  const base = `共 ${totalCount} 门课程，本页 ${courseCount} 门`;
+  if (!metadata.cached) return base;
+  const stale = metadata.cache_stale ? "，可能已过期" : "";
+  return `只读缓存：${base}（更新于 ${cacheTimestampLabel(metadata.cached_at)}${stale}）`;
+}
+
+async function setCacheMode(enabled) {
+  const nextValue = Boolean(enabled);
+  if (nextValue && !appState.session?.logged_in) {
+    appElements.cacheModeSwitch.checked = false;
+    showToast("请先登录，再查看当前学号对应的课程缓存", true);
+    return;
+  }
+  if (appState.cacheMode === nextValue) return;
+  appState.cacheMode = nextValue;
+  appElements.cacheModeSwitch.checked = nextValue;
+  appState.page = 1;
+  appState.searchPage = 1;
+  appState.courseDataKey = "";
+  appState.courseCacheMeta = null;
+  appState.courses = [];
+  appState.totalCount = 0;
+  invalidateCatalogCaches();
+  if (nextValue) {
+    showToast("已切换到只读缓存，缓存课程不能加入抢课清单");
+  }
+  if (isFilterActive()) await runSearchFetch({ force: true });
+  else await loadCourses();
 }
 
 function campusOptions(session = appState.session) {
@@ -248,7 +372,7 @@ async function switchCampus(nextCode) {
     appElements.courseSearch.value = "";
     applySessionData(session);
     showToast(session.message || `已切换到${session.campus_name || "新校区"}`, false, true);
-    if (courseCatalogBlocked()) renderCourseAvailabilityState();
+    if (courseCatalogBlocked() && !appState.cacheMode) renderCourseAvailabilityState();
     else await loadCourses();
   } catch (error) {
     appElements.campusSelect.value = previousCode;
@@ -554,6 +678,18 @@ function applySessionData(session) {
   const previousReloginStatus = appState.lastReloginStatus;
   const previousCatalogScope = catalogScopeKey(appState.session);
   const nextCatalogScope = catalogScopeKey(session);
+  const configuredPageDelay = Number(session?.catalog_page_delay_ms);
+  if (Number.isFinite(configuredPageDelay) && configuredPageDelay >= 100 && configuredPageDelay <= 10000) {
+    appState.catalogPageDelayMs = configuredPageDelay;
+  }
+  const configuredRetryLimit = Number(session?.catalog_throttle_max_retries);
+  if (Number.isInteger(configuredRetryLimit) && configuredRetryLimit >= 1 && configuredRetryLimit <= 10) {
+    appState.catalogThrottleMaxRetries = configuredRetryLimit;
+  }
+  const configuredBackoff = Number(session?.catalog_throttle_backoff_ms);
+  if (Number.isFinite(configuredBackoff) && configuredBackoff >= 250 && configuredBackoff <= 30000) {
+    appState.catalogThrottleBackoffMs = configuredBackoff;
+  }
   const reloginCompleted = Boolean(appState.session)
     && String(session.relogin_status || "idle") === "success"
     && previousReloginStatus !== "success";
@@ -566,8 +702,13 @@ function applySessionData(session) {
     appState.courses = [];
     appState.totalCount = 0;
     appState.courseDataKey = "";
+    appState.courseCacheMeta = null;
   }
   appState.session = session;
+  if (!session.logged_in && appState.cacheMode) {
+    appState.cacheMode = false;
+    appElements.cacheModeSwitch.checked = false;
+  }
   renderCampusOptions(session);
   appState.lastReloginStatus = String(session.relogin_status || "idle");
   appElements.studentLabel.textContent = session.relogin_in_progress
@@ -664,7 +805,7 @@ async function loadSession(showDialog = true, refreshOnCatalogChange = true) {
         appElements.courseSearch.disabled = true;
         renderState("登录状态已失效", "请返回登录页完成登录后再读取课程目录。");
         updatePagination();
-      } else if (courseCatalogBlocked()) {
+      } else if (courseCatalogBlocked() && !appState.cacheMode) {
         renderCourseAvailabilityState();
       } else if (refreshOnCatalogChange) {
         if (!appState.session.task_running) {
@@ -694,9 +835,9 @@ async function loadSession(showDialog = true, refreshOnCatalogChange = true) {
 }
 
 function classTag(classInfo) {
-  if (String(classInfo.is_choose) === "1") return ["已选", "tag-chosen"];
-  if (String(classInfo.is_conflict) === "1") return ["时间冲突", "tag-conflict"];
-  if (String(classInfo.is_full) === "1") return ["已满", "tag-full"];
+  if (classIsSelected(classInfo)) return ["已选", "tag-chosen"];
+  if (classHasConflict(classInfo)) return ["时间冲突", "tag-conflict"];
+  if (classIsFull(classInfo)) return ["已满", "tag-full"];
   return ["可加入", "tag-open"];
 }
 
@@ -720,14 +861,19 @@ function appendClassRow(container, course, classInfo) {
   const [tagText, tagClass] = classTag(classInfo);
   actions.append(element("span", `class-tag ${tagClass}`, tagText));
 
-  const blocked = String(classInfo.is_choose) === "1" || String(classInfo.is_conflict) === "1";
+  const cacheReadOnly = appState.cacheMode || Boolean(appState.courseCacheMeta?.cached);
+  const blocked = classIsSelected(classInfo) || classHasConflict(classInfo);
   const addButton = element(
     "button",
     "button button-secondary",
-    blocked ? (String(classInfo.is_choose) === "1" ? "已选" : "不可加入") : (String(classInfo.is_full) === "1" ? "加入候补" : "加入清单"),
+    cacheReadOnly
+      ? "缓存只读"
+      : blocked
+        ? (classIsSelected(classInfo) ? "已选" : "不可加入")
+        : (classIsFull(classInfo) ? "加入候补" : "加入清单"),
   );
   addButton.type = "button";
-  addButton.disabled = blocked || Boolean(appState.session?.task_running);
+  addButton.disabled = cacheReadOnly || blocked || Boolean(appState.session?.task_running);
   addButton.addEventListener("click", async () => {
     addButton.disabled = true;
     try {
@@ -750,7 +896,7 @@ function appendClassRow(container, course, classInfo) {
     } catch (error) {
       if (!(error instanceof SessionExpiredError)) showToast(error.message, true);
     } finally {
-      addButton.disabled = blocked || Boolean(appState.session?.task_running);
+      addButton.disabled = cacheReadOnly || blocked || Boolean(appState.session?.task_running);
     }
   });
   actions.append(addButton);
@@ -763,7 +909,7 @@ function isFilterActive() {
 }
 
 function courseMatchesKeyword(course, keyword) {
-  const teachingText = (course.tcList || [])
+  const teachingText = visibleTeachingClasses(course)
     .map((item) => `${item.teacher_name || ""} ${item.teaching_place || ""}`)
     .join(" ");
   return `${course.course_name || ""} ${course.course_number || ""} ${course.department_name || ""} ${teachingText}`
@@ -771,10 +917,13 @@ function courseMatchesKeyword(course, keyword) {
     .includes(keyword);
 }
 
+appState.filters = readFilterPreferences();
+
 function renderCourseList(courses) {
   const fragment = document.createDocumentFragment();
   courses.forEach((course, index) => {
-    const details = element("details", "course-group");
+    const selected = (course.tcList || []).some((classInfo) => classIsSelected(classInfo));
+    const details = element("details", `course-group${selected ? " is-selected" : ""}`);
     details.style.animationDelay = `${Math.min(index, 8) * 40}ms`;
     const summary = element("summary");
     const main = element("div", "course-summary-main");
@@ -783,21 +932,40 @@ function renderCourseList(courses) {
       element(
         "span",
         "",
-        [course.course_number, course.department_name, course.campus_name, course.sport_name]
+        [
+          course.course_number,
+          course.course_type_name,
+          course.course_nature_name,
+          course.department_name,
+          course.credit ? `${course.credit} 学分` : "",
+          course.campus_name,
+          course.sport_name,
+        ]
           .filter(Boolean)
           .join(" · ") || "课程信息待定",
       ),
     );
     const side = element("div", "course-summary-side");
-    side.append(element("span", "", `${(course.tcList || []).length} 个教学班`));
+    const visibleClasses = visibleTeachingClasses(course);
+    side.append(
+      element(
+        "span",
+        "",
+        visibleClasses.length === (course.tcList || []).length
+          ? `${visibleClasses.length} 个教学班`
+          : `${visibleClasses.length} / ${(course.tcList || []).length} 个教学班`,
+      ),
+    );
     side.append(element("i", "course-chevron"));
     summary.append(main, side);
 
     const classes = element("div", "class-list");
     if (!(course.tcList || []).length) {
       classes.append(element("div", "empty-state", "暂无教学班"));
+    } else if (!visibleClasses.length) {
+      classes.append(element("div", "filtered-empty", "当前筛选条件下没有符合条件的教学班"));
     } else {
-      for (const classInfo of course.tcList) appendClassRow(classes, course, classInfo);
+      for (const classInfo of visibleClasses) appendClassRow(classes, course, classInfo);
     }
     details.append(summary, classes);
     fragment.append(details);
@@ -819,9 +987,12 @@ function applyCourseFilter() {
     (appState.searchPage - 1) * FILTER_PAGE_SIZE,
     appState.searchPage * FILTER_PAGE_SIZE,
   );
+  const prefix = cache.cached
+    ? `只读缓存（更新于 ${cacheTimestampLabel(cache.cachedAt)}）：`
+    : "";
   appElements.courseSummary.textContent = results.length
-    ? `匹配 ${results.length} 门课程（全部 ${cache.totalCount} 门），本页 ${pageItems.length} 门`
-    : `没有匹配课程，全部目录共 ${cache.totalCount} 门`;
+    ? `${prefix}匹配 ${results.length} 门课程（全部 ${cache.totalCount} 门），本页 ${pageItems.length} 门`
+    : `${prefix}没有匹配课程，全部目录共 ${cache.totalCount} 门`;
 }
 
 function renderFilteredCourses() {
@@ -871,7 +1042,7 @@ function renderCourses() {
 }
 
 function updatePagination() {
-  const blocked = courseCatalogBlocked();
+  const blocked = courseCatalogBlocked() && !appState.cacheMode;
   if (isFilterActive()) {
     const results = Array.isArray(appState.searchResults) ? appState.searchResults : [];
     const totalPages = Math.max(1, Math.ceil(results.length / FILTER_PAGE_SIZE));
@@ -918,8 +1089,8 @@ function invalidateCatalogCaches() {
   appState.searchPage = 1;
 }
 
-function waitForCatalogPageDelay(signal) {
-  if (CATALOG_PAGE_DELAY_MS <= 0) return Promise.resolve();
+function waitForCatalogDelay(delayMs, signal) {
+  if (delayMs <= 0) return Promise.resolve();
   return new Promise((resolve, reject) => {
     if (signal?.aborted) {
       reject(new DOMException("Catalog request aborted", "AbortError"));
@@ -932,7 +1103,7 @@ function waitForCatalogPageDelay(signal) {
     const timer = window.setTimeout(() => {
       signal?.removeEventListener("abort", onAbort);
       resolve();
-    }, CATALOG_PAGE_DELAY_MS);
+    }, delayMs);
     signal?.addEventListener("abort", onAbort, { once: true });
   });
 }
@@ -960,11 +1131,17 @@ async function fetchFullCatalog({ force = false } = {}) {
   };
   appState.catalogCaches[type] = cache;
 
-  const updateProgress = () => {
-    appElements.courseSummary.textContent = cache.totalCount
-      ? `正在加载全部课程 ${cache.courses.length} / ${cache.totalCount} 门`
-      : "正在加载全部课程";
+  const updateProgress = (message = "") => {
+    appElements.courseSummary.textContent = message
+      || (cache.totalCount
+        ? `正在加载${appState.cacheMode ? "缓存" : "全部"}课程 ${cache.courses.length} / ${cache.totalCount} 门`
+        : `正在加载${appState.cacheMode ? "课程缓存" : "全部课程"}`);
   };
+  let pacingDelayMs = appState.catalogPageDelayMs;
+  const maximumPacingDelayMs = Math.min(
+    Math.max(appState.catalogPageDelayMs * 4, 2400),
+    CATALOG_PAGE_MAX_DELAY_MS,
+  );
   updateProgress();
   renderCourses();
   updatePagination();
@@ -973,14 +1150,39 @@ async function fetchFullCatalog({ force = false } = {}) {
     let completed = false;
     let expectedTotalCount = null;
     for (let page = 1; page <= MAX_CATALOG_PAGES; page += 1) {
-      const data = await api(
-        `/api/school/courses?type=${encodeURIComponent(type)}&page=${page}&page_size=${FILTER_PAGE_SIZE}`,
-        { signal: controller.signal, timeoutMs: SESSION_RECOVERY_TIMEOUT_MS },
-      );
-      if (
-        requestId !== appState.catalogRequestId
-        || scopeKey !== catalogScopeKey()
-      ) return false;
+      let data = null;
+      for (let attempt = 0; ; attempt += 1) {
+        try {
+          data = await api(
+            courseRequestUrl(type, page, FILTER_PAGE_SIZE),
+            { signal: controller.signal, timeoutMs: SESSION_RECOVERY_TIMEOUT_MS },
+          );
+          if (
+            requestId !== appState.catalogRequestId
+            || scopeKey !== catalogScopeKey()
+          ) return false;
+          break;
+        } catch (error) {
+          if (
+            error?.code !== "SCHOOL_COURSE_THROTTLED"
+            || attempt >= appState.catalogThrottleMaxRetries
+          ) throw error;
+          const serverBackoffMs = Number(error?.payload?.retry_after_ms);
+          const baseBackoffMs = CATALOG_TEST_BACKOFF_MS
+            || (Number.isFinite(serverBackoffMs) && serverBackoffMs > 0
+              ? serverBackoffMs
+              : appState.catalogThrottleBackoffMs);
+          const backoffLimitMs = CATALOG_TEST_BACKOFF_MAX_MS
+            || Math.max(appState.catalogThrottleBackoffMs * 4, baseBackoffMs);
+          const backoffMs = Math.min(baseBackoffMs * (2 ** attempt), backoffLimitMs);
+          pacingDelayMs = Math.min(pacingDelayMs * 2, maximumPacingDelayMs);
+          updateProgress(
+            `学校提示请求过快，${Math.max(1, Math.ceil(backoffMs / 1000))} 秒后自动重试`
+              + `（第 ${attempt + 1} / ${appState.catalogThrottleMaxRetries} 次）`,
+          );
+          await waitForCatalogDelay(backoffMs, controller.signal);
+        }
+      }
       const items = Array.isArray(data.courses) ? data.courses : [];
       const reportedTotal = Number(data.total_count);
       if (!Number.isInteger(reportedTotal) || reportedTotal < 0) {
@@ -999,6 +1201,9 @@ async function fetchFullCatalog({ force = false } = {}) {
       }
       cache.totalCount = expectedTotalCount;
       cache.courses.push(...items);
+      cache.cached = Boolean(data.cached);
+      cache.cachedAt = Math.max(Number(cache.cachedAt || 0), Number(data.cached_at || 0));
+      cache.cacheStale = Boolean(cache.cacheStale || data.cache_stale);
       updateProgress();
       const totalPages = Math.max(1, Math.ceil(cache.totalCount / FILTER_PAGE_SIZE));
       if (totalPages > MAX_CATALOG_PAGES) {
@@ -1023,7 +1228,7 @@ async function fetchFullCatalog({ force = false } = {}) {
           retryable: true,
         });
       }
-      await waitForCatalogPageDelay(controller.signal);
+      if (!data.cached) await waitForCatalogDelay(pacingDelayMs, controller.signal);
     }
     if (requestId !== appState.catalogRequestId) return false;
     if (!completed) {
@@ -1033,6 +1238,13 @@ async function fetchFullCatalog({ force = false } = {}) {
       });
     }
     cache.complete = true;
+    appState.courseCacheMeta = cache.cached
+      ? {
+        cached: true,
+        cached_at: cache.cachedAt,
+        cache_stale: cache.cacheStale,
+      }
+      : { cached: false };
     return true;
   } catch (error) {
     if (isAbortError(error) || requestId !== appState.catalogRequestId) return false;
@@ -1045,6 +1257,9 @@ async function fetchFullCatalog({ force = false } = {}) {
       renderCourseAvailabilityState(error.message);
     } else {
       showToast(`${courseErrorTitle(error)}：${error.message}`, true);
+      // The error view must not inherit the in-flight loading state.
+      appState.loadingCatalog = false;
+      appState.catalogLoadingType = "";
       renderCourses();
       updatePagination();
     }
@@ -1054,14 +1269,14 @@ async function fetchFullCatalog({ force = false } = {}) {
       appState.loadingCatalog = false;
       appState.catalogLoadingType = "";
       appState.catalogRequestController = null;
-      appElements.courseSearch.disabled = courseCatalogBlocked();
+      appElements.courseSearch.disabled = courseCatalogBlocked() && !appState.cacheMode;
       appElements.refreshCourses.disabled = appState.loadingCourses || appState.refreshingPhase;
     }
   }
 }
 
 async function runSearchFetch({ force = false } = {}) {
-  if (!appState.session?.logged_in || courseCatalogBlocked()) return;
+  if (!appState.session?.logged_in || (courseCatalogBlocked() && !appState.cacheMode)) return;
   const ok = await fetchFullCatalog({ force });
   if (!ok || !isFilterActive()) return;
   applyCourseFilter();
@@ -1077,7 +1292,11 @@ async function handleSearchInput() {
       appState.searchKeyword = "";
       abortCatalogFetch();
       if (appState.courseDataKey) {
-        appElements.courseSummary.textContent = `共 ${appState.totalCount} 门课程，本页 ${appState.courses.length} 门`;
+        appElements.courseSummary.textContent = courseSummary(
+          appState.totalCount,
+          appState.courses.length,
+          appState.courseCacheMeta || {},
+        );
         renderCourses();
       }
       updatePagination();
@@ -1094,7 +1313,9 @@ function courseErrorTitle(error) {
     return "暂时无法连接服务";
   }
   if (error.code === "SCHOOL_RESPONSE_INVALID") return "学校数据暂时异常";
+  if (error.code === "SCHOOL_COURSE_THROTTLED") return "学校限制了请求速度";
   if (error.code === "SCHOOL_COURSE_REJECTED") return "学校暂时拒绝了请求";
+  if (error.code === "CATALOG_CACHE_MISS") return "当前范围没有课程缓存";
   if (error.code === "UNSUPPORTED_COURSE_TYPE") return "该目录暂不支持";
   return "课程目录读取失败";
 }
@@ -1104,7 +1325,7 @@ async function loadCourses(options = {}) {
     renderState("尚未登录", "返回登录页完成学号、密码、卡密和验证码校验。");
     return;
   }
-  if (courseCatalogBlocked()) {
+  if (courseCatalogBlocked() && !appState.cacheMode) {
     renderCourseAvailabilityState();
     return;
   }
@@ -1116,7 +1337,7 @@ async function loadCourses(options = {}) {
   const requestId = appState.courseRequestId + 1;
   const requestedType = appState.type;
   const requestedPage = appState.page;
-  const requestedKey = `${requestedType}:${requestedPage}`;
+  const requestedKey = `${appState.cacheMode ? "cache" : "live"}:${requestedType}:${requestedPage}`;
   const preserveExisting = Boolean(options.preserveExisting);
   const hasCurrentResult = appState.courseDataKey === requestedKey;
   appState.courseRequestController = controller;
@@ -1128,26 +1349,38 @@ async function loadCourses(options = {}) {
   appElements.courseTitle.textContent = categoryNames[appState.type] || appState.type;
   appElements.courseSummary.textContent = hasCurrentResult && preserveExisting
     ? "正在刷新，当前仍显示上次成功结果"
-    : "正在读取学校课程数据";
+    : appState.cacheMode
+      ? "正在读取当前学号、批次和校区的课程缓存"
+      : "正在读取学校课程数据";
   if (!hasCurrentResult || !preserveExisting) {
     appState.courses = [];
     appState.totalCount = 0;
     appState.courseDataKey = "";
+    appState.courseCacheMeta = null;
     renderLoading();
   }
   updatePagination();
 
   try {
     const data = await api(
-      `/api/school/courses?type=${encodeURIComponent(requestedType)}&page=${requestedPage}&page_size=10`,
+      courseRequestUrl(requestedType, requestedPage),
       { signal: controller.signal, timeoutMs: SESSION_RECOVERY_TIMEOUT_MS },
     );
     if (requestId !== appState.courseRequestId) return;
     appState.courses = Array.isArray(data.courses) ? data.courses : [];
     appState.totalCount = Number(data.total_count || 0);
     appState.courseDataKey = requestedKey;
+    appState.courseCacheMeta = {
+      cached: Boolean(data.cached),
+      cached_at: Number(data.cached_at || 0),
+      cache_stale: Boolean(data.cache_stale),
+    };
     appState.catalogBlockedCode = "";
-    appElements.courseSummary.textContent = `共 ${appState.totalCount} 门课程，本页 ${appState.courses.length} 门`;
+    appElements.courseSummary.textContent = courseSummary(
+      appState.totalCount,
+      appState.courses.length,
+      appState.courseCacheMeta,
+    );
     renderCourses();
   } catch (error) {
     if (isAbortError(error) || requestId !== appState.courseRequestId) return;
@@ -1170,16 +1403,19 @@ async function loadCourses(options = {}) {
     appState.courses = [];
     appState.totalCount = 0;
     appState.courseDataKey = "";
+    appState.courseCacheMeta = null;
     appElements.courseSummary.textContent = "课程目录暂时不可用";
     renderState(courseErrorTitle(error), error.message, {
       tone: "error",
       note: "登录状态和已加入的本地选课清单不会因本次读取失败而丢失。",
-      actions: error.retryable
-        ? [
-          { label: "重新加载课程", handler: () => loadCourses({ preserveExisting: true }), primary: true },
-          { label: "重新检查开放状态", handler: refreshPhaseAndCourses },
-        ]
-        : [],
+      actions: appState.cacheMode
+        ? [{ label: "切换到实时数据", handler: () => setCacheMode(false), primary: true }]
+        : error.retryable
+          ? [
+            { label: "重新加载课程", handler: () => loadCourses({ preserveExisting: true }), primary: true },
+            { label: "重新检查开放状态", handler: refreshPhaseAndCourses },
+          ]
+          : [],
     });
   } finally {
     if (requestId === appState.courseRequestId) {
@@ -1208,7 +1444,7 @@ async function refreshPhaseAndCourses() {
     appState.catalogBlockedCode = "";
     applySessionData(session);
     showToast(session.message || "开放状态已更新", false, true);
-    if (courseCatalogBlocked()) renderCourseAvailabilityState();
+    if (courseCatalogBlocked() && !appState.cacheMode) renderCourseAvailabilityState();
     else {
       invalidateCatalogCache(appState.type);
       if (isFilterActive()) await runSearchFetch({ force: true });
@@ -1245,7 +1481,7 @@ async function refreshPhaseAndCourses() {
 }
 
 async function refreshCurrentView() {
-  if (courseCatalogBlocked()) await refreshPhaseAndCourses();
+  if (courseCatalogBlocked() && !appState.cacheMode) await refreshPhaseAndCourses();
   else {
     invalidateCatalogCache(appState.type);
     if (isFilterActive()) await runSearchFetch({ force: true });
@@ -1870,7 +2106,7 @@ async function loadEnrollProgress() {
     await loadMyCourses(true);
     await loadSession(false, false);
     invalidateCatalogCaches();
-    if (!courseCatalogBlocked()) await refreshCurrentView();
+    if (!courseCatalogBlocked() || appState.cacheMode) await refreshCurrentView();
   }
 }
 
@@ -1934,6 +2170,25 @@ appElements.courseSearch.addEventListener("input", () => {
     handleSearchInput();
   }, SEARCH_DEBOUNCE_MS);
 });
+appElements.filterConflictSwitch.checked = appState.filters.hideConflict;
+appElements.filterFullSwitch.checked = appState.filters.hideFull;
+appElements.filterConflictSwitch.addEventListener("change", () => {
+  appState.filters.hideConflict = appElements.filterConflictSwitch.checked;
+  saveFilterPreferences();
+  if (isFilterActive()) applyCourseFilter();
+  renderCourses();
+  updatePagination();
+});
+appElements.filterFullSwitch.addEventListener("change", () => {
+  appState.filters.hideFull = appElements.filterFullSwitch.checked;
+  saveFilterPreferences();
+  if (isFilterActive()) applyCourseFilter();
+  renderCourses();
+  updatePagination();
+});
+appElements.cacheModeSwitch.addEventListener("change", () => {
+  setCacheMode(appElements.cacheModeSwitch.checked);
+});
 appElements.campusSelect.addEventListener("change", () => {
   switchCampus(appElements.campusSelect.value);
 });
@@ -1982,6 +2237,17 @@ appElements.openTimetable.addEventListener("click", async () => {
   appElements.timetableDialog.showModal();
   renderTimetable();
   if (!appState.myCoursesLoaded) await loadMyCourses();
+});
+appElements.openSchoolOfficial.addEventListener("click", async () => {
+  appElements.openSchoolOfficial.disabled = true;
+  try {
+    const result = await api("/api/school/open", { method: "POST" });
+    showToast(result.message || "已打开学校官方选课页面", false, true);
+  } catch (error) {
+    if (!(error instanceof SessionExpiredError)) showToast(error.message, true);
+  } finally {
+    appElements.openSchoolOfficial.disabled = false;
+  }
 });
 appElements.refreshMyCourses.addEventListener("click", () => loadMyCourses());
 appElements.refreshTimetable.addEventListener("click", () => loadMyCourses());

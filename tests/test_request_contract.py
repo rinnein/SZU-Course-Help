@@ -125,6 +125,77 @@ def test_course_service_identifies_closed_course_window(monkeypatch):
     assert error_code == course_service.COURSE_WINDOW_CLOSED
 
 
+@pytest.mark.parametrize(
+    "message",
+    (
+        "请求过快，请稍后再试",
+        "操作过于频繁",
+        "Too Many Requests",
+    ),
+)
+def test_course_service_identifies_only_explicit_throttling(monkeypatch, message):
+    response = CoursesResponse(
+        total_count=0,
+        data_list=[],
+        msg=message,
+        code="0",
+        timestamp="0",
+    )
+    monkeypatch.setattr(course_service, "pace_catalog_request", lambda: 0)
+    monkeypatch.setitem(
+        course_service.COURSE_TYPE_MAP,
+        "TJKC",
+        ("本班课程(推荐)", lambda _page: response),
+    )
+
+    success, error_code, _ = course_service.query_courses("TJKC", 0)
+
+    assert success is False
+    assert error_code == course_service.COURSE_QUERY_THROTTLED
+
+
+def test_course_service_identifies_explicit_throttle_business_code(monkeypatch):
+    response = CoursesResponse(
+        total_count=0,
+        data_list=[],
+        msg="",
+        code="429",
+        timestamp="0",
+    )
+    monkeypatch.setattr(course_service, "pace_catalog_request", lambda: 0)
+    monkeypatch.setitem(
+        course_service.COURSE_TYPE_MAP,
+        "TJKC",
+        ("本班课程(推荐)", lambda _page: response),
+    )
+
+    success, error_code, _ = course_service.query_courses("TJKC", 0)
+
+    assert success is False
+    assert error_code == course_service.COURSE_QUERY_THROTTLED
+
+
+def test_course_service_keeps_generic_school_rejection_out_of_throttle_retry(monkeypatch):
+    response = CoursesResponse(
+        total_count=0,
+        data_list=[],
+        msg="当前培养方案不允许查询该课程目录",
+        code="0",
+        timestamp="0",
+    )
+    monkeypatch.setattr(course_service, "pace_catalog_request", lambda: 0)
+    monkeypatch.setitem(
+        course_service.COURSE_TYPE_MAP,
+        "TJKC",
+        ("本班课程(推荐)", lambda _page: response),
+    )
+
+    success, error_code, _ = course_service.query_courses("TJKC", 0)
+
+    assert success is False
+    assert error_code == course_service.COURSE_QUERY_REJECTED
+
+
 def test_phase_whitelist_matches_supported_enrollment_stages():
     assert config.is_automatic_enroll_phase("复选阶段")
     assert config.is_automatic_enroll_phase("正选")

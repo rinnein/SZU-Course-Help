@@ -113,11 +113,32 @@ globalThis.window = {
   location: { search: "", origin: "http://course.test", assign() {} },
   setTimeout: (handler, delay, ...rest) => setTimeout(handler, delay, ...rest),
   clearTimeout: (id) => clearTimeout(id),
-  setInterval: (handler, delay, ...rest) => setInterval(handler, delay, ...rest),
-  clearInterval: (id) => clearInterval(id),
+  // Scenarios drive session changes explicitly, avoiding a polling race.
+  setInterval: () => 0,
+  clearInterval: () => {},
 };
 
 const PAGE_SIZE = 10;
+const schoolThrottle = {
+  rejectOncePages: new Set(),
+  rejectedOncePages: new Set(),
+  rejectAlwaysPages: new Set(),
+};
+const schoolTimeline = [];
+function schoolThrottledResponse() {
+  return {
+    ok: false,
+    status: 429,
+    text: async () => JSON.stringify({
+      message: "学校提示课程目录请求过快，程序将降低速度后重试。",
+      is_error: true,
+      error_code: "SCHOOL_COURSE_THROTTLED",
+      retryable: true,
+      requires_manual_login: false,
+      retry_after_ms: 40,
+    }),
+  };
+}
 const fakeCourses = [];
 for (let i = 0; i < 35; i += 1) {
   const math = i % 3 === 0;
@@ -155,6 +176,9 @@ let fakeSession = {
   task_running: false,
   relogin_status: "idle",
   relogin_in_progress: false,
+  catalog_page_delay_ms: 100,
+  catalog_throttle_max_retries: 3,
+  catalog_throttle_backoff_ms: 250,
 };
 const schoolRequests = [];
 let reportedTotalCount = fakeCourses.length;
@@ -175,6 +199,15 @@ globalThis.fetch = async (url) => {
   if (parsed.pathname === "/api/school/courses") {
     const type = parsed.searchParams.get("type");
     const page = Number(parsed.searchParams.get("page"));
+    let throttled = false;
+    if (schoolThrottle.rejectOncePages.has(page) && !schoolThrottle.rejectedOncePages.has(page)) {
+      schoolThrottle.rejectedOncePages.add(page);
+      throttled = true;
+    } else if (schoolThrottle.rejectAlwaysPages.has(page)) {
+      throttled = true;
+    }
+    schoolTimeline.push({ type, page, at: Date.now(), throttled });
+    if (throttled) return schoolThrottledResponse();
     schoolRequests.push(`${type}:${page}`);
     const start = (page - 1) * PAGE_SIZE;
     return respond({
@@ -193,6 +226,10 @@ globalThis.fetch = async (url) => {
 
 const appSource = fs.readFileSync(process.argv[2], "utf8");
 const scenarioSource = fs.readFileSync(process.argv[3], "utf8");
+globalThis.__CATALOG_TIMING__ = {
+  throttleBackoffMs: 40,
+  throttleBackoffMaxMs: 120,
+};
 eval(appSource + "\n;\n" + scenarioSource);
 """
 
@@ -211,13 +248,20 @@ const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
     setSession: (updates) => {
       fakeSession = { ...fakeSession, ...updates };
     },
+    visibleTeachingClasses,
     schoolRequests: () => schoolRequests.slice(),
+    setSchoolThrottle: (config = {}) => {
+      schoolThrottle.rejectOncePages = new Set(config.rejectOncePages || []);
+      schoolThrottle.rejectedOncePages = new Set();
+      schoolThrottle.rejectAlwaysPages = new Set(config.rejectAlwaysPages || []);
+    },
+    schoolTimeline: () => schoolTimeline.slice(),
     nodeById: (id) => nodesById.get(id),
   };
 
   let ready = false;
   for (let i = 0; i < 500; i += 1) {
-    if (app.appState.session?.logged_in && app.appState.courseDataKey === "TJKC:1") {
+    if (app.appState.session?.logged_in && app.appState.courseDataKey === "live:TJKC:1") {
       ready = true;
       break;
     }
@@ -367,6 +411,61 @@ const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
     hasCompleteCache: Boolean(app.appState.catalogCaches.TJKC?.complete),
   };
 
+  // 11) One explicit throttle response retries only that page and completes.
+  totalCountByPage = null;
+  app.setSchoolThrottle({ rejectOncePages: [2] });
+  const requestCountBeforeThrottled = app.schoolRequests().length;
+  const timelineBeforeThrottled = app.schoolTimeline().length;
+  app.appState.type = "XGXK";
+  await app.handleSearchInput();
+  const xgxkTimeline = app.schoolTimeline().slice(timelineBeforeThrottled);
+  const xgxkGaps = xgxkTimeline.slice(1).map((item, index) => item.at - xgxkTimeline[index].at);
+  const throttledIndex = xgxkTimeline.findIndex((item) => item.throttled);
+  const throttledRetryState = {
+    requests: app.schoolRequests().slice(requestCountBeforeThrottled),
+    results: app.appState.searchResults.length,
+    pageLabel: app.nodeById("pageLabel").textContent,
+    hasCompleteCache: Boolean(app.appState.catalogCaches.XGXK?.complete),
+    rejectedCount: xgxkTimeline.filter((item) => item.throttled).length,
+    gapAfterRetry: throttledIndex >= 0 ? (xgxkGaps[throttledIndex + 1] ?? -1) : -1,
+    gaps: xgxkGaps,
+  };
+
+  // 12) Persistent explicit throttling exhausts the finite retry budget.
+  app.setSchoolThrottle({ rejectAlwaysPages: [2] });
+  app.appState.type = "TYKC";
+  const attemptsBeforeExhausted = app.schoolTimeline().filter(
+    (item) => item.type === "TYKC" && item.page === 2,
+  ).length;
+  const exhaustedOk = await app.fetchFullCatalog({ force: true });
+  const tykcAttemptsPage2 = app.schoolTimeline().filter(
+    (item) => item.type === "TYKC" && item.page === 2,
+  ).length - attemptsBeforeExhausted;
+  const throttleExhaustedState = {
+    ok: exhaustedOk,
+    tykcAttemptsPage2,
+    hasCache: Boolean(app.appState.catalogCaches.TYKC),
+    errorTitle: app.nodeById("courseList").children[0]?.children[0]?.textContent,
+    toast: app.nodeById("toastRegion").children.at(-1)?.textContent,
+  };
+  app.setSchoolThrottle();
+
+  // 13) UI filters hide blocked/full classes but never hide a selected class.
+  app.appState.filters = { hideConflict: true, hideFull: true };
+  const filteredClasses = app.visibleTeachingClasses({
+    tcList: [
+      { teaching_class_id: "OPEN", is_choose: "0", is_conflict: "0", is_full: "0", number_of_selected: 20, class_capacity: 30 },
+      { teaching_class_id: "OPEN-MISSING-CAPACITY", is_choose: "0", is_conflict: "0", is_full: "0" },
+      { teaching_class_id: "CONFLICT", is_choose: "0", is_conflict: "true", is_full: "0" },
+      { teaching_class_id: "FULL-FLAG", is_choose: "0", is_conflict: "0", is_full: "true" },
+      { teaching_class_id: "FULL-CAPACITY", is_choose: "0", is_conflict: "0", is_full: "0", number_of_selected: "30", class_capacity: "30" },
+      { teaching_class_id: "SELECTED", is_choose: "True", is_conflict: "1", is_full: "1" },
+    ],
+  });
+  const filteringState = {
+    visibleIds: filteredClasses.map((item) => item.teaching_class_id),
+  };
+
   console.log(JSON.stringify({
     requestsAfterInit,
     searchState,
@@ -380,6 +479,9 @@ const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
     runningTaskReloginState,
     oversizedCatalogState,
     changingTotalState,
+    throttledRetryState,
+    throttleExhaustedState,
+    filteringState,
   }));
   process.exit(0);
 })().catch((error) => {
@@ -474,3 +576,25 @@ def test_course_search_filters_whole_catalog_and_repaginates(tmp_path: Path) -> 
     assert changing_total["ok"] is False
     assert changing_total["requests"] == ["TJKC:1", "TJKC:2"]
     assert changing_total["hasCompleteCache"] is False
+
+    throttled = out["throttledRetryState"]
+    assert throttled["requests"] == ["XGXK:1", "XGXK:2", "XGXK:3", "XGXK:4"]
+    assert throttled["rejectedCount"] == 1
+    assert throttled["hasCompleteCache"] is True
+    assert throttled["results"] == 23
+    assert throttled["pageLabel"] == "第 1 / 3 页"
+    assert throttled["gaps"][0] >= 90, throttled["gaps"]
+    assert throttled["gapAfterRetry"] >= 150, throttled["gaps"]
+
+    exhausted = out["throttleExhaustedState"]
+    assert exhausted["ok"] is False
+    assert exhausted["tykcAttemptsPage2"] == 4
+    assert exhausted["hasCache"] is False
+    assert exhausted["errorTitle"] == "课程目录尚未加载"
+    assert "学校限制了请求速度" in (exhausted["toast"] or "")
+
+    assert out["filteringState"]["visibleIds"] == [
+        "OPEN",
+        "OPEN-MISSING-CAPACITY",
+        "SELECTED",
+    ]

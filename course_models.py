@@ -107,6 +107,7 @@ class SchoolCourse:
     course_total_number: str
     type_name: str
     course_type: str
+    course_nature_name: str
     hours: str
 
     @classmethod
@@ -128,6 +129,7 @@ class SchoolCourse:
             course_total_number=_as_string(data.get("courseTotalNumber")),
             type_name=_as_string(data.get("typeName")),
             course_type=_as_string(data.get("type")),
+            course_nature_name=_as_string(data.get("courseNatureName")),
             hours=_as_string(data.get("hours")),
         )
 
@@ -184,6 +186,7 @@ class TeachingClassView:
     is_full: str
     is_conflict: str
     number_of_selected: str
+    course_number: str
 
     @classmethod
     def from_school_class(cls, item: TeachingClass) -> TeachingClassView:
@@ -200,6 +203,7 @@ class TeachingClassView:
             is_full=item.is_full,
             is_conflict=item.is_conflict,
             number_of_selected=item.number_of_selected,
+            course_number=item.course_number,
         )
 
 
@@ -214,6 +218,9 @@ class CourseView:
     sport_name: str
     number: int
     selected: bool
+    credit: str
+    course_type_name: str
+    course_nature_name: str
     campus_name: str = ""
 
     @classmethod
@@ -229,6 +236,9 @@ class CourseView:
             campus_name=course.campus_name,
             number=course.number,
             selected=course.selected,
+            credit=course.credit,
+            course_type_name=course.type_name,
+            course_nature_name=course.course_nature_name,
         )
 
     def to_api_dict(self) -> dict[str, Any]:
@@ -241,6 +251,9 @@ class CourseView:
             "campus_name": self.campus_name,
             "number": self.number,
             "selected": self.selected,
+            "credit": self.credit,
+            "course_type_name": self.course_type_name,
+            "course_nature_name": self.course_nature_name,
         }
 
 

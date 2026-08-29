@@ -79,6 +79,16 @@ def issue_card_key() -> tuple[str, str]:
 
 def start_course_system(student_id: str, card_key: str) -> None:
     """Start the local-only FastAPI service and prefill the login screen."""
+    import logic
+
+    print("\n正在检查 OCR 自动重登录环境...")
+    ocr_ready, ocr_message = logic.check_ocr_runtime()
+    if ocr_ready:
+        print(f"OCR 检查通过: {ocr_message}")
+    else:
+        print(f"OCR 检查警告: {ocr_message}")
+        print("手动登录仍可使用，但学校会话过期后需要再次手动登录。")
+
     import app
 
     app.configure_runtime_prefill(student_id, card_key)
