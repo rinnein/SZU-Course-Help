@@ -126,6 +126,11 @@ def test_existing_db_migrates_teaching_place_column(tmp_path):
     assert rows[0]["teaching_place"] == ""
     assert rows[0]["course_name"] == ""
     assert rows[0]["teacher_name"] == ""
+    assert rows[0]["auto_enabled"] == 1
+    assert rows[0]["priority_group"] == ""
+    assert rows[0]["priority_rank"] == 0
+    assert rows[0]["course_number"] == ""
+    assert rows[0]["time_signature"] == ""
 
     # Adding a course with full info works
     db.add_course(

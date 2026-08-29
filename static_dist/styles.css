@@ -15,6 +15,7 @@
   --surface: #ffffff;
   --surface-2: #fafbfc;
   --surface-3: #f2f4f7;
+  --surface-soft: #f7f8fa;
 
   /* 文本 */
   --ink: #141924;
@@ -1687,6 +1688,33 @@ dialog::backdrop {
 .drawer-dialog {
   width: min(560px, calc(100vw - 28px));
   max-height: min(820px, calc(100dvh - 28px));
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.drawer-dialog:not([open]) {
+  display: none;
+}
+
+.drawer-dialog > .dialog-header,
+.drawer-dialog > .dialog-footer {
+  flex: 0 0 auto;
+}
+
+.cart-dialog-body,
+.my-courses-dialog-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.cart-dialog-body .cart-list,
+.my-courses-dialog-body .my-courses-schedule-wrap,
+.my-courses-dialog-body .my-courses-list {
+  max-height: none;
+  overflow-y: visible;
 }
 
 .confirm-dialog {
@@ -1775,6 +1803,164 @@ dialog::backdrop {
   min-height: 34px;
   padding: 6px 12px;
   font-size: 12px;
+}
+
+.cart-priority-group {
+  border-bottom: 1px solid var(--line);
+}
+
+.cart-priority-group:last-child {
+  border-bottom: 0;
+}
+
+.cart-priority-group-title {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 26px 8px;
+  color: var(--ink-soft);
+  background: var(--surface-soft);
+  font-size: 12px;
+}
+
+.cart-priority-group-title span {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.cart-preference-controls {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 7px;
+  margin-top: 10px;
+}
+
+.compact-switch {
+  margin: 0;
+  font-size: 11px;
+}
+
+.cart-group-input {
+  width: min(220px, 100%);
+  min-height: 30px;
+  padding: 5px 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  color: var(--ink);
+  background: var(--surface);
+  font: inherit;
+  font-size: 11px;
+}
+
+.cart-rank {
+  margin: 0 !important;
+  white-space: nowrap;
+  font-family: var(--font-num);
+}
+
+.cart-preference-controls .button {
+  min-height: 30px;
+  padding: 4px 9px;
+}
+
+.enroll-controls {
+  display: grid;
+  gap: 16px;
+  padding: 18px 26px;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface-soft);
+}
+
+.enroll-controls-head,
+.mode-switcher,
+.enroll-control-actions,
+.risk-settings,
+.enroll-settings-grid {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.enroll-controls-head {
+  justify-content: space-between;
+}
+
+.enroll-controls-head strong {
+  display: block;
+  margin-top: 2px;
+  font-size: 14px;
+}
+
+.control-hint,
+.control-label {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.control-hint {
+  max-width: 560px;
+  margin: 5px 0 0;
+  line-height: 1.5;
+}
+
+.mode-switcher .button.is-active {
+  color: var(--brand-ink);
+  border-color: var(--brand);
+  background: var(--brand);
+}
+
+.setting-field {
+  display: grid;
+  gap: 5px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.setting-field input[type="number"] {
+  width: 130px;
+  min-height: 32px;
+  padding: 5px 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  color: var(--ink);
+  background: var(--surface);
+  font: inherit;
+}
+
+.risk-settings {
+  align-items: end;
+}
+
+.risk-confirm-row {
+  color: var(--danger);
+}
+
+.threshold-field input[type="number"] {
+  width: 110px;
+}
+
+@media (max-width: 640px) {
+  .enroll-controls {
+    padding: 16px;
+  }
+
+  .enroll-controls-head,
+  .enroll-control-actions,
+  .mode-switcher,
+  .enroll-settings-grid,
+  .risk-settings {
+    align-items: stretch;
+  }
+
+  .enroll-control-actions,
+  .mode-switcher .button,
+  .setting-field,
+  .setting-field input[type="number"] {
+    width: 100%;
+  }
 }
 
 /* My courses */

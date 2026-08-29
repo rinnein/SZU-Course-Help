@@ -106,6 +106,16 @@ class DatabaseManager:
             for column in ("teaching_place", "course_name", "teacher_name"):
                 if column not in columns:
                     connection.execute(f"ALTER TABLE courses ADD COLUMN {column} TEXT NOT NULL DEFAULT ''")
+            migrations = {
+                "auto_enabled": "ALTER TABLE courses ADD COLUMN auto_enabled INTEGER NOT NULL DEFAULT 1",
+                "priority_group": "ALTER TABLE courses ADD COLUMN priority_group TEXT NOT NULL DEFAULT ''",
+                "priority_rank": "ALTER TABLE courses ADD COLUMN priority_rank INTEGER NOT NULL DEFAULT 0",
+                "course_number": "ALTER TABLE courses ADD COLUMN course_number TEXT NOT NULL DEFAULT ''",
+                "time_signature": "ALTER TABLE courses ADD COLUMN time_signature TEXT NOT NULL DEFAULT ''",
+            }
+            for name, statement in migrations.items():
+                if name not in columns:
+                    connection.execute(statement)
             connection.commit()
 
     def add_course(self, course: CartCourse) -> bool:
@@ -121,15 +131,21 @@ class DatabaseManager:
             teaching_place = str(getattr(course, "teaching_place", "") or "")
             course_name = str(getattr(course, "course_name", "") or "")
             teacher_name = str(getattr(course, "teacher_name", "") or "")
+            auto_enabled = 1 if getattr(course, "auto_enabled", True) else 0
+            priority_group = str(getattr(course, "priority_group", "") or "")
+            priority_rank = int(getattr(course, "priority_rank", 0) or 0)
+            course_number = str(getattr(course, "course_number", "") or "")
+            time_signature = str(getattr(course, "time_signature", "") or "")
             with self._lock:
                 connection = self._connect()
                 connection.execute(
                     """
                     INSERT INTO courses (
                         id, type, name, campus_code, campus_name, status, updated_at,
-                        teaching_place, course_name, teacher_name
+                        teaching_place, course_name, teacher_name, auto_enabled,
+                        priority_group, priority_rank, course_number, time_signature
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(id) DO UPDATE SET
                         type = excluded.type,
                         name = excluded.name,
@@ -139,7 +155,12 @@ class DatabaseManager:
                         updated_at = excluded.updated_at,
                         teaching_place = excluded.teaching_place,
                         course_name = excluded.course_name,
-                        teacher_name = excluded.teacher_name
+                        teacher_name = excluded.teacher_name,
+                        auto_enabled = excluded.auto_enabled,
+                        priority_group = excluded.priority_group,
+                        priority_rank = excluded.priority_rank,
+                        course_number = excluded.course_number,
+                        time_signature = excluded.time_signature
                     """,
                     (
                         course.id,
@@ -152,6 +173,11 @@ class DatabaseManager:
                         teaching_place,
                         course_name,
                         teacher_name,
+                        auto_enabled,
+                        priority_group,
+                        priority_rank,
+                        course_number,
+                        time_signature,
                     ),
                 )
                 connection.commit()
@@ -205,6 +231,37 @@ class DatabaseManager:
         except sqlite3.Error:
             logger.exception("Failed to recover interrupted cart courses")
             return 0
+
+    def update_course_preferences(self, course_id: str, **fields) -> bool:
+        """Update safe, user-controlled queue preferences for one course."""
+        allowed = {"auto_enabled", "priority_group", "priority_rank"}
+        values = {key: fields[key] for key in fields if key in allowed}
+        if not course_id or not values:
+            return False
+        if "auto_enabled" in values:
+            values["auto_enabled"] = 1 if values["auto_enabled"] else 0
+        if "priority_rank" in values:
+            try:
+                values["priority_rank"] = int(values["priority_rank"])
+            except (TypeError, ValueError):
+                return False
+            if values["priority_rank"] < 0:
+                return False
+        if "priority_group" in values:
+            values["priority_group"] = str(values["priority_group"] or "").strip()
+        try:
+            assignments = ", ".join(f"{key} = ?" for key in values)
+            with self._lock:
+                connection = self._connect()
+                cursor = connection.execute(
+                    f"UPDATE courses SET {assignments}, updated_at = ? WHERE id = ?",
+                    (*values.values(), datetime.now().isoformat(timespec="seconds"), course_id),
+                )
+                connection.commit()
+            return cursor.rowcount > 0
+        except sqlite3.Error:
+            logger.exception("Failed to update course preferences")
+            return False
 
     def get_all_courses(self) -> list[dict]:
         """Return every cart row in unspecified order."""

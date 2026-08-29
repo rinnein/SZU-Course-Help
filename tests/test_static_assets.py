@@ -136,6 +136,20 @@ def test_my_courses_restores_schedule_and_list_views():
     assert ".schedule-course.is-pending" in styles
 
 
+def test_drawer_dialog_keeps_header_and_footer_outside_scroll_region():
+    course = (STATIC / "index.html").read_text(encoding="utf-8")
+    styles = (STATIC / "styles.css").read_text(encoding="utf-8")
+
+    assert '<div class="cart-dialog-body">' in course
+    assert '<div class="my-courses-dialog-body">' in course
+    assert ".drawer-dialog > .dialog-header" in styles
+    assert ".drawer-dialog > .dialog-footer" in styles
+    assert "display: flex;" in styles
+    assert "overflow: hidden;" in styles
+    assert ".cart-dialog-body," in styles
+    assert ".my-courses-dialog-body" in styles
+
+
 def test_course_filters_are_exclusion_filters_and_keep_empty_groups():
     course = (STATIC / "index.html").read_text(encoding="utf-8")
     script = (STATIC / "course-app.js").read_text(encoding="utf-8")
@@ -200,3 +214,23 @@ def test_course_cache_mode_keeps_cached_view_and_refreshes_in_background():
     assert "实时刷新返回空列表，仍显示上次成功结果" in script
     assert "实时刷新暂不可用，仍显示上次成功结果" in script
     assert "clearCacheRefreshTimer" in script
+
+
+def test_enrollment_interval_ui_uses_seconds_and_api_uses_milliseconds():
+    script = (STATIC / "course-app.js").read_text(encoding="utf-8")
+    index = (STATIC / "index.html").read_text(encoding="utf-8")
+
+    assert 'intervalSecondsToMilliseconds' in script
+    assert 'intervalMillisecondsToSeconds' in script
+    assert 'scan_interval_ms: intervalSecondsToMilliseconds' in script
+    assert 'id="boostInterval"' in index and 'value="1"' in index
+    assert 'id="normalInterval"' in index and 'value="10"' in index
+    assert 'id="scanInterval"' in index and 'value="60"' in index
+
+
+def test_cart_auto_enroll_checkbox_reconciles_server_state():
+    script = (STATIC / "course-app.js").read_text(encoding="utf-8")
+
+    assert "saved.auto_enabled" in script
+    assert "item.auto_enabled !== undefined" in script
+    assert "current.autoEnabled = Boolean(item.auto_enabled)" in script

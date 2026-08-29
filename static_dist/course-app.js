@@ -11,6 +11,12 @@ const CACHE_REFRESH_INTERVAL_MS = 30000;
 const FILTER_PREFERENCES_KEY = "szu-course-help.course-filters.v1";
 const OFFLINE_CACHE_TYPES = new Set(["TJKC", "FANKC"]);
 
+const enrollModeNames = {
+  boost: "爆发模式",
+  normal: "一般模式",
+  scan: "扫描模式",
+};
+
 const categoryNames = {
   TJKC: "本班推荐",
   FANKC: "方案内课程",
@@ -46,6 +52,7 @@ const appState = {
     hideFull: false,
   },
   cart: [],
+  cartPreferences: {},
   session: null,
   loadingCourses: false,
   courseRequestController: null,
@@ -64,6 +71,17 @@ const appState = {
   loadingMyCourses: false,
   cacheMode: false,
   cacheRefreshTimer: null,
+  enroll: {
+    running: false,
+    paused: false,
+    mode: "boost",
+    boostIntervalMs: 1000,
+    normalIntervalMs: 10000,
+    scanIntervalMs: 60000,
+    swapEnabled: false,
+    swapConfirmed: false,
+    swapThreshold: 5,
+  },
   myCoursesView: "grid",
   showCartOnSchedule: true,
   scheduleConflict: null,
@@ -138,6 +156,18 @@ const appElements = {
   progressState: document.querySelector("#progressState"),
   progressNotice: document.querySelector("#progressNotice"),
   taskControlButton: document.querySelector("#taskControlButton"),
+  enrollModeLabel: document.querySelector("#enrollModeLabel"),
+  enrollRuntimeStatus: document.querySelector("#enrollRuntimeStatus"),
+  enrollControlHint: document.querySelector("#enrollControlHint"),
+  pauseEnroll: document.querySelector("#pauseEnroll"),
+  resumeEnroll: document.querySelector("#resumeEnroll"),
+  modeButtons: document.querySelectorAll("[data-enroll-mode]"),
+  boostInterval: document.querySelector("#boostInterval"),
+  normalInterval: document.querySelector("#normalInterval"),
+  scanInterval: document.querySelector("#scanInterval"),
+  swapCourseSwitch: document.querySelector("#swapCourseSwitch"),
+  swapRiskConfirm: document.querySelector("#swapRiskConfirm"),
+  swapThreshold: document.querySelector("#swapThreshold"),
 };
 
 class ApiError extends Error {
@@ -272,6 +302,210 @@ function element(tag, className = "", text = "") {
 function numericValue(value, fallback = 0) {
   const number = Number(String(value ?? "").replace(/,/g, "").trim());
   return Number.isFinite(number) ? number : fallback;
+}
+
+function intervalSecondsToMilliseconds(value, fallbackMilliseconds) {
+  const seconds = numericValue(value, numericValue(fallbackMilliseconds, 0) / 1000);
+  return Math.max(0, Math.round(seconds * 1000));
+}
+
+function intervalMillisecondsToSeconds(value, fallbackMilliseconds) {
+  const milliseconds = numericValue(value, fallbackMilliseconds);
+  return Math.max(0, Math.round(milliseconds / 1000));
+}
+
+function settingPayload() {
+  return {
+    boost_interval_ms: intervalSecondsToMilliseconds(appElements.boostInterval?.value, appState.enroll.boostIntervalMs),
+    normal_interval_ms: intervalSecondsToMilliseconds(appElements.normalInterval?.value, appState.enroll.normalIntervalMs),
+    scan_interval_ms: intervalSecondsToMilliseconds(appElements.scanInterval?.value, appState.enroll.scanIntervalMs),
+    switch_enabled: Boolean(appElements.swapCourseSwitch?.checked),
+    switch_confirmed: Boolean(appElements.swapRiskConfirm?.checked),
+    switch_threshold: numericValue(appElements.swapThreshold?.value, appState.enroll.swapThreshold),
+  };
+}
+
+function applyEnrollSettings(data = {}) {
+  const source = data.settings || data;
+  const mode = source.mode || data.mode || data.current_mode;
+  if (["boost", "normal", "scan"].includes(mode)) appState.enroll.mode = mode;
+  appState.enroll.running = Boolean(data.running ?? data.task_running ?? appState.enroll.running);
+  appState.enroll.paused = Boolean(data.paused ?? data.task_paused ?? appState.enroll.paused);
+  appState.enroll.boostIntervalMs = numericValue(source.boost_interval_ms, appState.enroll.boostIntervalMs);
+  appState.enroll.normalIntervalMs = numericValue(source.normal_interval_ms, appState.enroll.normalIntervalMs);
+  appState.enroll.scanIntervalMs = numericValue(source.scan_interval_ms, appState.enroll.scanIntervalMs);
+  appState.enroll.swapEnabled = Boolean(source.switch_enabled ?? source.swap_enabled ?? appState.enroll.swapEnabled);
+  appState.enroll.swapConfirmed = Boolean(source.switch_confirmed ?? source.swap_confirmed ?? appState.enroll.swapConfirmed);
+  appState.enroll.swapThreshold = numericValue(source.switch_threshold ?? source.swap_threshold, appState.enroll.swapThreshold);
+  if (appElements.boostInterval) appElements.boostInterval.value = String(intervalMillisecondsToSeconds(appState.enroll.boostIntervalMs, 1000));
+  if (appElements.normalInterval) appElements.normalInterval.value = String(intervalMillisecondsToSeconds(appState.enroll.normalIntervalMs, 10000));
+  if (appElements.scanInterval) appElements.scanInterval.value = String(Math.max(1, intervalMillisecondsToSeconds(appState.enroll.scanIntervalMs, 60000)));
+  if (appElements.swapCourseSwitch) appElements.swapCourseSwitch.checked = appState.enroll.swapEnabled;
+  if (appElements.swapRiskConfirm) appElements.swapRiskConfirm.checked = appState.enroll.swapConfirmed;
+  if (appElements.swapThreshold) appElements.swapThreshold.value = String(appState.enroll.swapThreshold);
+  renderEnrollControls();
+}
+
+function planErrorMessage(error) {
+  if (error.status === 404) return "当前后端尚未支持这项抢课控制接口。";
+  if (error.status >= 500) return "后端暂时不可用，已有设置仍保留，请稍后重试。";
+  return error.message || "抢课设置暂时没有生效。";
+}
+
+async function planApi(path, options = {}) {
+  const data = await api(path, options);
+  if (data?.is_error || data?.success === false) {
+    throw new ApiError(data.message || "后端没有接受这项抢课设置", {
+      code: data.error_code || "PLAN_API_REJECTED",
+      payload: data,
+    });
+  }
+  return data;
+}
+
+function renderEnrollControls() {
+  const state = appState.enroll;
+  const running = Boolean(state.running || appState.session?.task_running);
+  const paused = Boolean(state.paused || appState.session?.task_paused);
+  const mode = state.mode || "boost";
+  if (appElements.enrollModeLabel) {
+    appElements.enrollModeLabel.textContent = `${enrollModeNames[mode] || mode} · ${running ? (paused ? "已暂停" : "运行中") : "未运行"}`;
+  }
+  if (appElements.enrollRuntimeStatus) {
+    appElements.enrollRuntimeStatus.textContent = running ? (paused ? "已暂停" : "抢课中") : "未运行";
+    appElements.enrollRuntimeStatus.className = `status-pill ${running ? (paused ? "status-warning" : "status-success") : "status-neutral"}`;
+  }
+  if (appElements.enrollControlHint) {
+    appElements.enrollControlHint.textContent = paused
+      ? "任务已暂停，恢复后会保留当前课程进度和失败次数。"
+      : "爆发模式业务失败 5 次降为一般模式，一般模式失败 10 次降为扫描模式；网络异常和 5xx 不计失败。";
+  }
+  if (appElements.pauseEnroll) appElements.pauseEnroll.disabled = !running || paused;
+  if (appElements.resumeEnroll) appElements.resumeEnroll.disabled = !running || !paused;
+  for (const button of appElements.modeButtons || []) {
+    const active = button.dataset.enrollMode === mode;
+    button.classList.toggle("is-active", active);
+    button.setAttribute("aria-pressed", active ? "true" : "false");
+  }
+}
+
+async function updateEnrollMode(mode) {
+  if (!["boost", "normal", "scan"].includes(mode)) return;
+  const previous = appState.enroll.mode;
+  const previousSettings = {
+    boostIntervalMs: appState.enroll.boostIntervalMs,
+    normalIntervalMs: appState.enroll.normalIntervalMs,
+    scanIntervalMs: appState.enroll.scanIntervalMs,
+    swapEnabled: appState.enroll.swapEnabled,
+    swapConfirmed: appState.enroll.swapConfirmed,
+    swapThreshold: appState.enroll.swapThreshold,
+  };
+  appState.enroll.mode = mode;
+  renderEnrollControls();
+  try {
+    const data = await planApi("/api/enroll/mode", {
+      method: "POST",
+      body: JSON.stringify({ mode }),
+    });
+    // A mode response must not replace the user's interval/risk settings with
+    // missing values. The server now returns a full snapshot, while this
+    // fallback keeps older backends from clearing the current form.
+    applyEnrollSettings({
+      ...data,
+      mode,
+      boost_interval_ms: data.settings?.boost_interval_ms ?? previousSettings.boostIntervalMs,
+      normal_interval_ms: data.settings?.normal_interval_ms ?? previousSettings.normalIntervalMs,
+      scan_interval_ms: data.settings?.scan_interval_ms ?? previousSettings.scanIntervalMs,
+      switch_enabled: data.settings?.switch_enabled ?? previousSettings.swapEnabled,
+      switch_confirmed: data.settings?.switch_confirmed ?? previousSettings.swapConfirmed,
+      switch_threshold: data.settings?.switch_threshold ?? previousSettings.swapThreshold,
+    });
+    showToast(`已切换为${enrollModeNames[mode]}`, false, true);
+  } catch (error) {
+    appState.enroll.mode = previous;
+    renderEnrollControls();
+    showToast(planErrorMessage(error), true);
+  }
+}
+
+async function toggleEnrollPause(paused) {
+  try {
+    const data = await planApi(paused ? "/api/enroll/pause" : "/api/enroll/resume", { method: "POST" });
+    appState.enroll.running = true;
+    appState.enroll.paused = paused;
+    applyEnrollSettings({ ...data, running: true, paused });
+    await loadEnrollProgress();
+    showToast(paused ? "已请求暂停抢课，等待当前请求结束" : "抢课已恢复", false, true);
+  } catch (error) {
+    showToast(planErrorMessage(error), true);
+  }
+}
+
+async function saveEnrollSettings() {
+  const payload = settingPayload();
+  try {
+    const data = await planApi("/api/enroll/settings", {
+      method: "PATCH",
+      body: JSON.stringify(payload),
+    });
+    applyEnrollSettings(data);
+    showToast("抢课设置已保存", false, true);
+  } catch (error) {
+    showToast(planErrorMessage(error), true);
+  }
+}
+
+function preferenceFor(item) {
+  const saved = appState.cartPreferences[String(item.id)] || {};
+  const fallbackGroup = [item.course_number, item.time_signature]
+    .filter(Boolean)
+    .join("|") || item.course_number || "未分组课程";
+  const storedGroup = saved.priorityGroup ?? item.priority_group;
+  return {
+    autoEnabled: saved.autoEnabled ?? saved.auto_enabled ?? item.auto_enabled ?? item.autoEnabled ?? true,
+    priorityGroup: String(storedGroup || fallbackGroup),
+    priorityRank: numericValue(saved.priorityRank ?? saved.priority_rank ?? item.priority_rank ?? item.priorityRank, 0),
+  };
+}
+
+function ensureCartPreferenceRanks() {
+  const nextRanks = new Map();
+  let changed = false;
+  for (const item of appState.cart) {
+    const preference = preferenceFor(item);
+    const hasRank = appState.cartPreferences[String(item.id)]?.priorityRank != null
+      || item.priority_rank != null;
+    if (hasRank) continue;
+    const rank = nextRanks.get(preference.priorityGroup) || 0;
+    nextRanks.set(preference.priorityGroup, rank + 1);
+    appState.cartPreferences[String(item.id)] = { ...preference, priorityRank: rank };
+    changed = true;
+  }
+  if (changed) {
+    try {
+      window.localStorage?.setItem("szu-course-help.cart-preferences.v1", JSON.stringify(appState.cartPreferences));
+    } catch {}
+  }
+}
+
+function updateLocalCartPreference(item, values) {
+  const current = preferenceFor(item);
+  const normalized = {
+    ...current,
+    ...(values.auto_enabled !== undefined || values.autoEnabled !== undefined
+      ? { autoEnabled: Boolean(values.auto_enabled ?? values.autoEnabled) }
+      : {}),
+    ...(values.priority_group !== undefined || values.priorityGroup !== undefined
+      ? { priorityGroup: String(values.priority_group ?? values.priorityGroup ?? "") }
+      : {}),
+    ...(values.priority_rank !== undefined || values.priorityRank !== undefined
+      ? { priorityRank: numericValue(values.priority_rank ?? values.priorityRank, current.priorityRank) }
+      : {}),
+  };
+  appState.cartPreferences[String(item.id)] = normalized;
+  try {
+    window.localStorage?.setItem("szu-course-help.cart-preferences.v1", JSON.stringify(appState.cartPreferences));
+  } catch {}
 }
 
 function classIsFull(classInfo) {
@@ -902,6 +1136,7 @@ function appendClassRow(container, course, classInfo) {
           teaching_place: String(classInfo.teaching_place || ""),
           course_name: String(course.course_name || ""),
           teacher_name: String(classInfo.teacher_name || ""),
+          auto_enabled: true,
           is_choose: String(classInfo.is_choose || ""),
           is_conflict: String(classInfo.is_conflict || ""),
           is_full: String(classInfo.is_full || ""),
@@ -1527,7 +1762,9 @@ function syncEnrollControls() {
   const paused = Boolean(appState.session?.task_paused);
   const pauseAcknowledged = Boolean(appState.session?.task_pause_acknowledged);
   const stopping = Boolean(appState.session?.task_stopping);
-  const hasPending = appState.cart.some((item) => (item.status || "PENDING") === "PENDING");
+  const hasPending = appState.cart.some((item) => (
+    (item.status || "PENDING") === "PENDING" && preferenceFor(item).autoEnabled !== false
+  ));
   appElements.openEnrollConfirm.disabled = !appState.grabPhase || running || !hasPending;
   if (running && stopping) {
     appElements.cartHint.textContent = appState.session?.task_stopping_reason
@@ -1546,13 +1783,112 @@ function syncEnrollControls() {
   } else if (!appState.grabPhase) {
     appElements.cartHint.textContent = "当前批次不允许自动抢课，仅可浏览和整理清单。";
   } else if (!hasPending) {
-    appElements.cartHint.textContent = "清单中没有待启动课程，先从课程目录加入。";
+    const hasDisabledPending = appState.cart.some((item) => (
+      (item.status || "PENDING") === "PENDING" && preferenceFor(item).autoEnabled === false
+    ));
+    appElements.cartHint.textContent = hasDisabledPending
+      ? "待抢课程的“自动抢课”开关均已关闭，请先在清单中开启后再启动。"
+      : "清单中没有待启动课程，先从课程目录加入。";
   } else {
     appElements.cartHint.textContent = "满员课程可以加入清单排队候补；冲突或已选课程不能加入。";
+  }
+  renderEnrollControls();
+}
+
+function cartItemsSorted() {
+  return [...appState.cart].sort((left, right) => {
+    const a = preferenceFor(left);
+    const b = preferenceFor(right);
+    return a.priorityGroup.localeCompare(b.priorityGroup, "zh-CN")
+      || a.priorityRank - b.priorityRank
+      || String(left.name || left.id).localeCompare(String(right.name || right.id), "zh-CN");
+  });
+}
+
+function cartGroups() {
+  const groups = new Map();
+  for (const item of cartItemsSorted()) {
+    const group = preferenceFor(item).priorityGroup;
+    if (!groups.has(group)) groups.set(group, []);
+    groups.get(group).push(item);
+  }
+  return groups;
+}
+
+async function patchCartPreference(item, values) {
+  const previous = preferenceFor(item);
+  updateLocalCartPreference(item, values);
+  renderCart();
+  try {
+    await planApi(`/api/courses/${encodeURIComponent(item.id)}`, {
+      method: "PATCH",
+      body: JSON.stringify(values),
+    });
+  } catch (error) {
+    updateLocalCartPreference(item, previous);
+    renderCart();
+    showToast(planErrorMessage(error), true);
+  }
+}
+
+function makeCartPreferenceControl(item) {
+  const preference = preferenceFor(item);
+  const controls = element("div", "cart-preference-controls");
+  const label = element("label", "switch-row compact-switch");
+  const toggle = element("input");
+  toggle.type = "checkbox";
+  toggle.checked = Boolean(preference.autoEnabled);
+  toggle.setAttribute("aria-label", "自动抢课开关");
+  label.append(toggle, element("span", "", "自动抢课"));
+  toggle.addEventListener("change", () => patchCartPreference(item, { auto_enabled: toggle.checked }));
+
+  const group = element("input", "cart-group-input");
+  group.type = "text";
+  group.value = preference.priorityGroup;
+  group.title = "同一优选组内按优先级尝试，优先级较高者先尝试";
+  group.setAttribute("aria-label", "优选分组");
+  group.addEventListener("change", () => patchCartPreference(item, { priority_group: group.value.trim() || "未分组课程" }));
+
+  const rank = element("span", "cart-rank", `优先级 ${preference.priorityRank + 1}`);
+  const up = element("button", "button button-quiet", "↑");
+  const down = element("button", "button button-quiet", "↓");
+  up.type = "button";
+  down.type = "button";
+  up.title = "提高同组优先级";
+  down.title = "降低同组优先级";
+  up.addEventListener("click", () => moveCartItem(item, -1));
+  down.addEventListener("click", () => moveCartItem(item, 1));
+  controls.append(label, group, rank, up, down);
+  return controls;
+}
+
+async function moveCartItem(item, direction) {
+  const ordered = cartItemsSorted();
+  const currentIndex = ordered.findIndex((candidate) => String(candidate.id) === String(item.id));
+  const targetIndex = currentIndex + direction;
+  if (currentIndex < 0 || targetIndex < 0 || targetIndex >= ordered.length) return;
+  const other = ordered[targetIndex];
+  const currentPreference = preferenceFor(item);
+  const otherPreference = preferenceFor(other);
+  if (currentPreference.priorityGroup !== otherPreference.priorityGroup) {
+    showToast("上下移动只作用于同一优选分组", true);
+    return;
+  }
+  updateLocalCartPreference(item, { priorityRank: otherPreference.priorityRank });
+  updateLocalCartPreference(other, { priorityRank: currentPreference.priorityRank });
+  renderCart();
+  try {
+    await Promise.all([
+      planApi(`/api/courses/${encodeURIComponent(item.id)}`, { method: "PATCH", body: JSON.stringify({ priority_rank: otherPreference.priorityRank }) }),
+      planApi(`/api/courses/${encodeURIComponent(other.id)}`, { method: "PATCH", body: JSON.stringify({ priority_rank: currentPreference.priorityRank }) }),
+    ]);
+  } catch (error) {
+    showToast(planErrorMessage(error), true);
   }
 }
 
 function renderCart() {
+  ensureCartPreferenceRanks();
   appElements.cartCount.textContent = String(appState.cart.length);
   if (!appState.cart.length) {
     const empty = element("div", "empty-state");
@@ -1564,7 +1900,13 @@ function renderCart() {
   }
 
   const fragment = document.createDocumentFragment();
-  for (const item of appState.cart) {
+  for (const [groupName, items] of cartGroups()) {
+    const group = element("section", "cart-priority-group");
+    const heading = element("div", "cart-priority-group-title");
+    heading.append(element("strong", "", groupName));
+    heading.append(element("span", "", `${items.length} 门，按优先级尝试`));
+    group.append(heading);
+    for (const item of items) {
     const row = element("div", "cart-item");
     const copy = element("div");
     copy.append(element("strong", "", item.name || item.id));
@@ -1577,6 +1919,7 @@ function renderCart() {
           .join(" · "),
       ),
     );
+    copy.append(makeCartPreferenceControl(item));
     const actions = element("div", "cart-item-actions");
     const statusClass = item.status === "SUCCESS" ? "status-success" : item.status === "FAILED" ? "status-danger" : item.status === "ENROLLING" ? "status-warning" : "status-neutral";
     actions.append(element("span", `status-pill ${statusClass}`, statusNames[item.status] || "待启动"));
@@ -1639,7 +1982,9 @@ function renderCart() {
     });
     actions.append(remove);
     row.append(copy, actions);
-    fragment.append(row);
+    group.append(row);
+    }
+    fragment.append(group);
   }
   appElements.cartList.replaceChildren(fragment);
   syncEnrollControls();
@@ -1649,6 +1994,17 @@ async function loadCart() {
   try {
     const data = await api("/api/courses/dblist?status=");
     appState.cart = Array.isArray(data) ? data : [];
+    // The SQLite response is authoritative. Reconcile old browser cache
+    // entries so a server-side unchecked auto_enabled value is not restored
+    // as checked during the next render.
+    for (const item of appState.cart) {
+      const id = String(item.id);
+      const current = appState.cartPreferences[id] || {};
+      if (item.auto_enabled !== undefined) current.autoEnabled = Boolean(item.auto_enabled);
+      if (item.priority_group !== undefined) current.priorityGroup = String(item.priority_group || "");
+      if (item.priority_rank !== undefined) current.priorityRank = numericValue(item.priority_rank, 0);
+      appState.cartPreferences[id] = current;
+    }
     renderCart();
     renderMyCoursesSchedule();
   } catch (error) {
@@ -2210,7 +2566,7 @@ function renderProgress(data) {
         ? pauseAcknowledged ? "已暂停" : "正在暂停"
       : statusNames[course.status] || course.status;
     side.append(element("span", `status-pill ${statusClass}`, statusLabel));
-    side.append(element("span", "p-attempts", `${course.attempts || 0} 次`));
+    side.append(element("span", "p-attempts", `${course.attempts || 0} 次 · 业务失败 ${course.failures || 0} 次`));
     row.append(info, side);
     fragment.append(row);
   }
@@ -2261,6 +2617,7 @@ async function loadEnrollProgress() {
     appState.loadingProgress = false;
   }
   const cartControlsChanged = applyProgressTaskState(data);
+  applyEnrollSettings(data);
   renderProgress(data);
   updateTaskIndicator();
   setPhasePresentation();
@@ -2385,6 +2742,14 @@ appElements.filterFullSwitch.addEventListener("change", () => {
 appElements.cacheModeSwitch?.addEventListener("change", () => {
   setCacheMode(appElements.cacheModeSwitch.checked);
 });
+appElements.pauseEnroll?.addEventListener("click", () => toggleEnrollPause(true));
+appElements.resumeEnroll?.addEventListener("click", () => toggleEnrollPause(false));
+for (const button of appElements.modeButtons || []) {
+  button.addEventListener("click", () => updateEnrollMode(button.dataset.enrollMode));
+}
+for (const input of [appElements.boostInterval, appElements.normalInterval, appElements.scanInterval, appElements.swapCourseSwitch, appElements.swapRiskConfirm, appElements.swapThreshold]) {
+  input?.addEventListener("change", saveEnrollSettings);
+}
 appElements.campusSelect.addEventListener("change", () => {
   switchCampus(appElements.campusSelect.value);
 });
@@ -2490,7 +2855,16 @@ window.addEventListener?.("pagehide", clearCacheRefreshTimer);
 
 async function initializeApp() {
   stripUiQuery();
+  try {
+    const saved = JSON.parse(window.localStorage?.getItem("szu-course-help.cart-preferences.v1") || "null");
+    if (saved && typeof saved === "object") appState.cartPreferences = saved;
+  } catch {}
   await loadSession(false);
+  if (appState.session?.logged_in) {
+    try { applyEnrollSettings(await planApi("/api/enroll/settings")); } catch (error) {
+      if (error.status !== 404) showToast(`抢课设置读取失败：${planErrorMessage(error)}`, true);
+    }
+  }
   startSessionPolling();
   appElements.brandLink.href = cleanPagePath("/");
   appElements.sessionLoginLink.href = cleanPagePath("/login");

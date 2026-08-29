@@ -751,6 +751,32 @@ def test_automatic_phase_starts_detached_enrollment_worker(tmp_path, monkeypatch
     assert starts == [1]
 
 
+def test_enrollment_start_explains_when_all_pending_courses_are_disabled(tmp_path, monkeypatch):
+    monkeypatch.setattr(cart_service, "db", DatabaseManager(str(tmp_path / "disabled-only.db")))
+    cart_service.add_course(
+        type(
+            "Course",
+            (),
+            {"id": "disabled", "type": "FANKC", "name": "已关闭自动抢课"},
+        )()
+    )
+    assert cart_service.update_course_preferences("disabled", auto_enabled=False)
+    set_logged_session(monkeypatch, batch_name="正选")
+    monkeypatch.setattr(app, "refresh_elective_batch", lambda *_args: "正选")
+    monkeypatch.setattr(
+        app,
+        "start_enroll_worker",
+        lambda: (_ for _ in ()).throw(AssertionError("disabled course must not start worker")),
+    )
+
+    response = client.post("/api/enroll/courses", json={"confirmed_phase": True})
+
+    assert response.status_code == 400
+    body = response.json()
+    assert body["error_code"] == "NO_ENABLED_PENDING_COURSE"
+    assert "自动抢课" in body["message"]
+
+
 def test_worker_start_failure_preserves_pending_cart(tmp_path, monkeypatch):
     db = DatabaseManager(str(tmp_path / "worker-start-error.db"))
     monkeypatch.setattr(cart_service, "db", db)

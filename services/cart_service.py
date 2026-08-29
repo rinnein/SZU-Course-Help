@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+from contextlib import suppress
 from typing import Any
 
 import database
@@ -53,6 +54,10 @@ def add_course(course: Any) -> dict[str, bool | str]:
     campus_code = str(getattr(course, "campus_code", "01") or "01").strip()
     if get_campus(campus_code) is None:
         return {"success": False, "message": "校区信息无效，无法加入购物车"}
+
+    if not getattr(course, "course_number", ""):
+        with suppress(AttributeError):
+            course.course_number = str(getattr(course, "id", ""))
 
     if db.add_course(course):
         return {"success": True, "message": "成功加入购物车"}
@@ -96,6 +101,11 @@ def get_all_sorted() -> list[dict]:
 def get_active_courses() -> list[dict]:
     """获取仍需抢课（PENDING/ENROLLING）的课程，供抢课循环使用。"""
     return db.get_active_courses()
+
+
+def update_course_preferences(course_id: str, **fields) -> bool:
+    """Update safe, user-controlled queue preferences for one course."""
+    return db.update_course_preferences(str(course_id or "").strip(), **fields)
 
 
 def update_status(course_id: str, status: str) -> bool:

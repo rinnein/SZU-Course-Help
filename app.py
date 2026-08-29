@@ -74,13 +74,16 @@ from services.course_service import (
 )
 from services.enroll_service import (
     get_enroll_progress,
+    get_enroll_settings,
     get_enroll_task_state,
     is_enroll_task_running,
     pause_enroll_task,
     remove_cart_course,
+    set_enroll_mode,
     resume_enroll_task,
     start_enroll_worker,
     stop_enroll_task,
+    update_enroll_settings,
 )
 from services.proxy_service import SCHOOL_HOST, clear_proxy_cookie_mirror
 from services.timetable_service import build_timetable
@@ -271,6 +274,13 @@ class CartCourse(BaseModel):
     is_conflict: str = Field(default="", max_length=8)
     is_full: str = Field(default="", max_length=8)
     status: str = Field(default="", max_length=16)
+    auto_enabled: bool = True
+    priority_group: str = Field(default="", max_length=256)
+    priority_rank: int = Field(default=0, ge=0, le=100000)
+    course_number: str = Field(default="", max_length=128)
+    time_signature: str = Field(default="", max_length=256)
+    number_of_selected: str = Field(default="", max_length=32)
+    class_capacity: str = Field(default="", max_length=32)
 
     @property
     def type(self) -> str:
@@ -282,6 +292,27 @@ class EnrollmentStartRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     confirmed_phase: bool = False
+
+
+class EnrollmentModeRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    mode: str = Field(pattern=r"^(boost|normal|scan)$")
+
+
+class EnrollmentSettingsRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    boost_interval_ms: int | None = Field(default=None, ge=0, le=300000)
+    normal_interval_ms: int | None = Field(default=None, ge=0, le=300000)
+    scan_interval_ms: int | None = Field(default=None, ge=0, le=300000)
+    switch_enabled: bool | None = None
+    switch_confirmed: bool | None = None
+    switch_threshold: int | None = Field(default=None, ge=0, le=1000)
+    swap_enabled: bool | None = None
+    swap_confirmed: bool | None = None
+    swap_threshold: int | None = Field(default=None, ge=0, le=1000)
+    mode: str | None = Field(default=None, pattern=r"^(boost|normal|scan)$")
 
 
 class CampusSwitchRequest(BaseModel):
@@ -368,6 +399,11 @@ def _cart_from_row(row: dict) -> CartCourse:
         course_name=row.get("course_name", ""),
         teacher_name=row.get("teacher_name", ""),
         status=row.get("status", ""),
+        auto_enabled=bool(row.get("auto_enabled", 1)),
+        priority_group=row.get("priority_group", ""),
+        priority_rank=row.get("priority_rank", 0),
+        course_number=row.get("course_number", ""),
+        time_signature=row.get("time_signature", ""),
     )
 
 
@@ -1234,6 +1270,17 @@ async def api_cart_sorted() -> list[CartCourse]:
     return [_cart_from_row(row) for row in cart_service.get_all_sorted()]
 
 
+@app.patch("/api/courses/{course_id}")
+async def api_cart_preferences(course_id: str, payload: dict):
+    if is_enroll_task_running():
+        return _api_error(409, "抢课任务运行中，暂不能修改清单", "TASK_RUNNING", retryable=False)
+    allowed = {"auto_enabled", "priority_group", "priority_rank"}
+    values = {key: payload[key] for key in allowed if key in payload}
+    if not values or not cart_service.update_course_preferences(course_id, **values):
+        return _api_error(400, "课程偏好无效或课程不存在", "INVALID_COURSE_PREFERENCE", retryable=False)
+    return {"success": True, "message": "课程偏好已更新"}
+
+
 @app.post("/api/enroll/courses")
 async def api_start_enroll(
     request: EnrollmentStartRequest,
@@ -1283,10 +1330,18 @@ async def api_start_enroll(
             status_code=400,
             content={"message": "请确认当前为复选、正选或补选阶段", "is_error": True},
         )
-    if not cart_service.get_courses_by_status("PENDING"):
+    if not any(
+        row.get("auto_enabled", 1)
+        for row in cart_service.get_courses_by_status("PENDING")
+    ):
         return JSONResponse(
             status_code=400,
-            content={"message": "购物车中没有待抢课程", "is_error": True},
+            content={
+                "message": "购物车中没有启用自动抢课的待抢课程，请先在清单中开启“自动抢课”",
+                "is_error": True,
+                "error_code": "NO_ENABLED_PENDING_COURSE",
+                "retryable": False,
+            },
         )
     try:
         worker_started = start_enroll_worker()
@@ -1313,6 +1368,43 @@ async def api_enroll_status():
         content=get_enroll_progress(),
         headers=get_no_cache_headers(),
     )
+
+
+@app.get("/api/enroll/settings")
+async def api_enroll_settings():
+    return get_enroll_settings()
+
+
+@app.patch("/api/enroll/settings")
+async def api_update_enroll_settings(request: EnrollmentSettingsRequest):
+    values = request.model_dump(exclude_none=True)
+    mode = values.pop("mode", None)
+    if "swap_enabled" in values:
+        values["switch_enabled"] = values.pop("swap_enabled")
+    if "swap_confirmed" in values:
+        values["switch_confirmed"] = values.pop("swap_confirmed")
+    if "swap_threshold" in values:
+        values["switch_threshold"] = values.pop("swap_threshold")
+    try:
+        settings = update_enroll_settings(**values)
+        if mode:
+            set_enroll_mode(mode)
+        return {**settings, "mode": mode or get_enroll_settings()["mode"]}
+    except (TypeError, ValueError):
+        return _api_error(400, "抢课设置无效", "INVALID_ENROLL_SETTINGS", retryable=False)
+
+
+@app.post("/api/enroll/mode")
+async def api_enroll_mode(request: EnrollmentModeRequest):
+    if not set_enroll_mode(request.mode):
+        return _api_error(400, "抢课模式无效", "INVALID_ENROLL_MODE", retryable=False)
+    settings = get_enroll_settings()
+    return {
+        "success": True,
+        "mode": request.mode,
+        "settings": settings,
+        "message": "抢课模式已切换",
+    }
 
 
 @app.post("/api/enroll/pause")
