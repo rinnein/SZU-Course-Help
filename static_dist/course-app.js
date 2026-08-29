@@ -163,6 +163,7 @@ const appElements = {
   enrollControlHint: document.querySelector("#enrollControlHint"),
   pauseEnroll: document.querySelector("#pauseEnroll"),
   resumeEnroll: document.querySelector("#resumeEnroll"),
+  stopEnroll: document.querySelector("#stopEnroll"),
   modeButtons: document.querySelectorAll("[data-enroll-mode]"),
   boostInterval: document.querySelector("#boostInterval"),
   normalInterval: document.querySelector("#normalInterval"),
@@ -384,6 +385,7 @@ function renderEnrollControls() {
   }
   if (appElements.pauseEnroll) appElements.pauseEnroll.disabled = !running || paused;
   if (appElements.resumeEnroll) appElements.resumeEnroll.disabled = !running || !paused;
+  if (appElements.stopEnroll) appElements.stopEnroll.disabled = !running || Boolean(appState.session?.task_stopping);
   for (const button of appElements.modeButtons || []) {
     const active = button.dataset.enrollMode === mode;
     button.classList.toggle("is-active", active);
@@ -1884,6 +1886,7 @@ function syncEnrollControls() {
     (item.status || "PENDING") === "PENDING" && preferenceFor(item).autoEnabled !== false
   ));
   appElements.openEnrollConfirm.disabled = !appState.grabPhase || running || !hasPending;
+  if (appElements.stopEnroll) appElements.stopEnroll.disabled = !running || stopping;
   if (running && stopping) {
     appElements.cartHint.textContent = appState.session?.task_stopping_reason
       || "待处理课程已清空，后台任务正在结束。";
@@ -2722,6 +2725,46 @@ async function toggleEnrollmentPause() {
   }
 }
 
+async function stopEnrollment() {
+  const taskRunning = Boolean(appState.progress?.running || appState.session?.task_running);
+  if (appState.taskControlPending || !taskRunning) return;
+  if (appState.progress?.stopping || appState.session?.task_stopping) return;
+  appState.taskControlPending = true;
+  if (appState.progress) renderProgress(appState.progress);
+  renderEnrollControls();
+  try {
+    const result = await api("/api/enroll/stop", {
+      method: "POST",
+      timeoutMs: SESSION_RECOVERY_TIMEOUT_MS,
+    });
+    if (appState.session) {
+      appState.session.task_stopping = true;
+      appState.session.task_stopping_reason = "用户请求停止抢课任务";
+    }
+    if (appState.progress) {
+      applyProgressTaskState({
+        ...appState.progress,
+        stopping: true,
+        stopping_reason: "用户请求停止抢课任务",
+      });
+    }
+    showToast(result.message || "已请求停止抢课，等待当前请求结束", false, true);
+    renderProgress(appState.progress);
+    renderEnrollControls();
+    await loadEnrollProgress();
+    await loadSession(false, false);
+  } catch (error) {
+    if (error.requiresManualLogin) showSessionDialog(error.message);
+    else if (!(error instanceof SessionExpiredError)) showToast(error.message, true);
+    await loadEnrollProgress();
+  } finally {
+    appState.taskControlPending = false;
+    if (appState.progress) renderProgress(appState.progress);
+    renderEnrollControls();
+    syncEnrollControls();
+  }
+}
+
 async function loadEnrollProgress() {
   if (appState.loadingProgress) return;
   appState.loadingProgress = true;
@@ -2934,6 +2977,7 @@ appElements.phaseConfirmation.addEventListener("change", () => {
 });
 appElements.startEnroll.addEventListener("click", startEnrollment);
 appElements.taskControlButton.addEventListener("click", toggleEnrollmentPause);
+appElements.stopEnroll?.addEventListener("click", stopEnrollment);
 appElements.openSchoolRaw?.addEventListener("click", () => {
   openSchoolRawPage();
 });

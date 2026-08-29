@@ -857,6 +857,17 @@ def test_pause_and_resume_enrollment_api(monkeypatch):
         enroll_service._release_enroll_task()
 
 
+def test_stop_enrollment_api_requests_graceful_shutdown():
+    assert enroll_service.reserve_enroll_task()
+    try:
+        response = client.post("/api/enroll/stop")
+        assert response.status_code == 202
+        assert response.json()["is_error"] is False
+        assert enroll_service.get_enroll_task_state()["stopping"] is True
+    finally:
+        enroll_service._release_enroll_task()
+
+
 def test_resume_keeps_task_paused_when_school_phase_is_no_longer_automatic(monkeypatch):
     monkeypatch.setattr(config, "token", "token")
     monkeypatch.setattr(config, "combined_cookie", "cookie")

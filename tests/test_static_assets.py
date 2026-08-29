@@ -53,6 +53,7 @@ def test_login_and_course_pages_expose_required_controls():
         "progressState",
         "progressNotice",
         "taskControlButton",
+        "stopEnroll",
         "sessionRecoveryBanner",
         "recoveryTitle",
         "recoveryDetail",
@@ -104,6 +105,10 @@ def test_course_page_exposes_pause_and_relogin_states():
 
     assert '"/api/enroll/pause"' in script
     assert '"/api/enroll/resume"' in script
+    assert '"/api/enroll/stop"' in script
+    assert "appState.session?.task_running" in script
+    assert "用户请求停止抢课任务" in script
+    assert "停止抢课" in script or 'id="stopEnroll"' in script
     assert "正在自动重新登录" in script
     assert "自动重新登录成功" in script
     assert '"/api/session/recover"' in script
